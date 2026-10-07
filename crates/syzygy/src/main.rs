@@ -1,6 +1,8 @@
 mod app;
 mod events;
+mod icons;
 mod identity;
+mod images;
 mod logging;
 mod login;
 mod page;
@@ -8,6 +10,7 @@ mod persist;
 mod session;
 mod settings;
 mod shell;
+mod style;
 
 use iced::window;
 

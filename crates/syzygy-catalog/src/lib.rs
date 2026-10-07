@@ -11,7 +11,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use std::future::Future;
 use std::sync::Arc;
-use syzygy_store::{CacheTier, DiskCache};
+use syzygy_store::{CacheResult, CacheTier, DiskCache};
 use syzygy_tidal::TidalClient;
 use syzygy_tidal::models::{HomePageResponse, HomePageSection};
 
@@ -85,6 +85,32 @@ impl Catalog {
                 sections,
                 cursor,
             }))
+        }
+    }
+
+    /// The bytes of a picture, from the disk cache when it's there (stale
+    /// is good enough: a cover doesn't change under its URL).
+    pub fn image(
+        &self,
+        url: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let url = url.to_string();
+        async move {
+            if let CacheResult::Fresh(bytes) | CacheResult::Stale(bytes) =
+                cache.get(&url, CacheTier::Image).await
+            {
+                return Ok(bytes);
+            }
+            let bytes = tidal
+                .get_image(&url)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            if let Err(e) = cache.put(&url, &bytes, CacheTier::Image, &["image"]).await {
+                log::warn!("Could not cache an image: {e}");
+            }
+            Ok(bytes)
         }
     }
 }

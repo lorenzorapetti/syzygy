@@ -2,9 +2,9 @@
 
 use iced::keyboard::{self, key};
 use iced::widget::{column, container, text};
-use iced::{Color, Element, Event, Length, Subscription, Task, Theme, event, mouse, window};
+use iced::{Element, Event, Length, Subscription, Task, Theme, event, mouse, window};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use syzygy_catalog::Catalog;
 use syzygy_store::{DiskCache, Store};
 use syzygy_tidal::models::{AuthTokens, SessionInfo};
@@ -12,12 +12,14 @@ use syzygy_tidal::{LoginMethod, TidalClient};
 
 use crate::events::EventSource;
 use crate::identity::{DISPLAY_NAME, Paths};
+use crate::images::{self, Images};
 use crate::login;
 use crate::page::{self, PageId, Route};
 use crate::persist;
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::shell::{self, Shell};
+use crate::style;
 
 /// What iced runs. Without a master key there are no `Services`, so a
 /// failed boot has nothing but the fatal error screen.
@@ -35,6 +37,7 @@ pub struct App {
     /// The signed-in Session, as last saved. `None` on the login screen.
     session: Option<Session>,
     tidal_events: EventSource<syzygy_tidal::Event>,
+    images: Images,
     phase: Phase,
 }
 
@@ -64,6 +67,7 @@ pub enum Message {
     /// The window came back into focus.
     WindowFocused,
     Shell(shell::Message),
+    Images(images::Message),
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
@@ -101,6 +105,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         settings,
         session: None,
         tidal_events: EventSource::new("tidal", receiver),
+        images: Images::new(images::BYTE_CAP),
         phase: Phase::Login(Box::default()),
     };
     // A stored Session opens straight into the Shell; the account refresh
@@ -147,7 +152,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         State::Fatal(error) => fatal(error),
         State::Running(app) => match &app.phase {
             Phase::Login(login) => login.view().map(Message::Login),
-            Phase::Shell(shell) => shell.view(),
+            Phase::Shell(shell) => shell.view(&app.images),
         },
     }
 }
@@ -159,9 +164,15 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         // Always on: the receiver can be taken only once (ADR 0003).
         State::Running(app) => {
             let tidal = app.tidal_events.subscription().map(Message::Tidal);
+            // Frames only while a cover fades in; otherwise nothing redraws.
+            let frames = if app.images.is_animating() {
+                window::frames().map(|at| Message::Images(images::Message::Frame(at)))
+            } else {
+                Subscription::none()
+            };
             match app.phase {
                 Phase::Shell(_) => {
-                    Subscription::batch([close, tidal, event::listen_with(shell_events)])
+                    Subscription::batch([close, tidal, frames, event::listen_with(shell_events)])
                 }
                 Phase::Login(_) => Subscription::batch([close, tidal]),
             }
@@ -174,15 +185,7 @@ pub fn title(_state: &State) -> String {
 }
 
 pub fn theme(_state: &State) -> Theme {
-    Theme::custom(
-        DISPLAY_NAME,
-        iced::theme::Palette {
-            background: Color::from_rgb8(0x13, 0x0F, 0x1A),
-            text: Color::WHITE,
-            primary: Color::from_rgb8(0xA8, 0x55, 0xF7),
-            ..iced::theme::Palette::DARK
-        },
-    )
+    style::theme(DISPLAY_NAME)
 }
 
 impl App {
@@ -206,6 +209,10 @@ impl App {
             Message::Forward => self.in_shell(Shell::forward),
             Message::WindowFocused => self.in_shell(Shell::focused),
             Message::Shell(message) => self.in_shell(|shell, _| shell.update(message)),
+            Message::Images(message) => {
+                let effects = self.images.update(message);
+                Task::batch(effects.into_iter().map(|effect| self.run_images(effect)))
+            }
             Message::Tidal(syzygy_tidal::Event::TokensRefreshed(tokens)) => {
                 self.update_session(|session| session.tokens = tokens)
             }
@@ -323,6 +330,27 @@ impl App {
         ])
     }
 
+    fn run_images(&self, effect: images::Effect) -> Task<Message> {
+        match effect {
+            images::Effect::Fetch(url) => {
+                let catalog = self.services.catalog.clone();
+                Task::perform(images::fetch(catalog, url.clone()), move |result| {
+                    Message::Images(images::Message::Decoded(url.clone(), result))
+                })
+            }
+            images::Effect::Allocate(url, handle) => {
+                iced::widget::image::allocate(handle).map(move |result| {
+                    let result = result.map_err(Arc::new);
+                    Message::Images(images::Message::Allocated(
+                        url.clone(),
+                        Instant::now(),
+                        result,
+                    ))
+                })
+            }
+        }
+    }
+
     fn run_login(&mut self, effects: Vec<login::Effect>) -> Task<Message> {
         let tasks: Vec<_> = effects
             .into_iter()
@@ -404,9 +432,7 @@ fn fatal(error: &syzygy_store::Error) -> Element<'_, Message> {
              its key file, so it has nowhere safe to keep your data. Nothing \
              has been stored unencrypted.",
         ),
-        text(error.to_string())
-            .size(13)
-            .color(Color::from_rgb8(0x9C, 0x92, 0xAD)),
+        text(error.to_string()).size(13).color(style::TEXT_MUTED),
     ]
     .spacing(12)
     .max_width(520);

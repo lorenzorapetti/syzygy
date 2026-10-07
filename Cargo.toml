@@ -18,6 +18,7 @@ base64 = "0.23"
 dirs = "7"
 flexi_logger = "0.31"
 futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 iced = { version = "0.14.0", features = ["tokio", "image", "svg", "lazy", "advanced", "qr_code"] }
 keyring = "4"
 log = "0.4"

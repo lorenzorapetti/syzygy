@@ -6,11 +6,16 @@
 pub mod home;
 mod unbuilt;
 
-use iced::widget::{button, column, container, space, text};
-use iced::{Border, Element, Length, Task, Theme};
+use iced::widget::{button, column, container, text};
+use iced::{Element, Length, Task};
 use std::sync::Arc;
 use syzygy_catalog::Read;
 use syzygy_catalog::home_feed::Cover;
+
+use crate::images::{self, Images};
+
+/// How round a cover's corners are.
+const COVER_RADIUS: f32 = 4.0;
 
 /// Where a Page is. Plain data, so the Back stack can rebuild a Page from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +80,8 @@ pub enum Action {
     /// Run a widget operation, such as a scroll. Its messages come back as
     /// this Page's.
     Run(Task<Message>),
+    /// Load these covers into the image cache.
+    FetchImages(Vec<String>),
 }
 
 /// A Catalog read a Page wants. The Shell runs it and maps what comes back
@@ -101,6 +108,8 @@ pub enum Page {
 #[derive(Debug, Clone)]
 pub enum Message {
     Home(home::Message),
+    /// A cover on a Page with no messages of its own came into view.
+    CoverWanted(String),
 }
 
 impl Page {
@@ -132,7 +141,8 @@ impl Page {
     pub fn update(&mut self, message: Message) -> Action {
         match (self, message) {
             (Page::Home(state), Message::Home(message)) => state.update(message),
-            (Page::Unbuilt(_), _) => Action::None,
+            (_, Message::CoverWanted(url)) => Action::FetchImages(vec![url]),
+            (Page::Unbuilt(_), Message::Home(_)) => Action::None,
         }
     }
 
@@ -144,10 +154,10 @@ impl Page {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
         match self {
-            Page::Home(state) => state.view().map(Message::Home),
-            Page::Unbuilt(state) => state.view(),
+            Page::Home(state) => state.view(images).map(Message::Home),
+            Page::Unbuilt(state) => state.view(images),
         }
     }
 }
@@ -205,22 +215,21 @@ impl<T> Remote<T> {
     }
 }
 
-/// Where a cover goes until covers load.
-pub fn cover_placeholder<'a, Message: 'a>(size: f32) -> Element<'a, Message> {
-    container(space())
-        .width(size)
-        .height(size)
-        .style(placeholder)
-        .into()
-}
-
-fn placeholder(theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(theme.extended_palette().background.weak.color.into()),
-        border: Border {
-            radius: 4.0.into(),
-            ..Border::default()
-        },
-        ..container::Style::default()
+/// A `size` square cover, fetched at twice that for sharp HiDPI. Until it's
+/// loaded a placeholder, which asks for it with `wanted` as it comes into
+/// view. Just the placeholder when there's no cover.
+pub fn cover<'a, Message: Clone + 'a>(
+    images: &'a Images,
+    cover: Option<&Cover>,
+    size: f32,
+    wanted: impl FnOnce(String) -> Message,
+) -> Element<'a, Message> {
+    match cover {
+        Some(cover) => {
+            let url = cover.url((size * 2.0) as u32);
+            let wanted = wanted(url.clone());
+            images.cover(&url, size, COVER_RADIUS, wanted)
+        }
+        None => images::placeholder(size, COVER_RADIUS),
     }
 }

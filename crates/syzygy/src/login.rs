@@ -4,15 +4,14 @@
 //! app to run, so the flow can be tested without TIDAL.
 
 use iced::widget::{button, column, container, qr_code, row, text, text_input};
-use iced::{Alignment, Color, Element, Length, task};
+use iced::{Alignment, Element, Length, task};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use syzygy_tidal::auth::{self, PastedInputError, PkceParams};
 use syzygy_tidal::models::{AuthTokens, DeviceAuthResponse};
 use syzygy_tidal::{LoginMethod, TidalClient};
 
-const MUTED: Color = Color::from_rgb8(0x9C, 0x92, 0xAD);
-const ERROR: Color = Color::from_rgb8(0xFF, 0x66, 0x66);
+use crate::style;
 
 pub struct State {
     screen: Screen,
@@ -336,7 +335,8 @@ impl Browser {
         if let Err(e) = &self.pkce {
             return column![
                 title("Sign in to TIDAL"),
-                text(format!("Browser login isn't available in this build: {e}")).color(ERROR),
+                text(format!("Browser login isn't available in this build: {e}"))
+                    .color(style::ERROR),
                 use_code,
             ];
         }
@@ -344,7 +344,7 @@ impl Browser {
         if !self.opened {
             return column![
                 title("Sign in to TIDAL"),
-                text("Sign in on TIDAL's website, in your own browser.").color(MUTED),
+                text("Sign in on TIDAL's website, in your own browser.").color(style::TEXT_MUTED),
                 button(text("Sign in with browser"))
                     .padding([10, 20])
                     .style(button::primary)
@@ -375,7 +375,7 @@ impl Browser {
 
         let error = self.error.as_ref().map(|error| match error {
             BrowserError::Denied(description) => column![
-                text(format!("TIDAL said: {description}")).color(ERROR),
+                text(format!("TIDAL said: {description}")).color(style::ERROR),
                 button(text("Start over"))
                     .style(button::secondary)
                     .on_press(Message::StartOver),
@@ -383,8 +383,8 @@ impl Browser {
             .spacing(8),
             BrowserError::ExchangeFailed(e) => column![
                 text("Signing in didn't work. Paste the address again, or start over.")
-                    .color(ERROR),
-                text(e.clone()).size(12).color(MUTED),
+                    .color(style::ERROR),
+                text(e.clone()).size(12).color(style::TEXT_MUTED),
                 button(text("Start over"))
                     .style(button::secondary)
                     .on_press(Message::StartOver),
@@ -398,7 +398,7 @@ impl Browser {
                 "Sign in on the page that opened in your browser. TIDAL then shows a \
                  page that doesn't load: copy its address and paste it here.",
             )
-            .color(MUTED),
+            .color(style::TEXT_MUTED),
             row![field, paste].spacing(8),
             sign_in,
         ]
@@ -427,7 +427,7 @@ impl DeviceCode {
             title("Sign in with a code"),
             text("Device-code login can't play lossless.")
                 .size(13)
-                .color(MUTED),
+                .color(style::TEXT_MUTED),
         ]
         .spacing(4)
         .align_x(Alignment::Center);
@@ -452,7 +452,7 @@ impl DeviceCode {
             .push(
                 text("Waiting for you to enter the code…")
                     .size(13)
-                    .color(MUTED),
+                    .color(style::TEXT_MUTED),
             )
             .push(cancel),
             DeviceCode::Expired => column![
@@ -465,8 +465,8 @@ impl DeviceCode {
             ],
             DeviceCode::Failed(e) => column![
                 header,
-                text("Couldn't sign in with a code.").color(ERROR),
-                text(e.as_str()).size(12).color(MUTED),
+                text("Couldn't sign in with a code.").color(style::ERROR),
+                text(e.as_str()).size(12).color(style::TEXT_MUTED),
                 button(text("Get a new code"))
                     .style(button::primary)
                     .on_press(Message::GetNewCode),

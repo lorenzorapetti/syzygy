@@ -4890,6 +4890,7 @@ dependencies = [
  "flexi_logger",
  "futures",
  "iced",
+ "image",
  "log",
  "open",
  "reqwest",

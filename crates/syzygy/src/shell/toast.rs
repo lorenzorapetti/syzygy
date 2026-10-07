@@ -5,6 +5,9 @@ use iced::widget::{button, column, container, row, text};
 use iced::{Alignment, Border, Element, Length, Task, Theme};
 use std::time::Duration;
 
+use crate::icons::{Icon, icon};
+use crate::style;
+
 /// How long a toast stays up.
 const DURATION: Duration = Duration::from_secs(3);
 /// The most toasts on screen; a new one pushes the oldest out.
@@ -52,7 +55,10 @@ impl Toasts {
     /// The stack, bottom right. Each toast's close button dismisses it.
     pub fn view(&self) -> Element<'_, ToastId> {
         let toasts = self.shown.iter().map(|toast| {
-            let close = button(text("×")).on_press(toast.id).style(button::text);
+            let close = button(icon(Icon::X, 16.0, style::TEXT_SECONDARY))
+                .padding(4)
+                .on_press(toast.id)
+                .style(style::icon_button);
             let kind = toast.kind;
             container(
                 row![text(&toast.text).size(14).width(Length::Fill), close]
@@ -61,7 +67,7 @@ impl Toasts {
             )
             .padding([8, 12])
             .width(380)
-            .style(move |theme: &Theme| style(theme, kind))
+            .style(move |theme: &Theme| frame(theme, kind))
             .into()
         });
         container(column(toasts).spacing(8))
@@ -72,15 +78,14 @@ impl Toasts {
     }
 }
 
-fn style(theme: &Theme, kind: Kind) -> container::Style {
-    let palette = theme.extended_palette();
+fn frame(_theme: &Theme, kind: Kind) -> container::Style {
     let accent = match kind {
-        Kind::Info => palette.background.strong.color,
-        Kind::Error => palette.danger.base.color,
+        Kind::Info => style::BORDER_SUBTLE,
+        Kind::Error => style::ERROR,
     };
     container::Style {
-        background: Some(palette.background.weak.color.into()),
-        text_color: Some(palette.background.weak.text),
+        background: Some(style::BG_ELEVATED.into()),
+        text_color: Some(style::TEXT_PRIMARY),
         border: Border {
             color: accent,
             width: 1.0,

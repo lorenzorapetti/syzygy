@@ -119,6 +119,20 @@ impl TidalClient {
         session.login_method = login_method;
     }
 
+    /// The bytes of a picture on TIDAL's image CDN. Unauthenticated and
+    /// outside the rate gate: images aren't API traffic.
+    pub async fn get_image(&self, url: &str) -> Result<Vec<u8>, Error> {
+        let response = self.http().get(url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: String::new(),
+            });
+        }
+        Ok(response.bytes().await?.to_vec())
+    }
+
     pub(crate) fn http(&self) -> &reqwest::Client {
         &self.inner.http
     }

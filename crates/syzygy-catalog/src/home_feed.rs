@@ -58,6 +58,31 @@ pub enum Cover {
     Url(String),
 }
 
+impl Cover {
+    /// Where to fetch this picture at least `size` pixels square, snapped
+    /// up to the next size TIDAL serves (sone's `getTidalImageUrl` and
+    /// friends). Promos come in one size and URLs as given.
+    pub fn url(&self, size: u32) -> String {
+        let (id, size) = match self {
+            Cover::Image(id) => (id, square(size, [160, 320, 640, 1280])),
+            Cover::Artist(id) => (id, square(size, [160, 320, 480, 750])),
+            Cover::Promo(id) => (id, "550x400".to_string()),
+            Cover::Url(url) => return url.clone(),
+        };
+        let path = id.replace('-', "/");
+        format!("https://resources.tidal.com/images/{path}/{size}.jpg")
+    }
+}
+
+/// The smallest of `sizes` at least `size` wide, or the largest.
+fn square(size: u32, sizes: [u32; 4]) -> String {
+    let side = sizes
+        .into_iter()
+        .find(|&side| size <= side)
+        .unwrap_or(sizes[3]);
+    format!("{side}x{side}")
+}
+
 /// What clicking a card does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -554,5 +579,51 @@ mod tests {
             }]
         );
         assert_eq!(feed.cursor.as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn a_cover_url_snaps_to_the_next_size_tidal_serves() {
+        let album = Cover::Image("aaaa-bbbb-cccc".to_string());
+        assert_eq!(
+            album.url(100),
+            "https://resources.tidal.com/images/aaaa/bbbb/cccc/160x160.jpg"
+        );
+        assert_eq!(
+            album.url(320),
+            "https://resources.tidal.com/images/aaaa/bbbb/cccc/320x320.jpg"
+        );
+        assert_eq!(
+            album.url(500),
+            "https://resources.tidal.com/images/aaaa/bbbb/cccc/640x640.jpg"
+        );
+        assert_eq!(
+            album.url(2000),
+            "https://resources.tidal.com/images/aaaa/bbbb/cccc/1280x1280.jpg"
+        );
+    }
+
+    #[test]
+    fn artist_pictures_have_their_own_sizes() {
+        let artist = Cover::Artist("pp-qq".to_string());
+        assert_eq!(
+            artist.url(400),
+            "https://resources.tidal.com/images/pp/qq/480x480.jpg"
+        );
+        assert_eq!(
+            artist.url(640),
+            "https://resources.tidal.com/images/pp/qq/750x750.jpg"
+        );
+    }
+
+    #[test]
+    fn promos_come_in_one_size_and_urls_as_given() {
+        assert_eq!(
+            Cover::Promo("pr-1".to_string()).url(160),
+            "https://resources.tidal.com/images/pr/1/550x400.jpg"
+        );
+        assert_eq!(
+            Cover::Url("https://img/small.jpg".to_string()).url(1280),
+            "https://img/small.jpg"
+        );
     }
 }

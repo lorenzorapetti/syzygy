@@ -5,14 +5,17 @@ use iced::widget::{
     self as widget, Text, button, column, container, operation, row, scrollable, sensor, space,
     text,
 };
-use iced::{Alignment, Border, Color, Element, Length, Theme};
+use iced::{Alignment, Color, Element, Length, Theme};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use syzygy_catalog::home_feed::{Card, Layout, Section, Tab, Target};
 use syzygy_catalog::{HomeFeed, Read};
 
-use super::{Action, Load, Preview, Remote, Route, cover_placeholder};
+use super::{Action, Load, Preview, Remote, Route, cover};
+use crate::icons::{Icon, icon};
+use crate::images::Images;
+use crate::style;
 
 /// The feed tab Home opens on.
 pub const DEFAULT_TAB: &str = "static";
@@ -75,6 +78,8 @@ pub enum Message {
     /// An arrow: a page of cards left (-1) or right (1).
     ScrollRow(usize, f32),
     SelectTab(String),
+    /// A card's cover came into view.
+    CoverWanted(String),
     Open(Route),
     Retry,
 }
@@ -179,6 +184,7 @@ impl State {
             }
             Message::SelectTab(_) => Action::None,
             Message::Open(route) => Action::Navigate(route),
+            Message::CoverWanted(url) => Action::FetchImages(vec![url]),
             Message::Retry => {
                 self.feed = Remote::Loading;
                 self.load()
@@ -223,7 +229,7 @@ impl State {
         }
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
         let body = self.feed.view(Message::Retry, |feed| {
             if feed.sections.is_empty() {
                 return text("Nothing to show here yet")
@@ -234,7 +240,7 @@ impl State {
                 .sections
                 .iter()
                 .enumerate()
-                .map(|(index, s)| section(index, s, self.rows.get(&index)));
+                .map(|(index, s)| section(index, s, self.rows.get(&index), images));
             let mut page = column(sections).spacing(32);
             if matches!(self.more, More::Loading) {
                 page = page.push(text("Loading…").style(text::secondary));
@@ -278,9 +284,10 @@ fn section<'a>(
     index: usize,
     section: &'a Section,
     scroll: Option<&RowScroll>,
+    images: &'a Images,
 ) -> Element<'a, Message> {
     match section.layout {
-        Layout::Shortcuts => shortcuts(&section.cards),
+        Layout::Shortcuts => shortcuts(&section.cards, images),
         Layout::Row => {
             let scroll = scroll.copied().unwrap_or_default();
             let content = row_width(section.cards.len());
@@ -289,7 +296,12 @@ fn section<'a>(
             let can_right =
                 scroll.width == 0.0 || scroll.offset + scroll.width < content - SCROLL_SLACK;
             let arrow = |glyph, step, enabled: bool| {
-                button(container(text(glyph).size(20)).center(32))
+                let color = if enabled {
+                    style::TEXT_PRIMARY
+                } else {
+                    style::TEXT_DISABLED
+                };
+                button(container(icon(glyph, 18.0, color)).center(32))
                     .padding(0)
                     .style(row_arrow)
                     .on_press_maybe(enabled.then_some(Message::ScrollRow(index, step)))
@@ -297,12 +309,13 @@ fn section<'a>(
             let header = row![
                 text(&section.title).size(22),
                 space::horizontal(),
-                arrow("‹", -1.0, can_left),
-                arrow("›", 1.0, can_right),
+                arrow(Icon::ChevronLeft, -1.0, can_left),
+                arrow(Icon::ChevronRight, 1.0, can_right),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
-            let cards = scrollable(row(section.cards.iter().map(card)).spacing(CARD_GAP))
+            let cards = section.cards.iter().map(|c| card(c, images));
+            let cards = scrollable(row(cards).spacing(CARD_GAP))
                 .id(row_id(index))
                 .direction(scrollable::Direction::Horizontal(
                     scrollable::Scrollbar::hidden(),
@@ -343,9 +356,10 @@ fn row_page(width: f32) -> f32 {
 }
 
 /// The quick-access grid.
-fn shortcuts(cards: &[Card]) -> Element<'_, Message> {
+fn shortcuts<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Message> {
     let rows = cards.chunks(SHORTCUTS_PER_ROW).map(|chunk| {
-        let mut tiles: Vec<Element<'_, Message>> = chunk.iter().map(shortcut).collect();
+        let mut tiles: Vec<Element<'_, Message>> =
+            chunk.iter().map(|card| shortcut(card, images)).collect();
         // Keep the last row's tiles the width of the others.
         tiles.extend((chunk.len()..SHORTCUTS_PER_ROW).map(|_| space::horizontal().into()));
         row(tiles).spacing(12).into()
@@ -353,11 +367,16 @@ fn shortcuts(cards: &[Card]) -> Element<'_, Message> {
     column(rows).spacing(12).into()
 }
 
-fn shortcut(card: &Card) -> Element<'_, Message> {
+fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     let title = text(&card.title).size(13).wrapping(text::Wrapping::None);
     button(
         row![
-            cover_placeholder(SHORTCUT_HEIGHT),
+            cover(
+                images,
+                card.cover.as_ref(),
+                SHORTCUT_HEIGHT,
+                Message::CoverWanted
+            ),
             container(title).clip(true).padding([0, 12]),
         ]
         .align_y(Alignment::Center),
@@ -369,7 +388,7 @@ fn shortcut(card: &Card) -> Element<'_, Message> {
     .into()
 }
 
-fn card<'a>(card: &'a Card) -> Element<'a, Message> {
+fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     let line = |line: Text<'a>| {
         container(line.wrapping(text::Wrapping::None))
             .width(CARD_WIDTH)
@@ -377,7 +396,12 @@ fn card<'a>(card: &'a Card) -> Element<'a, Message> {
     };
     button(
         column![
-            cover_placeholder(CARD_WIDTH),
+            cover(
+                images,
+                card.cover.as_ref(),
+                CARD_WIDTH,
+                Message::CoverWanted
+            ),
             line(text(&card.title).size(14)),
             line(text(&card.subtitle).size(12).style(text::secondary)),
         ]
@@ -422,54 +446,44 @@ fn route(card: &Card) -> Option<Route> {
     }
 }
 
-fn selected_tab(theme: &Theme, _status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
-    pill(palette.background.base.text, palette.background.base.color)
+fn selected_tab(_theme: &Theme, _status: button::Status) -> button::Style {
+    pill(style::TEXT_PRIMARY, style::BG_BASE)
 }
 
-fn unselected_tab(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
+fn unselected_tab(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
-        button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
-        _ => palette.background.weak.color,
+        button::Status::Hovered | button::Status::Pressed => style::BG_BUTTON_HOVER,
+        _ => style::BG_BUTTON,
     };
-    pill(background, palette.background.base.text)
+    pill(background, style::TEXT_PRIMARY)
 }
 
 fn pill(background: Color, text_color: Color) -> button::Style {
     button::Style {
         background: Some(background.into()),
         text_color,
-        border: Border {
-            radius: 18.0.into(),
-            ..Border::default()
-        },
+        border: style::rounded(18.0),
         ..button::Style::default()
     }
 }
 
-fn shortcut_tile(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
+fn shortcut_tile(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
-        button::Status::Hovered | button::Status::Pressed => palette.background.strong.color,
-        _ => palette.background.weakest.color,
+        button::Status::Hovered | button::Status::Pressed => style::BG_SURFACE_HOVER,
+        _ => style::BG_SURFACE,
     };
     button::Style {
         background: Some(background.into()),
-        text_color: palette.background.base.text,
-        border: Border {
-            radius: 4.0.into(),
-            ..Border::default()
-        },
+        text_color: style::TEXT_PRIMARY,
+        border: style::rounded(4.0),
         ..button::Style::default()
     }
 }
 
-fn card_button(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
+fn card_button(_theme: &Theme, status: button::Status) -> button::Style {
     let text_color = match status {
-        button::Status::Hovered | button::Status::Pressed => palette.primary.base.color,
-        _ => palette.background.base.text,
+        button::Status::Hovered | button::Status::Pressed => style::ACCENT,
+        _ => style::TEXT_PRIMARY,
     };
     button::Style {
         background: None,
@@ -478,26 +492,15 @@ fn card_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-fn row_arrow(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
-    let (background, text_color) = match status {
-        button::Status::Disabled => (None, palette.background.strong.color),
-        button::Status::Hovered | button::Status::Pressed => (
-            Some(palette.background.strong.color.into()),
-            palette.background.base.text,
-        ),
-        button::Status::Active => (
-            Some(palette.background.weak.color.into()),
-            palette.background.base.text,
-        ),
+fn row_arrow(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Disabled => None,
+        button::Status::Hovered | button::Status::Pressed => Some(style::BG_BUTTON_HOVER.into()),
+        button::Status::Active => Some(style::BG_BUTTON.into()),
     };
     button::Style {
         background,
-        text_color,
-        border: Border {
-            radius: 16.0.into(),
-            ..Border::default()
-        },
+        border: style::rounded(16.0),
         ..button::Style::default()
     }
 }

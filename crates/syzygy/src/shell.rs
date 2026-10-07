@@ -8,12 +8,15 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use iced::task;
 use iced::widget::{button, column, container, operation, row, scrollable, space, stack, text};
-use iced::{Alignment, Border, Color, Element, Length, Task, Theme};
+use iced::{Alignment, Element, Length, Task, Theme};
 use syzygy_catalog::{Catalog, HomeFeed, Read};
 
 use crate::app::{self, Services};
+use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
+use crate::images::{self, Images};
 use crate::page::{self, Action, Load, Page, PageId, Route};
+use crate::style;
 use back_stack::{BackStack, Entry};
 use toast::{Kind, ToastId, Toasts};
 
@@ -148,6 +151,9 @@ impl Shell {
     fn run_action(&mut self, action: Action, services: &Services) -> Task<app::Message> {
         match action {
             Action::None => Task::none(),
+            Action::FetchImages(urls) => {
+                Task::done(app::Message::Images(images::Message::Wanted(urls)))
+            }
             Action::Navigate(route) => self.navigate(route, services),
             Action::Run(task) => {
                 let id = self.current.id;
@@ -171,12 +177,12 @@ impl Shell {
         }
     }
 
-    pub fn view(&self) -> Element<'_, app::Message> {
+    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, app::Message> {
         let id = self.current.id;
         let page = container(
             self.current
                 .page
-                .view()
+                .view(images)
                 .map(move |m| app::Message::Page(id, m)),
         )
         .max_width(MAX_PAGE_WIDTH)
@@ -199,21 +205,38 @@ impl Shell {
 
     /// Back and forward, search and the avatar.
     fn header(&self) -> Element<'_, app::Message> {
-        let back = button(text("‹").size(20))
-            .on_press_maybe(self.back_stack.can_go_back().then_some(app::Message::Back))
-            .style(button::text);
-        let forward = button(text("›").size(20))
-            .on_press_maybe(
-                self.back_stack
-                    .can_go_forward()
-                    .then_some(app::Message::Forward),
-            )
-            .style(button::text);
-        let search = container(text("Search").size(14).style(text::secondary))
-            .padding([8, 14])
-            .width(320)
-            .style(search_box);
-        let avatar = container(space()).width(32).height(32).style(avatar);
+        let step = |glyph, message: Option<app::Message>| {
+            let color = match message {
+                Some(_) => style::TEXT_PRIMARY,
+                None => style::TEXT_DISABLED,
+            };
+            button(container(icon(glyph, 20.0, color)).center(32))
+                .padding(0)
+                .on_press_maybe(message)
+                .style(style::icon_button)
+        };
+        let back = step(
+            Icon::ChevronLeft,
+            self.back_stack.can_go_back().then_some(app::Message::Back),
+        );
+        let forward = step(
+            Icon::ChevronRight,
+            self.back_stack
+                .can_go_forward()
+                .then_some(app::Message::Forward),
+        );
+        let search = container(
+            row![
+                icon(Icon::Search, 16.0, style::TEXT_MUTED),
+                text("Search").size(14).color(style::TEXT_MUTED),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .padding([8, 14])
+        .width(320)
+        .style(search_box);
+        let avatar = images::placeholder(32.0, 16.0);
 
         container(
             row![back, forward, search, space::horizontal(), avatar]
@@ -251,16 +274,26 @@ impl Current {
 
 /// The sidebar frame. The Library lists land here.
 fn sidebar<'a>() -> Element<'a, app::Message> {
-    let home = button(text("Home"))
-        .on_press(app::Message::Navigate(Route::home()))
-        .style(button::text)
-        .width(Length::Fill);
-    let body = column![
-        text(DISPLAY_NAME).size(22),
-        home,
-        text("Your Library").size(13).style(text::secondary),
+    let home = button(
+        row![
+            icon(Icon::House, 20.0, style::TEXT_PRIMARY),
+            text("Home").size(14)
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+    )
+    .padding([8, 12])
+    .on_press(app::Message::Navigate(Route::home()))
+    .style(nav_item)
+    .width(Length::Fill);
+    let library = row![
+        icon(Icon::Library, 20.0, style::TEXT_SECONDARY),
+        text("Your Library").size(13).color(style::TEXT_SECONDARY),
     ]
-    .spacing(16);
+    .spacing(12)
+    .padding([0, 12])
+    .align_y(Alignment::Center);
+    let body = column![text(DISPLAY_NAME).size(22), home, library].spacing(16);
     container(body)
         .padding(16)
         .width(SIDEBAR_WIDTH)
@@ -269,29 +302,30 @@ fn sidebar<'a>() -> Element<'a, app::Message> {
         .into()
 }
 
-fn sidebar_frame(theme: &Theme) -> container::Style {
+fn sidebar_frame(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(theme.extended_palette().background.weakest.color.into()),
+        background: Some(style::BG_SIDEBAR.into()),
         ..container::Style::default()
     }
 }
 
-fn search_box(theme: &Theme) -> container::Style {
-    placeholder(theme, 18.0)
+fn nav_item(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(style::HL_FAINT.into()),
+        button::Status::Active | button::Status::Disabled => None,
+    };
+    button::Style {
+        background,
+        text_color: style::TEXT_PRIMARY,
+        border: style::rounded(6.0),
+        ..button::Style::default()
+    }
 }
 
-fn avatar(theme: &Theme) -> container::Style {
-    placeholder(theme, 16.0)
-}
-
-fn placeholder(theme: &Theme, radius: f32) -> container::Style {
+fn search_box(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(theme.extended_palette().background.weak.color.into()),
-        border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: radius.into(),
-        },
+        background: Some(style::BG_INSET.into()),
+        border: style::rounded(18.0),
         ..container::Style::default()
     }
 }
