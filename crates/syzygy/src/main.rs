@@ -3,9 +3,11 @@ mod events;
 mod identity;
 mod logging;
 mod login;
+mod page;
 mod persist;
 mod session;
 mod settings;
+mod shell;
 
 use iced::window;
 

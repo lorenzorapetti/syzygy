@@ -4888,11 +4888,27 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "flexi_logger",
+ "futures",
  "iced",
  "log",
  "open",
  "reqwest",
  "serde",
+ "serde_json",
+ "syzygy-catalog",
+ "syzygy-store",
+ "syzygy-tidal",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "syzygy-catalog"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "log",
  "serde_json",
  "syzygy-store",
  "syzygy-tidal",

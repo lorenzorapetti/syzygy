@@ -1,19 +1,23 @@
 //! The iced application: state, messages, `update`, `view`.
 
+use iced::keyboard::{self, key};
 use iced::widget::{column, container, text};
-use iced::{Color, Element, Length, Subscription, Task, Theme, window};
+use iced::{Color, Element, Event, Length, Subscription, Task, Theme, event, mouse, window};
 use std::sync::Arc;
 use std::time::Duration;
-use syzygy_store::Store;
+use syzygy_catalog::Catalog;
+use syzygy_store::{DiskCache, Store};
 use syzygy_tidal::models::{AuthTokens, SessionInfo};
 use syzygy_tidal::{LoginMethod, TidalClient};
 
 use crate::events::EventSource;
 use crate::identity::{DISPLAY_NAME, Paths};
 use crate::login;
+use crate::page::{self, PageId, Route};
 use crate::persist;
 use crate::session::Session;
 use crate::settings::Settings;
+use crate::shell::{self, Shell};
 
 /// What iced runs. Without a master key there are no `Services`, so a
 /// failed boot has nothing but the fatal error screen.
@@ -37,8 +41,7 @@ pub struct App {
 /// What the window shows.
 enum Phase {
     Login(Box<login::State>),
-    /// The main window. Empty until the Shell's Pages land.
-    Shell,
+    Shell(Box<Shell>),
 }
 
 /// Cheap `Clone` handles to the engines, built in [`boot`] and cloned into
@@ -48,11 +51,17 @@ pub struct Services {
     pub store: Store,
     pub paths: Paths,
     pub tidal: TidalClient,
+    pub catalog: Catalog,
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Login(login::Message),
+    Page(PageId, page::Message),
+    Navigate(Route),
+    Back,
+    Forward,
+    Shell(shell::Message),
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
@@ -75,12 +84,17 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
 
     let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
     let tidal = TidalClient::new(http_client(), events);
+    let catalog = Catalog::new(
+        tidal.clone(),
+        DiskCache::new(&paths.catalog_cache_dir, &store),
+    );
 
     let mut app = App {
         services: Services {
             store,
             paths,
             tidal,
+            catalog,
         },
         settings,
         session: None,
@@ -97,8 +111,8 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
                 session.country_code.clone(),
             );
             app.session = Some(session);
-            app.phase = Phase::Shell;
-            app.refresh_session_info()
+            let shell = app.open_shell();
+            Task::batch([shell, app.refresh_session_info()])
         }
         None => Task::none(),
     };
@@ -131,10 +145,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         State::Fatal(error) => fatal(error),
         State::Running(app) => match &app.phase {
             Phase::Login(login) => login.view().map(Message::Login),
-            Phase::Shell => container(text(""))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into(),
+            Phase::Shell(shell) => shell.view(),
         },
     }
 }
@@ -145,7 +156,13 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         State::Fatal(_) => close,
         // Always on: the receiver can be taken only once (ADR 0003).
         State::Running(app) => {
-            Subscription::batch([close, app.tidal_events.subscription().map(Message::Tidal)])
+            let tidal = app.tidal_events.subscription().map(Message::Tidal);
+            match app.phase {
+                Phase::Shell(_) => {
+                    Subscription::batch([close, tidal, event::listen_with(back_or_forward)])
+                }
+                Phase::Login(_) => Subscription::batch([close, tidal]),
+            }
         }
     }
 }
@@ -177,6 +194,15 @@ impl App {
                 let effects = login.update(message);
                 self.run_login(effects)
             }
+            Message::Page(id, message) => {
+                self.in_shell(|shell, services| shell.update_page(id, message, services))
+            }
+            Message::Navigate(route) => {
+                self.in_shell(|shell, services| shell.navigate(route, services))
+            }
+            Message::Back => self.in_shell(Shell::back),
+            Message::Forward => self.in_shell(Shell::forward),
+            Message::Shell(message) => self.in_shell(|shell, _| shell.update(message)),
             Message::Tidal(syzygy_tidal::Event::TokensRefreshed(tokens)) => {
                 self.update_session(|session| session.tokens = tokens)
             }
@@ -252,6 +278,24 @@ impl App {
         )
     }
 
+    /// Hand a message to the Shell. Nothing when signed out.
+    fn in_shell(
+        &mut self,
+        f: impl FnOnce(&mut Shell, &Services) -> Task<Message>,
+    ) -> Task<Message> {
+        match &mut self.phase {
+            Phase::Shell(shell) => f(shell, &self.services),
+            Phase::Login(_) => Task::none(),
+        }
+    }
+
+    /// Show the Shell at Home with an empty Back stack.
+    fn open_shell(&mut self) -> Task<Message> {
+        let (shell, task) = Shell::new(&self.services);
+        self.phase = Phase::Shell(Box::new(shell));
+        task
+    }
+
     /// Ask TIDAL who the user is and where, without blocking anything.
     fn refresh_session_info(&self) -> Task<Message> {
         let tidal = self.services.tidal.clone();
@@ -269,8 +313,11 @@ impl App {
             login_method,
             country_code: None,
         });
-        self.phase = Phase::Shell;
-        Task::batch([self.save_session(), self.refresh_session_info()])
+        Task::batch([
+            self.open_shell(),
+            self.save_session(),
+            self.refresh_session_info(),
+        ])
     }
 
     fn run_login(&mut self, effects: Vec<login::Effect>) -> Task<Message> {
@@ -323,6 +370,25 @@ impl App {
             }
             login::Effect::SignedIn(login_method, tokens) => self.sign_in(login_method, tokens),
         }
+    }
+}
+
+/// The mouse side buttons and Alt+←/→. A text field that takes the arrow
+/// keys keeps them.
+fn back_or_forward(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
+    match event {
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Back),
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Forward),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(named),
+            modifiers,
+            ..
+        }) if modifiers.alt() && status == event::Status::Ignored => match named {
+            key::Named::ArrowLeft => Some(Message::Back),
+            key::Named::ArrowRight => Some(Message::Forward),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

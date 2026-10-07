@@ -15,6 +15,8 @@ const KEYRING_ENTRY: &str = "master-key";
 pub struct Paths {
     /// `<config_dir>/syzygy`: settings, Session, the fallback key file.
     pub config_dir: PathBuf,
+    /// `<cache_dir>/syzygy/catalog`: the disk cache of Catalog reads.
+    pub catalog_cache_dir: PathBuf,
     /// `<state_dir>/syzygy/logs`, or `<cache_dir>/syzygy/logs` where there is no
     /// state dir.
     pub log_dir: PathBuf,
@@ -30,6 +32,7 @@ impl Paths {
             .unwrap_or_else(|| cache_dir.clone())
             .join("logs");
         Self {
+            catalog_cache_dir: cache_dir.join("catalog"),
             config_dir: under(dirs::config_dir()),
             log_dir,
         }
