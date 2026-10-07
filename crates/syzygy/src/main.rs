@@ -1,6 +1,10 @@
 mod app;
+mod events;
 mod identity;
 mod logging;
+mod login;
+mod persist;
+mod session;
 mod settings;
 
 use iced::window;

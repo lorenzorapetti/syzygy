@@ -1230,6 +1230,14 @@ pub struct HomePageResponse {
     pub cursor: Option<String>,
 }
 
+/// Who is signed in, from `/sessions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    pub user_id: u64,
+    /// `None` when TIDAL leaves it out.
+    pub country_code: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAuthResponse {

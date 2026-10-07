@@ -70,11 +70,12 @@ impl Settings {
     }
 
     /// Encrypt and write the settings off the UI thread.
-    pub async fn save(self, store: Store, path: PathBuf) -> Result<(), Arc<syzygy_store::Error>> {
-        tokio::task::spawn_blocking(move || store.write_json(&path, &self))
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e).into()))
-            .map_err(Arc::new)
+    pub fn save(
+        self,
+        store: Store,
+        path: PathBuf,
+    ) -> impl Future<Output = Result<(), Arc<syzygy_store::Error>>> + use<> {
+        crate::persist::write_json(store, path, self)
     }
 }
 

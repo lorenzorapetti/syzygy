@@ -39,6 +39,11 @@ impl Paths {
         self.config_dir.join("settings.json")
     }
 
+    /// The Session: tokens, Login method, user id, country.
+    pub fn session_file(&self) -> PathBuf {
+        self.config_dir.join("session.json")
+    }
+
     /// The master key: the OS keyring first, then a 0600 key file.
     pub fn key_source(&self) -> KeySource {
         KeySource {

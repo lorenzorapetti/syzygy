@@ -40,7 +40,8 @@ impl TidalClient {
         Ok((name, username))
     }
 
-    pub async fn get_session_info(&self) -> Result<u64, Error> {
+    /// Who is signed in, and where. Also sets the country for later calls.
+    pub async fn get_session_info(&self) -> Result<SessionInfo, Error> {
         let body = self.api_get_body("/sessions", &[]).await?;
 
         #[derive(Deserialize)]
@@ -55,10 +56,13 @@ impl TidalClient {
             serde_json::from_str(&body).map_err(|e| Error::Parse(e.to_string()))?;
 
         // Store the user's country code for all subsequent API calls
-        if let Some(cc) = data.country_code {
-            self.set_country_code(cc);
+        if let Some(cc) = &data.country_code {
+            self.set_country_code(cc.clone());
         }
-        Ok(data.user_id)
+        Ok(SessionInfo {
+            user_id: data.user_id,
+            country_code: data.country_code.filter(|cc| !cc.is_empty()),
+        })
     }
 
     pub async fn get_user_playlists(
