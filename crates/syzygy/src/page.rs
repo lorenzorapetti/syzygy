@@ -4,16 +4,56 @@
 //! [`Action`]s.
 
 pub mod home;
+mod unbuilt;
 
-use iced::widget::{button, column, container, text};
-use iced::{Element, Length};
+use iced::widget::{button, column, container, space, text};
+use iced::{Border, Element, Length, Theme};
 use std::sync::Arc;
 use syzygy_catalog::Read;
+use syzygy_catalog::home_feed::Cover;
 
 /// Where a Page is. Plain data, so the Back stack can rebuild a Page from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
-    Home,
+    /// A Home feed tab, by slug.
+    Home {
+        tab: String,
+    },
+    Album {
+        id: u64,
+        preview: Option<Preview>,
+    },
+    Artist {
+        id: u64,
+        preview: Option<Preview>,
+    },
+    Playlist {
+        uuid: String,
+        preview: Option<Preview>,
+    },
+    Mix {
+        id: String,
+        preview: Option<Preview>,
+    },
+    /// The user's Loved tracks.
+    Favorites,
+}
+
+impl Route {
+    /// Home on its default tab.
+    pub fn home() -> Self {
+        Route::Home {
+            tab: home::DEFAULT_TAB.to_string(),
+        }
+    }
+}
+
+/// What a Page can draw straight away from the card that led to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preview {
+    pub title: String,
+    pub cover: Option<Cover>,
+    pub artist: Option<String>,
 }
 
 /// Stamped on each navigation. Messages carry it, and the Shell drops any
@@ -28,18 +68,32 @@ pub enum Action {
     /// Start a Catalog read. Its values come back as this Page's messages,
     /// and it is aborted when the Page goes away.
     Load(Load),
+    /// Go somewhere new.
+    Navigate(Route),
+    /// This Page now shows `route`, as after a tab switch: its Back stack
+    /// entry changes and no step is added. It starts with this read.
+    Replace(Route, Load),
 }
 
-/// A Catalog read a Page wants. The Shell runs it and maps each [`Read`]
+/// A Catalog read a Page wants. The Shell runs it and maps what comes back
 /// into the Page's message.
 #[derive(Debug)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the other Pages' reads land here"
+)]
 pub enum Load {
     /// A Home feed tab, by slug.
     HomeFeed(String),
+    /// A Home feed tab straight from TIDAL.
+    RefreshHomeFeed(String),
+    /// The sections of a Home feed tab after a cursor.
+    MoreHomeFeed { tab: String, cursor: String },
 }
 
 pub enum Page {
     Home(home::State),
+    Unbuilt(unbuilt::State),
 }
 
 #[derive(Debug, Clone)]
@@ -51,22 +105,47 @@ impl Page {
     /// Build the Page for a route, and what it needs first.
     pub fn open(route: &Route) -> (Self, Action) {
         match route {
-            Route::Home => {
-                let (state, action) = home::State::new();
+            Route::Home { tab } => {
+                let (state, action) = home::State::new(tab.clone());
                 (Page::Home(state), action)
             }
+            Route::Album { preview, .. }
+            | Route::Artist { preview, .. }
+            | Route::Playlist { preview, .. }
+            | Route::Mix { preview, .. } => (
+                Page::Unbuilt(unbuilt::State::new(preview.clone())),
+                Action::None,
+            ),
+            Route::Favorites => (
+                Page::Unbuilt(unbuilt::State::new(Some(Preview {
+                    title: "Loved Tracks".to_string(),
+                    cover: None,
+                    artist: None,
+                }))),
+                Action::None,
+            ),
         }
     }
 
     pub fn update(&mut self, message: Message) -> Action {
         match (self, message) {
             (Page::Home(state), Message::Home(message)) => state.update(message),
+            (Page::Unbuilt(_), _) => Action::None,
+        }
+    }
+
+    /// The window came back into focus.
+    pub fn focused(&mut self) -> Action {
+        match self {
+            Page::Home(state) => state.focused(),
+            Page::Unbuilt(_) => Action::None,
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
         match self {
             Page::Home(state) => state.view().map(Message::Home),
+            Page::Unbuilt(state) => state.view(),
         }
     }
 }
@@ -121,5 +200,25 @@ impl<T> Remote<T> {
             .width(Length::Fill)
             .padding(24)
             .into()
+    }
+}
+
+/// Where a cover goes until covers load.
+pub fn cover_placeholder<'a, Message: 'a>(size: f32) -> Element<'a, Message> {
+    container(space())
+        .width(size)
+        .height(size)
+        .style(placeholder)
+        .into()
+}
+
+fn placeholder(theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(theme.extended_palette().background.weak.color.into()),
+        border: Border {
+            radius: 4.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
     }
 }

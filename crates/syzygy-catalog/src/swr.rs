@@ -16,6 +16,15 @@ pub enum Read<T> {
     Fresh(Result<T, Arc<Error>>),
 }
 
+impl<T> Read<T> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Read<U> {
+        match self {
+            Read::Cached(value) => Read::Cached(f(value)),
+            Read::Fresh(result) => Read::Fresh(result.map(f)),
+        }
+    }
+}
+
 /// A failed refresh of a stale entry isn't retried for this long; the stale
 /// copy is served alone until then.
 const REFRESH_RETRY_SECS: u64 = 300;
@@ -75,6 +84,25 @@ where
         }
     })
     .boxed()
+}
+
+/// Go to TIDAL whatever the cache holds, and cache what comes back: one
+/// `Fresh`, or nothing when the encoder refuses the value, so a cached copy
+/// already on screen stays.
+pub(crate) fn refresh<T, F, Fut>(
+    cache: Arc<DiskCache>,
+    entry: Entry<T>,
+    fetch: F,
+) -> BoxStream<'static, Read<T>>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, Error>> + Send,
+{
+    let reader = Reader { cache, entry };
+    stream::once(async move { reader.fetch(fetch, true).await })
+        .filter_map(std::future::ready)
+        .boxed()
 }
 
 /// A usable cached value.
@@ -272,6 +300,60 @@ mod tests {
         let reads = run(&cache, refusing, &fetches, Ok("b")).await;
 
         assert_eq!(values(&reads), ["fresh b"]);
+    }
+
+    async fn run_refresh(
+        cache: &Arc<DiskCache>,
+        entry: Entry<String>,
+        result: Result<&str, ()>,
+    ) -> Vec<Read<String>> {
+        let result = result.map(str::to_string);
+        refresh(cache.clone(), entry, move || async move {
+            result.map_err(|()| Error::Tidal(syzygy_tidal::Error::Network("down".into())))
+        })
+        .collect()
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_refresh_fetches_inside_the_ttl_and_replaces_the_cached_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(dir.path());
+        let fetches = Arc::new(AtomicUsize::new(0));
+
+        run(&cache, entry(), &fetches, Ok("a")).await;
+        let reads = run_refresh(&cache, entry(), Ok("b")).await;
+        assert_eq!(values(&reads), ["fresh b"]);
+
+        let reads = run(&cache, entry(), &fetches, Ok("c")).await;
+        assert_eq!(values(&reads), ["cached b"]);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_the_encoder_refuses_yields_nothing_and_keeps_the_cached_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(dir.path());
+        let fetches = Arc::new(AtomicUsize::new(0));
+
+        run(&cache, entry(), &fetches, Ok("a")).await;
+        let refusing = Entry {
+            encode: |_| None,
+            ..entry()
+        };
+        let reads = run_refresh(&cache, refusing, Ok("b")).await;
+        assert!(reads.is_empty());
+
+        let reads = run(&cache, entry(), &fetches, Ok("c")).await;
+        assert_eq!(values(&reads), ["cached a"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_yields_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(dir.path());
+
+        let reads = run_refresh(&cache, entry(), Err(())).await;
+        assert_eq!(values(&reads), ["failed Network error: down"]);
     }
 
     #[tokio::test]

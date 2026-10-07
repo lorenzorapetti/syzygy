@@ -61,6 +61,8 @@ pub enum Message {
     Navigate(Route),
     Back,
     Forward,
+    /// The window came back into focus.
+    WindowFocused,
     Shell(shell::Message),
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
@@ -159,7 +161,7 @@ pub fn subscription(state: &State) -> Subscription<Message> {
             let tidal = app.tidal_events.subscription().map(Message::Tidal);
             match app.phase {
                 Phase::Shell(_) => {
-                    Subscription::batch([close, tidal, event::listen_with(back_or_forward)])
+                    Subscription::batch([close, tidal, event::listen_with(shell_events)])
                 }
                 Phase::Login(_) => Subscription::batch([close, tidal]),
             }
@@ -202,6 +204,7 @@ impl App {
             }
             Message::Back => self.in_shell(Shell::back),
             Message::Forward => self.in_shell(Shell::forward),
+            Message::WindowFocused => self.in_shell(Shell::focused),
             Message::Shell(message) => self.in_shell(|shell, _| shell.update(message)),
             Message::Tidal(syzygy_tidal::Event::TokensRefreshed(tokens)) => {
                 self.update_session(|session| session.tokens = tokens)
@@ -373,10 +376,11 @@ impl App {
     }
 }
 
-/// The mouse side buttons and Alt+←/→. A text field that takes the arrow
-/// keys keeps them.
-fn back_or_forward(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
+/// Back and forward from the mouse side buttons and Alt+←/→ (a text field
+/// that takes the arrow keys keeps them), and the window regaining focus.
+fn shell_events(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocused),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Back),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Forward),
         Event::Keyboard(keyboard::Event::KeyPressed {

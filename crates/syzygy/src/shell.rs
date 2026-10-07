@@ -5,11 +5,11 @@ mod back_stack;
 pub mod toast;
 
 use futures::StreamExt;
-use futures::stream::BoxStream;
+use futures::stream::{self, BoxStream};
 use iced::task;
 use iced::widget::{button, column, container, operation, row, scrollable, space, stack, text};
 use iced::{Alignment, Border, Color, Element, Length, Task, Theme};
-use syzygy_catalog::Catalog;
+use syzygy_catalog::{Catalog, HomeFeed, Read};
 
 use crate::app::{self, Services};
 use crate::identity::DISPLAY_NAME;
@@ -53,7 +53,7 @@ impl Shell {
         let (current, action) = Current::open(
             PageId(0),
             Entry {
-                route: Route::Home,
+                route: Route::home(),
                 offset: 0.0,
             },
         );
@@ -100,6 +100,12 @@ impl Shell {
         self.run_action(action, services)
     }
 
+    /// The window came back into focus.
+    pub fn focused(&mut self, services: &Services) -> Task<app::Message> {
+        let action = self.current.page.focused();
+        self.run_action(action, services)
+    }
+
     pub fn update(&mut self, message: Message) -> Task<app::Message> {
         match message {
             Message::Scrolled(id, offset) => {
@@ -142,6 +148,13 @@ impl Shell {
     fn run_action(&mut self, action: Action, services: &Services) -> Task<app::Message> {
         match action {
             Action::None => Task::none(),
+            Action::Navigate(route) => self.navigate(route, services),
+            Action::Replace(route, load) => {
+                self.current.route = route;
+                self.current.offset = 0.0;
+                let load = self.run_action(Action::Load(load), services);
+                Task::batch([load, scroll_to(0.0)])
+            }
             Action::Load(load) => {
                 let id = self.current.id;
                 let (task, handle) = Task::run(read(load, &services.catalog), move |message| {
@@ -235,7 +248,7 @@ impl Current {
 /// The sidebar frame. The Library lists land here.
 fn sidebar<'a>() -> Element<'a, app::Message> {
     let home = button(text("Home"))
-        .on_press(app::Message::Navigate(Route::Home))
+        .on_press(app::Message::Navigate(Route::home()))
         .style(button::text)
         .width(Length::Fill);
     let body = column![
@@ -289,9 +302,33 @@ fn scroll_to(offset: f32) -> Task<app::Message> {
 /// Run a Page's Catalog read, as that Page's messages.
 fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
     match load {
-        Load::HomeFeed(slug) => catalog
-            .home_feed(&slug)
-            .map(|read| page::Message::Home(page::home::Message::Feed(read)))
-            .boxed(),
+        Load::HomeFeed(tab) => home_feed(catalog.home_feed(&tab), tab),
+        Load::RefreshHomeFeed(tab) => home_feed(catalog.refresh_home_feed(&tab), tab),
+        Load::MoreHomeFeed { tab, cursor } => {
+            let more = catalog.more_home_feed(&tab, &cursor);
+            stream::once(more)
+                .map(move |result| {
+                    page::Message::Home(page::home::Message::More {
+                        cursor: cursor.clone(),
+                        result,
+                    })
+                })
+                .boxed()
+        }
     }
+}
+
+/// A Home feed tab's reads, as Home's messages for that tab.
+fn home_feed(
+    reads: BoxStream<'static, Read<HomeFeed>>,
+    tab: String,
+) -> BoxStream<'static, page::Message> {
+    reads
+        .map(move |read| {
+            page::Message::Home(page::home::Message::Feed {
+                tab: tab.clone(),
+                read,
+            })
+        })
+        .boxed()
 }
