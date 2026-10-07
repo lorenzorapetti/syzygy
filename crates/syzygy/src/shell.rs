@@ -149,6 +149,10 @@ impl Shell {
         match action {
             Action::None => Task::none(),
             Action::Navigate(route) => self.navigate(route, services),
+            Action::Run(task) => {
+                let id = self.current.id;
+                task.map(move |message| app::Message::Page(id, message))
+            }
             Action::Replace(route, load) => {
                 self.current.route = route;
                 self.current.offset = 0.0;

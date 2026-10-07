@@ -7,7 +7,7 @@ pub mod home;
 mod unbuilt;
 
 use iced::widget::{button, column, container, space, text};
-use iced::{Border, Element, Length, Theme};
+use iced::{Border, Element, Length, Task, Theme};
 use std::sync::Arc;
 use syzygy_catalog::Read;
 use syzygy_catalog::home_feed::Cover;
@@ -62,7 +62,6 @@ pub struct Preview {
 pub struct PageId(pub u64);
 
 /// What a Page asks the Shell to do.
-#[derive(Debug)]
 pub enum Action {
     None,
     /// Start a Catalog read. Its values come back as this Page's messages,
@@ -73,6 +72,9 @@ pub enum Action {
     /// This Page now shows `route`, as after a tab switch: its Back stack
     /// entry changes and no step is added. It starts with this read.
     Replace(Route, Load),
+    /// Run a widget operation, such as a scroll. Its messages come back as
+    /// this Page's.
+    Run(Task<Message>),
 }
 
 /// A Catalog read a Page wants. The Shell runs it and maps what comes back

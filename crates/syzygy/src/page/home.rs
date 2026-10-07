@@ -1,8 +1,12 @@
 //! The Home Page: TIDAL's home feed, one tab at a time, with more sections
 //! loaded as the user scrolls.
 
-use iced::widget::{Text, button, column, container, row, scrollable, sensor, space, text};
+use iced::widget::{
+    self as widget, Text, button, column, container, operation, row, scrollable, sensor, space,
+    text,
+};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use syzygy_catalog::home_feed::{Card, Layout, Section, Tab, Target};
@@ -20,6 +24,9 @@ const FOCUS_REFRESH: Duration = Duration::from_secs(5 * 60);
 const LOAD_MORE_AHEAD: f32 = 200.0;
 
 const CARD_WIDTH: f32 = 160.0;
+const CARD_GAP: f32 = 16.0;
+/// A row this close to an end counts as at that end.
+const SCROLL_SLACK: f32 = 10.0;
 const SHORTCUT_HEIGHT: f32 = 56.0;
 const SHORTCUTS_PER_ROW: usize = 4;
 
@@ -35,6 +42,8 @@ pub struct State {
     paginated: bool,
     /// When the feed was last read or refreshed.
     loaded_at: Instant,
+    /// The card rows' scroll state, by section index.
+    rows: HashMap<usize, RowScroll>,
 }
 
 /// Loading the sections after the first page.
@@ -59,6 +68,12 @@ pub enum Message {
     },
     /// The end of the sections is nearly in view.
     EndInView,
+    /// A card row scrolled to this offset.
+    RowScrolled(usize, f32),
+    /// A card row is this wide on screen.
+    RowSized(usize, f32),
+    /// An arrow: a page of cards left (-1) or right (1).
+    ScrollRow(usize, f32),
     SelectTab(String),
     Open(Route),
     Retry,
@@ -73,6 +88,7 @@ impl State {
             more: More::Idle,
             paginated: false,
             loaded_at: Instant::now(),
+            rows: HashMap::new(),
         };
         let action = state.load();
         (state, action)
@@ -119,6 +135,32 @@ impl State {
                 Action::None
             }
             Message::EndInView => self.load_more(),
+            Message::RowScrolled(index, offset) => {
+                self.rows.entry(index).or_default().offset = offset;
+                Action::None
+            }
+            Message::RowSized(index, width) => {
+                self.rows.entry(index).or_default().width = width;
+                Action::None
+            }
+            Message::ScrollRow(index, step) => {
+                let Remote::Loaded(feed) = &self.feed else {
+                    return Action::None;
+                };
+                let Some(section) = feed.sections.get(index) else {
+                    return Action::None;
+                };
+                // A scroll operation isn't reported through `on_scroll`, so
+                // the new offset is worked out and kept here.
+                let row = self.rows.entry(index).or_default();
+                let end = (row_width(section.cards.len()) - row.width).max(0.0);
+                row.offset = (row.offset + step * row_page(row.width)).clamp(0.0, end);
+                let offset = scrollable::AbsoluteOffset {
+                    x: row.offset,
+                    y: 0.0,
+                };
+                Action::Run(operation::scroll_to(row_id(index), offset))
+            }
             Message::SelectTab(tab) if tab != self.tab => {
                 // The tab is part of the route: this entry changes, and no
                 // step is added to the Back stack.
@@ -126,6 +168,7 @@ impl State {
                 self.feed = Remote::Loading;
                 self.more = More::Idle;
                 self.paginated = false;
+                self.rows.clear();
                 self.loaded_at = Instant::now();
                 Action::Replace(
                     Route::Home {
@@ -187,7 +230,12 @@ impl State {
                     .style(text::secondary)
                     .into();
             }
-            let mut page = column(feed.sections.iter().map(section)).spacing(32);
+            let sections = feed
+                .sections
+                .iter()
+                .enumerate()
+                .map(|(index, s)| section(index, s, self.rows.get(&index)));
+            let mut page = column(sections).spacing(32);
             if matches!(self.more, More::Loading) {
                 page = page.push(text("Loading…").style(text::secondary));
             }
@@ -226,24 +274,72 @@ fn tab_bar<'a>(tabs: &'a [Tab], selected: &str) -> Element<'a, Message> {
     row(pills).spacing(8).into()
 }
 
-fn section(section: &Section) -> Element<'_, Message> {
+fn section<'a>(
+    index: usize,
+    section: &'a Section,
+    scroll: Option<&RowScroll>,
+) -> Element<'a, Message> {
     match section.layout {
         Layout::Shortcuts => shortcuts(&section.cards),
         Layout::Row => {
-            let cards = row(section.cards.iter().map(card)).spacing(16);
-            column![
+            let scroll = scroll.copied().unwrap_or_default();
+            let content = row_width(section.cards.len());
+            // Until the row has been measured, assume there's more to the right.
+            let can_left = scroll.offset > SCROLL_SLACK;
+            let can_right =
+                scroll.width == 0.0 || scroll.offset + scroll.width < content - SCROLL_SLACK;
+            let arrow = |glyph, step, enabled: bool| {
+                button(container(text(glyph).size(20)).center(32))
+                    .padding(0)
+                    .style(row_arrow)
+                    .on_press_maybe(enabled.then_some(Message::ScrollRow(index, step)))
+            };
+            let header = row![
                 text(&section.title).size(22),
-                scrollable(cards).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::new()
-                        .width(4)
-                        .scroller_width(4)
-                        .spacing(8),
-                )),
+                space::horizontal(),
+                arrow("‹", -1.0, can_left),
+                arrow("›", 1.0, can_right),
             ]
-            .spacing(16)
-            .into()
+            .spacing(8)
+            .align_y(Alignment::Center);
+            let cards = scrollable(row(section.cards.iter().map(card)).spacing(CARD_GAP))
+                .id(row_id(index))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::hidden(),
+                ))
+                .on_scroll(move |viewport| {
+                    Message::RowScrolled(index, viewport.absolute_offset().x)
+                });
+            let cards = sensor(cards)
+                .on_show(move |size| Message::RowSized(index, size.width))
+                .on_resize(move |size| Message::RowSized(index, size.width));
+            column![header, cards].spacing(16).into()
         }
     }
+}
+
+/// How far a card row is scrolled, and how wide it is on screen.
+#[derive(Debug, Clone, Copy, Default)]
+struct RowScroll {
+    offset: f32,
+    width: f32,
+}
+
+/// Each card row's scrollable, by its section's place in the feed.
+fn row_id(index: usize) -> widget::Id {
+    widget::Id::from(format!("home-row-{index}"))
+}
+
+/// The width of a row of `cards` cards.
+fn row_width(cards: usize) -> f32 {
+    (cards as f32 * (CARD_WIDTH + CARD_GAP) - CARD_GAP).max(0.0)
+}
+
+/// How far an arrow scrolls a row: as many whole cards as fit, so the row
+/// lands on a card's edge.
+fn row_page(width: f32) -> f32 {
+    let stride = CARD_WIDTH + CARD_GAP;
+    ((width + CARD_GAP) / stride).floor().max(1.0) * stride
 }
 
 /// The quick-access grid.
@@ -378,6 +474,30 @@ fn card_button(theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: None,
         text_color,
+        ..button::Style::default()
+    }
+}
+
+fn row_arrow(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let (background, text_color) = match status {
+        button::Status::Disabled => (None, palette.background.strong.color),
+        button::Status::Hovered | button::Status::Pressed => (
+            Some(palette.background.strong.color.into()),
+            palette.background.base.text,
+        ),
+        button::Status::Active => (
+            Some(palette.background.weak.color.into()),
+            palette.background.base.text,
+        ),
+    };
+    button::Style {
+        background,
+        text_color,
+        border: Border {
+            radius: 16.0.into(),
+            ..Border::default()
+        },
         ..button::Style::default()
     }
 }
