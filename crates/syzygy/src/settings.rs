@@ -8,13 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use syzygy_store::Store;
+use syzygy_tidal::Quality;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub volume: f32,
-    /// The highest quality to request, as TIDAL names it.
-    pub max_quality: String,
+    /// The highest quality to request.
+    pub max_quality: Quality,
     pub volume_normalization: bool,
     pub exclusive_mode: bool,
     pub exclusive_device: Option<String>,
@@ -30,7 +31,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             volume: 1.0,
-            max_quality: "HI_RES_LOSSLESS".to_string(),
+            max_quality: Quality::HiResLossless,
             volume_normalization: false,
             exclusive_mode: false,
             exclusive_device: None,

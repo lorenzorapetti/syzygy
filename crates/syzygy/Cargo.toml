@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 syzygy-store.workspace = true
+syzygy-tidal.workspace = true
 
 dirs.workspace = true
 flexi_logger.workspace = true
