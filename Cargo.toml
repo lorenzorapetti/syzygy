@@ -32,3 +32,10 @@ tempfile = "3"
 thiserror = "2"
 tokio = "1"
 zeroize = "1"
+
+# Dependencies are built optimized even in dev builds. Unoptimized, iced's
+# text stack takes ~230 ms to shape a line that needs a fallback font (CJK
+# titles, say), so scrolling a track list stalls each time such a row is
+# built. syzygy's own crates stay unoptimized, so rebuilds stay quick.
+[profile.dev.package."*"]
+opt-level = 3
