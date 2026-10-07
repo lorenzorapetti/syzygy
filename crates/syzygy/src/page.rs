@@ -3,19 +3,32 @@
 //! touch `Services`; they ask the Shell for what they need through
 //! [`Action`]s.
 
+pub mod album;
+pub mod artist;
+pub mod artist_tracks;
+pub mod artist_view_all;
+mod cards;
+mod hero;
 pub mod home;
+pub mod mix;
+mod paged;
+mod track_list;
 mod unbuilt;
 
-use iced::widget::{button, column, container, text};
-use iced::{Element, Length, Task};
+use iced::widget::{Row, Text, button, column, container, row, text};
+use iced::{Alignment, Element, Length, Task, Theme};
 use std::sync::Arc;
 use syzygy_catalog::Read;
 use syzygy_catalog::home_feed::Cover;
+use syzygy_catalog::track::ArtistRef;
 
 use crate::images::{self, Images};
+use crate::style;
 
 /// How round a cover's corners are.
 const COVER_RADIUS: f32 = 4.0;
+/// Around every Page's content.
+const PADDING: f32 = 24.0;
 
 /// Where a Page is. Plain data, so the Back stack can rebuild a Page from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +44,16 @@ pub enum Route {
     Artist {
         id: u64,
         preview: Option<Preview>,
+    },
+    /// All of an artist's top tracks.
+    ArtistTracks {
+        id: u64,
+    },
+    /// One of an artist's sections in full. The section is the tab, by the
+    /// path TIDAL reads it from.
+    ArtistViewAll {
+        id: u64,
+        section: String,
     },
     Playlist {
         uuid: String,
@@ -66,6 +89,14 @@ pub struct Preview {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageId(pub u64);
 
+/// The part of the Page in view: how far down it's scrolled and how tall
+/// the window shows it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Viewport {
+    pub offset: f32,
+    pub height: f32,
+}
+
 /// What a Page asks the Shell to do.
 pub enum Action {
     None,
@@ -82,15 +113,13 @@ pub enum Action {
     Run(Task<Message>),
     /// Load these covers into the image cache.
     FetchImages(Vec<String>),
+    /// All of these.
+    Batch(Vec<Action>),
 }
 
 /// A Catalog read a Page wants. The Shell runs it and maps what comes back
 /// into the Page's message.
 #[derive(Debug)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "the other Pages' reads land here"
-)]
 pub enum Load {
     /// A Home feed tab, by slug.
     HomeFeed(String),
@@ -98,18 +127,67 @@ pub enum Load {
     RefreshHomeFeed(String),
     /// The sections of a Home feed tab after a cursor.
     MoreHomeFeed { tab: String, cursor: String },
+    /// An album's Page.
+    Album(u64),
+    /// An artist's Page, read by the Artist Page and the Pages under it,
+    /// each into its own message.
+    Artist {
+        id: u64,
+        then: fn(Read<syzygy_catalog::Artist>) -> Message,
+    },
+    /// The first page of an artist's top tracks.
+    ArtistTracks(u64),
+    /// An artist's top tracks after the first `offset`.
+    MoreArtistTracks { id: u64, offset: usize },
+    /// The first page of an artist's section.
+    ArtistViewAll { id: u64, section: String },
+    /// An artist's section after the first `offset` items.
+    MoreArtistViewAll {
+        id: u64,
+        section: String,
+        offset: usize,
+    },
+    /// A mix's Page.
+    Mix(String),
 }
 
 pub enum Page {
     Home(home::State),
+    Album(album::State),
+    Artist(artist::State),
+    ArtistTracks(artist_tracks::State),
+    ArtistViewAll(artist_view_all::State),
+    Mix(mix::State),
     Unbuilt(unbuilt::State),
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Home(home::Message),
-    /// A cover on a Page with no messages of its own came into view.
+    Album(album::Message),
+    Artist(artist::Message),
+    ArtistTracks(artist_tracks::Message),
+    ArtistViewAll(artist_view_all::Message),
+    Mix(mix::Message),
+    /// From a Page with no messages of its own.
+    Link(Link),
+}
+
+/// What any Page's covers, cards and links ask for.
+#[derive(Debug, Clone)]
+pub enum Link {
+    /// A cover came into view.
     CoverWanted(String),
+    Open(Route),
+}
+
+impl Link {
+    pub fn follow(self) -> Action {
+        match self {
+            Link::CoverWanted(url) => Action::FetchImages(vec![url]),
+            Link::Open(route) => Action::Navigate(route),
+        }
+    }
 }
 
 impl Page {
@@ -120,10 +198,27 @@ impl Page {
                 let (state, action) = home::State::new(tab.clone());
                 (Page::Home(state), action)
             }
-            Route::Album { preview, .. }
-            | Route::Artist { preview, .. }
-            | Route::Playlist { preview, .. }
-            | Route::Mix { preview, .. } => (
+            Route::Album { id, preview } => {
+                let (state, action) = album::State::new(*id, preview.clone());
+                (Page::Album(state), action)
+            }
+            Route::Artist { id, preview } => {
+                let (state, action) = artist::State::new(*id, preview.clone());
+                (Page::Artist(state), action)
+            }
+            Route::ArtistTracks { id } => {
+                let (state, action) = artist_tracks::State::new(*id);
+                (Page::ArtistTracks(state), action)
+            }
+            Route::ArtistViewAll { id, section } => {
+                let (state, action) = artist_view_all::State::new(*id, section.clone());
+                (Page::ArtistViewAll(state), action)
+            }
+            Route::Mix { id, preview } => {
+                let (state, action) = mix::State::new(id.clone(), preview.clone());
+                (Page::Mix(state), action)
+            }
+            Route::Playlist { preview, .. } => (
                 Page::Unbuilt(unbuilt::State::new(preview.clone())),
                 Action::None,
             ),
@@ -141,8 +236,14 @@ impl Page {
     pub fn update(&mut self, message: Message) -> Action {
         match (self, message) {
             (Page::Home(state), Message::Home(message)) => state.update(message),
-            (_, Message::CoverWanted(url)) => Action::FetchImages(vec![url]),
-            (Page::Unbuilt(_), Message::Home(_)) => Action::None,
+            (Page::Album(state), Message::Album(message)) => state.update(message),
+            (Page::Artist(state), Message::Artist(message)) => state.update(message),
+            (Page::ArtistTracks(state), Message::ArtistTracks(message)) => state.update(message),
+            (Page::ArtistViewAll(state), Message::ArtistViewAll(message)) => state.update(message),
+            (Page::Mix(state), Message::Mix(message)) => state.update(message),
+            (_, Message::Link(link)) => link.follow(),
+            // A message for another kind of Page.
+            _ => Action::None,
         }
     }
 
@@ -150,14 +251,19 @@ impl Page {
     pub fn focused(&mut self) -> Action {
         match self {
             Page::Home(state) => state.focused(),
-            Page::Unbuilt(_) => Action::None,
+            _ => Action::None,
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
         match self {
             Page::Home(state) => state.view(images).map(Message::Home),
-            Page::Unbuilt(state) => state.view(images),
+            Page::Album(state) => state.view(images, viewport).map(Message::Album),
+            Page::Artist(state) => state.view(images).map(Message::Artist),
+            Page::ArtistTracks(state) => state.view(images, viewport).map(Message::ArtistTracks),
+            Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),
+            Page::Mix(state) => state.view(images, viewport).map(Message::Mix),
+            Page::Unbuilt(state) => state.view(images).map(Message::Link),
         }
     }
 }
@@ -188,6 +294,13 @@ impl<T> Remote<T> {
         }
     }
 
+    pub fn loaded(&self) -> Option<&T> {
+        match self {
+            Remote::Loaded(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// The data once it's here; otherwise a loading line, a not-found
     /// message, or the error with Retry.
     pub fn view<'a, Message: Clone + 'a>(
@@ -210,26 +323,90 @@ impl<T> Remote<T> {
         };
         container(notice.spacing(12))
             .width(Length::Fill)
-            .padding(24)
+            .padding(PADDING)
             .into()
     }
 }
 
 /// A `size` square cover, fetched at twice that for sharp HiDPI. Until it's
-/// loaded a placeholder, which asks for it with `wanted` as it comes into
-/// view. Just the placeholder when there's no cover.
-pub fn cover<'a, Message: Clone + 'a>(
+/// loaded a placeholder, which asks for it as it comes into view. Just the
+/// placeholder when there's no cover.
+pub fn cover<'a>(images: &'a Images, cover: Option<&Cover>, size: f32) -> Element<'a, Link> {
+    rounded_cover(images, cover, size, COVER_RADIUS)
+}
+
+/// [`cover`] with its own corner radius: half the size for a round one.
+pub fn rounded_cover<'a>(
     images: &'a Images,
     cover: Option<&Cover>,
     size: f32,
-    wanted: impl FnOnce(String) -> Message,
-) -> Element<'a, Message> {
+    radius: f32,
+) -> Element<'a, Link> {
     match cover {
         Some(cover) => {
             let url = cover.url((size * 2.0) as u32);
-            let wanted = wanted(url.clone());
-            images.cover(&url, size, COVER_RADIUS, wanted)
+            let wanted = Link::CoverWanted(url.clone());
+            images.cover(&url, size, radius, wanted)
         }
-        None => images::placeholder(size, COVER_RADIUS),
+        None => images::placeholder(size, radius),
     }
+}
+
+/// Text that goes somewhere when clicked.
+pub fn link<'a>(label: Text<'a>, link: Link) -> Element<'a, Link> {
+    button(label)
+        .padding(0)
+        .style(link_style)
+        .on_press(link)
+        .into()
+}
+
+fn link_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => style::TEXT_PRIMARY,
+        _ => style::TEXT_SECONDARY,
+    };
+    button::Style {
+        background: None,
+        text_color,
+        ..button::Style::default()
+    }
+}
+
+/// "3:07", or "1:02:45" past the hour (sone's `formatTotalDuration`).
+pub fn duration(seconds: u32) -> String {
+    let (hours, minutes, seconds) = (seconds / 3600, seconds % 3600 / 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// "1 Track", "12 Tracks".
+pub fn count(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// Each artist's name, leading to their Page, separated by commas.
+pub fn artists<'a>(artists: &'a [ArtistRef], size: f32) -> Row<'a, Link> {
+    let names = artists.iter().enumerate().map(|(i, artist)| {
+        let name = link(
+            text(&artist.name).size(size),
+            Link::Open(Route::Artist {
+                id: artist.id,
+                preview: Some(Preview {
+                    title: artist.name.clone(),
+                    cover: None,
+                    artist: None,
+                }),
+            }),
+        );
+        if i + 1 < artists.len() {
+            row![name, text(",").size(size).color(style::TEXT_SECONDARY)].into()
+        } else {
+            name
+        }
+    });
+    row(names).spacing(4).align_y(Alignment::Center)
 }

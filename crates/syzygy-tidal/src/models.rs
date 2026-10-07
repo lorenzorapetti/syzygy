@@ -289,7 +289,11 @@ pub struct TidalReview {
 #[serde(rename_all = "camelCase")]
 pub struct AlbumPageSection {
     pub title: String,
-    #[serde(rename(deserialize = "type", serialize = "sectionType"))]
+    // Written back as `sectionType`, so a cached copy reads back too.
+    #[serde(
+        rename(deserialize = "type", serialize = "sectionType"),
+        alias = "sectionType"
+    )]
     pub section_type: String,
     pub items: Vec<Value>,
     pub api_path: Option<String>,

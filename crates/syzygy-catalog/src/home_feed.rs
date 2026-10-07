@@ -119,22 +119,10 @@ impl From<HomePageResponse> for HomeFeed {
 
 fn section(section: &HomePageSection) -> Section {
     let items = items(&section.items);
-    // The section type comes from the first item, so it says nothing about
-    // the rest of a row that mixes types.
-    let types: HashSet<&str> = items
-        .iter()
-        .map(item_type)
-        .filter(|t| !t.is_empty())
-        .collect();
-    let hint = (types.len() <= 1).then_some(section.section_type.as_str());
-    let cards = items.iter().map(|item| card(item, hint));
     if section.section_type != "SHORTCUT_LIST" {
-        return Section {
-            title: section.title.clone(),
-            layout: Layout::Row,
-            cards: cards.collect(),
-        };
+        return row(&section.title, &section.section_type, items);
     }
+    let cards = cards(items, &section.section_type);
     // Loved tracks always comes first, in place of TIDAL's own "My Tracks".
     let loved = Card {
         title: "Loved Tracks".to_string(),
@@ -150,6 +138,31 @@ fn section(section: &HomePageSection) -> Section {
             .take(SHORTCUTS)
             .collect(),
     }
+}
+
+/// A row of cards from a section's loose items, as on Album and Artist
+/// Pages. `section_type` is TIDAL's, as `ALBUM_LIST`.
+pub(crate) fn row(title: &str, section_type: &str, items: &[Value]) -> Section {
+    Section {
+        title: title.to_string(),
+        layout: Layout::Row,
+        cards: cards(items, section_type).collect(),
+    }
+}
+
+/// Cards for a section's items. The section type comes from the first item,
+/// so it says nothing about the rest of a row that mixes types.
+pub(crate) fn cards<'a>(
+    items: &'a [Value],
+    section_type: &'a str,
+) -> impl Iterator<Item = Card> + 'a {
+    let types: HashSet<&str> = items
+        .iter()
+        .map(item_type)
+        .filter(|t| !t.is_empty())
+        .collect();
+    let hint = (types.len() <= 1).then_some(section_type);
+    items.iter().map(move |item| card(item, hint))
 }
 
 /// How many quick-access cards Home shows.
@@ -183,7 +196,7 @@ fn is_magazine(item: &Value) -> bool {
     item_type(item) == "MAGAZINE" || string(item, "type") == Some("MAGAZINE")
 }
 
-fn items(items: &Value) -> &[Value] {
+pub(crate) fn items(items: &Value) -> &[Value] {
     items.as_array().map(Vec::as_slice).unwrap_or_default()
 }
 
@@ -396,7 +409,7 @@ fn count_label(tracks: u64, videos: u64) -> String {
 }
 
 /// A non-empty string field.
-fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value
         .get(key)
         .and_then(Value::as_str)

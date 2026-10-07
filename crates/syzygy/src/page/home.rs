@@ -1,19 +1,15 @@
 //! The Home Page: TIDAL's home feed, one tab at a time, with more sections
 //! loaded as the user scrolls.
 
-use iced::widget::{
-    self as widget, Text, button, column, container, operation, row, scrollable, sensor, space,
-    text,
-};
-use iced::{Alignment, Color, Element, Length, Theme};
-use std::collections::HashMap;
+use iced::widget::{button, column, container, row, sensor, space, text};
+use iced::{Alignment, Element, Length, Theme};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use syzygy_catalog::home_feed::{Card, Layout, Section, Tab, Target};
+use syzygy_catalog::home_feed::{Card, Layout, Section, Tab};
 use syzygy_catalog::{HomeFeed, Read};
 
-use super::{Action, Load, Preview, Remote, Route, cover};
-use crate::icons::{Icon, icon};
+use super::cards::{self, Rows};
+use super::{Action, Link, Load, PADDING, Remote, Route, cover};
 use crate::images::Images;
 use crate::style;
 
@@ -26,10 +22,6 @@ const FOCUS_REFRESH: Duration = Duration::from_secs(5 * 60);
 /// Start loading more this far before the end comes into view.
 const LOAD_MORE_AHEAD: f32 = 200.0;
 
-const CARD_WIDTH: f32 = 160.0;
-const CARD_GAP: f32 = 16.0;
-/// A row this close to an end counts as at that end.
-const SCROLL_SLACK: f32 = 10.0;
 const SHORTCUT_HEIGHT: f32 = 56.0;
 const SHORTCUTS_PER_ROW: usize = 4;
 
@@ -46,7 +38,7 @@ pub struct State {
     /// When the feed was last read or refreshed.
     loaded_at: Instant,
     /// The card rows' scroll state, by section index.
-    rows: HashMap<usize, RowScroll>,
+    rows: Rows,
 }
 
 /// Loading the sections after the first page.
@@ -71,16 +63,9 @@ pub enum Message {
     },
     /// The end of the sections is nearly in view.
     EndInView,
-    /// A card row scrolled to this offset.
-    RowScrolled(usize, f32),
-    /// A card row is this wide on screen.
-    RowSized(usize, f32),
-    /// An arrow: a page of cards left (-1) or right (1).
-    ScrollRow(usize, f32),
+    Cards(cards::Message),
     SelectTab(String),
-    /// A card's cover came into view.
-    CoverWanted(String),
-    Open(Route),
+    Link(Link),
     Retry,
 }
 
@@ -93,7 +78,7 @@ impl State {
             more: More::Idle,
             paginated: false,
             loaded_at: Instant::now(),
-            rows: HashMap::new(),
+            rows: Rows::default(),
         };
         let action = state.load();
         (state, action)
@@ -140,31 +125,15 @@ impl State {
                 Action::None
             }
             Message::EndInView => self.load_more(),
-            Message::RowScrolled(index, offset) => {
-                self.rows.entry(index).or_default().offset = offset;
-                Action::None
-            }
-            Message::RowSized(index, width) => {
-                self.rows.entry(index).or_default().width = width;
-                Action::None
-            }
-            Message::ScrollRow(index, step) => {
-                let Remote::Loaded(feed) = &self.feed else {
-                    return Action::None;
+            Message::Cards(message) => {
+                let feed = self.feed.loaded();
+                let cards = |index: usize| {
+                    feed.and_then(|feed| feed.sections.get(index))
+                        .map(|section| section.cards.len())
                 };
-                let Some(section) = feed.sections.get(index) else {
-                    return Action::None;
-                };
-                // A scroll operation isn't reported through `on_scroll`, so
-                // the new offset is worked out and kept here.
-                let row = self.rows.entry(index).or_default();
-                let end = (row_width(section.cards.len()) - row.width).max(0.0);
-                row.offset = (row.offset + step * row_page(row.width)).clamp(0.0, end);
-                let offset = scrollable::AbsoluteOffset {
-                    x: row.offset,
-                    y: 0.0,
-                };
-                Action::Run(operation::scroll_to(row_id(index), offset))
+                self.rows.update(message, cards, |message| {
+                    super::Message::Home(Message::Cards(message))
+                })
             }
             Message::SelectTab(tab) if tab != self.tab => {
                 // The tab is part of the route: this entry changes, and no
@@ -183,8 +152,7 @@ impl State {
                 )
             }
             Message::SelectTab(_) => Action::None,
-            Message::Open(route) => Action::Navigate(route),
-            Message::CoverWanted(url) => Action::FetchImages(vec![url]),
+            Message::Link(link) => link.follow(),
             Message::Retry => {
                 self.feed = Remote::Loading;
                 self.load()
@@ -240,7 +208,7 @@ impl State {
                 .sections
                 .iter()
                 .enumerate()
-                .map(|(index, s)| section(index, s, self.rows.get(&index), images));
+                .map(|(index, s)| self.section(index, s, images));
             let mut page = column(sections).spacing(32);
             if matches!(self.more, More::Loading) {
                 page = page.push(text("Loading…").style(text::secondary));
@@ -259,17 +227,32 @@ impl State {
         });
         column![tab_bar(&self.tabs, &self.tab), body]
             .spacing(32)
-            .padding(24)
+            .padding(PADDING)
             .into()
+    }
+
+    fn section<'a>(
+        &'a self,
+        index: usize,
+        section: &'a Section,
+        images: &'a Images,
+    ) -> Element<'a, Message> {
+        match section.layout {
+            Layout::Shortcuts => shortcuts(&section.cards, images),
+            Layout::Row => self
+                .rows
+                .view(index, &section.title, &section.cards, None, images)
+                .map(Message::Cards),
+        }
     }
 }
 
 fn tab_bar<'a>(tabs: &'a [Tab], selected: &str) -> Element<'a, Message> {
     let pills = tabs.iter().map(|tab| {
         let style = if tab.slug == selected {
-            selected_tab
+            style::selected_tab
         } else {
-            unselected_tab
+            style::unselected_tab
         };
         button(text(&tab.name).size(14))
             .padding([8, 16])
@@ -278,81 +261,6 @@ fn tab_bar<'a>(tabs: &'a [Tab], selected: &str) -> Element<'a, Message> {
             .into()
     });
     row(pills).spacing(8).into()
-}
-
-fn section<'a>(
-    index: usize,
-    section: &'a Section,
-    scroll: Option<&RowScroll>,
-    images: &'a Images,
-) -> Element<'a, Message> {
-    match section.layout {
-        Layout::Shortcuts => shortcuts(&section.cards, images),
-        Layout::Row => {
-            let scroll = scroll.copied().unwrap_or_default();
-            let content = row_width(section.cards.len());
-            // Until the row has been measured, assume there's more to the right.
-            let can_left = scroll.offset > SCROLL_SLACK;
-            let can_right =
-                scroll.width == 0.0 || scroll.offset + scroll.width < content - SCROLL_SLACK;
-            let arrow = |glyph, step, enabled: bool| {
-                let color = if enabled {
-                    style::TEXT_PRIMARY
-                } else {
-                    style::TEXT_DISABLED
-                };
-                button(container(icon(glyph, 18.0, color)).center(32))
-                    .padding(0)
-                    .style(row_arrow)
-                    .on_press_maybe(enabled.then_some(Message::ScrollRow(index, step)))
-            };
-            let header = row![
-                text(&section.title).size(22),
-                space::horizontal(),
-                arrow(Icon::ChevronLeft, -1.0, can_left),
-                arrow(Icon::ChevronRight, 1.0, can_right),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center);
-            let cards = section.cards.iter().map(|c| card(c, images));
-            let cards = scrollable(row(cards).spacing(CARD_GAP))
-                .id(row_id(index))
-                .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::hidden(),
-                ))
-                .on_scroll(move |viewport| {
-                    Message::RowScrolled(index, viewport.absolute_offset().x)
-                });
-            let cards = sensor(cards)
-                .on_show(move |size| Message::RowSized(index, size.width))
-                .on_resize(move |size| Message::RowSized(index, size.width));
-            column![header, cards].spacing(16).into()
-        }
-    }
-}
-
-/// How far a card row is scrolled, and how wide it is on screen.
-#[derive(Debug, Clone, Copy, Default)]
-struct RowScroll {
-    offset: f32,
-    width: f32,
-}
-
-/// Each card row's scrollable, by its section's place in the feed.
-fn row_id(index: usize) -> widget::Id {
-    widget::Id::from(format!("home-row-{index}"))
-}
-
-/// The width of a row of `cards` cards.
-fn row_width(cards: usize) -> f32 {
-    (cards as f32 * (CARD_WIDTH + CARD_GAP) - CARD_GAP).max(0.0)
-}
-
-/// How far an arrow scrolls a row: as many whole cards as fit, so the row
-/// lands on a card's edge.
-fn row_page(width: f32) -> f32 {
-    let stride = CARD_WIDTH + CARD_GAP;
-    ((width + CARD_GAP) / stride).floor().max(1.0) * stride
 }
 
 /// The quick-access grid.
@@ -371,12 +279,7 @@ fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     let title = text(&card.title).size(13).wrapping(text::Wrapping::None);
     button(
         row![
-            cover(
-                images,
-                card.cover.as_ref(),
-                SHORTCUT_HEIGHT,
-                Message::CoverWanted
-            ),
+            cover(images, card.cover.as_ref(), SHORTCUT_HEIGHT).map(Message::Link),
             container(title).clip(true).padding([0, 12]),
         ]
         .align_y(Alignment::Center),
@@ -384,87 +287,8 @@ fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     .padding(0)
     .width(Length::Fill)
     .style(shortcut_tile)
-    .on_press_maybe(route(card).map(Message::Open))
+    .on_press_maybe(cards::route(card).map(|route| Message::Link(Link::Open(route))))
     .into()
-}
-
-fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
-    let line = |line: Text<'a>| {
-        container(line.wrapping(text::Wrapping::None))
-            .width(CARD_WIDTH)
-            .clip(true)
-    };
-    button(
-        column![
-            cover(
-                images,
-                card.cover.as_ref(),
-                CARD_WIDTH,
-                Message::CoverWanted
-            ),
-            line(text(&card.title).size(14)),
-            line(text(&card.subtitle).size(12).style(text::secondary)),
-        ]
-        .spacing(6),
-    )
-    .padding(0)
-    .style(card_button)
-    .on_press_maybe(route(card).map(Message::Open))
-    .into()
-}
-
-/// Where a card leads, with what its Page can draw straight away. Tracks
-/// and videos play once there's playback.
-fn route(card: &Card) -> Option<Route> {
-    // Only an album card's subtitle is its artist.
-    let preview = |artist: bool| {
-        Some(Preview {
-            title: card.title.clone(),
-            cover: card.cover.clone(),
-            artist: (artist && !card.subtitle.is_empty()).then(|| card.subtitle.clone()),
-        })
-    };
-    match &card.target {
-        Target::Album(id) => Some(Route::Album {
-            id: *id,
-            preview: preview(true),
-        }),
-        Target::Artist(id) => Some(Route::Artist {
-            id: *id,
-            preview: preview(false),
-        }),
-        Target::Playlist(uuid) => Some(Route::Playlist {
-            uuid: uuid.clone(),
-            preview: preview(false),
-        }),
-        Target::Mix(id) => Some(Route::Mix {
-            id: id.clone(),
-            preview: preview(false),
-        }),
-        Target::Favorites => Some(Route::Favorites),
-        Target::Track(_) | Target::Video(_) | Target::None => None,
-    }
-}
-
-fn selected_tab(_theme: &Theme, _status: button::Status) -> button::Style {
-    pill(style::TEXT_PRIMARY, style::BG_BASE)
-}
-
-fn unselected_tab(_theme: &Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Hovered | button::Status::Pressed => style::BG_BUTTON_HOVER,
-        _ => style::BG_BUTTON,
-    };
-    pill(background, style::TEXT_PRIMARY)
-}
-
-fn pill(background: Color, text_color: Color) -> button::Style {
-    button::Style {
-        background: Some(background.into()),
-        text_color,
-        border: style::rounded(18.0),
-        ..button::Style::default()
-    }
 }
 
 fn shortcut_tile(_theme: &Theme, status: button::Status) -> button::Style {
@@ -476,31 +300,6 @@ fn shortcut_tile(_theme: &Theme, status: button::Status) -> button::Style {
         background: Some(background.into()),
         text_color: style::TEXT_PRIMARY,
         border: style::rounded(4.0),
-        ..button::Style::default()
-    }
-}
-
-fn card_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let text_color = match status {
-        button::Status::Hovered | button::Status::Pressed => style::ACCENT,
-        _ => style::TEXT_PRIMARY,
-    };
-    button::Style {
-        background: None,
-        text_color,
-        ..button::Style::default()
-    }
-}
-
-fn row_arrow(_theme: &Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Disabled => None,
-        button::Status::Hovered | button::Status::Pressed => Some(style::BG_BUTTON_HOVER.into()),
-        button::Status::Active => Some(style::BG_BUTTON.into()),
-    };
-    button::Style {
-        background,
-        border: style::rounded(16.0),
         ..button::Style::default()
     }
 }

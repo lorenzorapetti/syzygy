@@ -1,13 +1,11 @@
-//! Album, Artist, Playlist, Mix and Favorites until their Pages land: the
-//! hero drawn from the card's Preview.
+//! Playlist and Favorites until their Pages land: the hero drawn from the
+//! card's Preview.
 
 use iced::Element;
-use iced::widget::{column, container, row, text};
+use iced::widget::{column, text};
 
-use super::{Message, Preview, cover};
+use super::{Link, PADDING, Preview, hero};
 use crate::images::Images;
-
-const COVER_SIZE: f32 = 200.0;
 
 pub struct State {
     preview: Option<Preview>,
@@ -18,7 +16,7 @@ impl State {
         Self { preview }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Link> {
         let (title, artist, art) = match &self.preview {
             Some(preview) => (
                 preview.title.as_str(),
@@ -27,23 +25,16 @@ impl State {
             ),
             None => ("", None, None),
         };
-        let details = column![text(title).size(32)]
-            .push(artist.map(|artist| text(artist).style(text::secondary)))
-            .push(
-                text("This Page isn't built yet.")
-                    .size(13)
-                    .style(text::secondary),
-            )
-            .spacing(8);
-        container(
-            row![
-                cover(images, art, COVER_SIZE, Message::CoverWanted),
-                details
-            ]
-            .spacing(24)
-            .align_y(iced::Alignment::End),
-        )
-        .padding(24)
-        .into()
+        let lines = artist
+            .map(|artist| text(artist).style(text::secondary).into())
+            .into_iter()
+            .chain([text("This Page isn't built yet.")
+                .size(13)
+                .style(text::secondary)
+                .into()])
+            .collect();
+        column![hero::view(images, "", title, art, false, lines)]
+            .padding(PADDING)
+            .into()
     }
 }

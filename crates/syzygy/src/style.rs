@@ -84,3 +84,25 @@ pub fn icon_button(_theme: &Theme, status: button::Status) -> button::Style {
         ..button::Style::default()
     }
 }
+
+/// The tab showing, in a row of pill tabs (Home's feed tabs and the like).
+pub fn selected_tab(_theme: &Theme, _status: button::Status) -> button::Style {
+    pill(TEXT_PRIMARY, BG_BASE)
+}
+
+pub fn unselected_tab(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => BG_BUTTON_HOVER,
+        _ => BG_BUTTON,
+    };
+    pill(background, TEXT_PRIMARY)
+}
+
+fn pill(background: Color, text_color: Color) -> button::Style {
+    button::Style {
+        background: Some(background.into()),
+        text_color,
+        border: rounded(18.0),
+        ..button::Style::default()
+    }
+}

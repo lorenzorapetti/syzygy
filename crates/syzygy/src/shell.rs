@@ -15,7 +15,9 @@ use crate::app::{self, Services};
 use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
 use crate::images::{self, Images};
-use crate::page::{self, Action, Load, Page, PageId, Route};
+use crate::page::{
+    self, Action, Load, Page, PageId, Route, Viewport, album, artist_tracks, artist_view_all, mix,
+};
 use crate::style;
 use back_stack::{BackStack, Entry};
 use toast::{Kind, ToastId, Toasts};
@@ -26,12 +28,18 @@ const HEADER_HEIGHT: f32 = 64.0;
 const MAX_PAGE_WIDTH: f32 = 1520.0;
 /// The scrollable every Page draws in.
 const PAGE_SCROLL: iced::widget::Id = iced::widget::Id::new("page");
+/// How tall the Page's viewport is taken to be until it's reported:
+/// tall enough that a short list is built in full on any screen, since a
+/// scrollable whose content fits never reports.
+const UNKNOWN_HEIGHT: f32 = 4000.0;
 
 pub struct Shell {
     back_stack: BackStack,
     current: Current,
     next_id: u64,
     toasts: Toasts,
+    /// How tall the Page's viewport is, as last reported.
+    viewport_height: f32,
 }
 
 /// The Page on screen and the reads it started. Dropping it aborts them.
@@ -46,7 +54,7 @@ struct Current {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Scrolled(PageId, f32),
+    Scrolled(PageId, Viewport),
     DismissToast(ToastId),
 }
 
@@ -65,6 +73,7 @@ impl Shell {
             current,
             next_id: 1,
             toasts: Toasts::default(),
+            viewport_height: UNKNOWN_HEIGHT,
         };
         let task = shell.run_action(action, services);
         (shell, task)
@@ -111,9 +120,10 @@ impl Shell {
 
     pub fn update(&mut self, message: Message) -> Task<app::Message> {
         match message {
-            Message::Scrolled(id, offset) => {
+            Message::Scrolled(id, viewport) => {
+                self.viewport_height = viewport.height;
                 if id == self.current.id {
-                    self.current.offset = offset;
+                    self.current.offset = viewport.offset;
                 }
             }
             Message::DismissToast(id) => self.toasts.dismiss(id),
@@ -151,6 +161,12 @@ impl Shell {
     fn run_action(&mut self, action: Action, services: &Services) -> Task<app::Message> {
         match action {
             Action::None => Task::none(),
+            Action::Batch(actions) => Task::batch(
+                actions
+                    .into_iter()
+                    .map(|action| self.run_action(action, services))
+                    .collect::<Vec<_>>(),
+            ),
             Action::FetchImages(urls) => {
                 Task::done(app::Message::Images(images::Message::Wanted(urls)))
             }
@@ -179,10 +195,14 @@ impl Shell {
 
     pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, app::Message> {
         let id = self.current.id;
+        let viewport = Viewport {
+            offset: self.current.offset,
+            height: self.viewport_height,
+        };
         let page = container(
             self.current
                 .page
-                .view(images)
+                .view(images, viewport)
                 .map(move |m| app::Message::Page(id, m)),
         )
         .max_width(MAX_PAGE_WIDTH)
@@ -190,7 +210,13 @@ impl Shell {
         let page = scrollable(container(page).center_x(Length::Fill))
             .id(PAGE_SCROLL)
             .on_scroll(move |viewport| {
-                app::Message::Shell(Message::Scrolled(id, viewport.absolute_offset().y))
+                app::Message::Shell(Message::Scrolled(
+                    id,
+                    Viewport {
+                        offset: viewport.absolute_offset().y,
+                        height: viewport.bounds().height,
+                    },
+                ))
             })
             .width(Length::Fill)
             .height(Length::Fill);
@@ -353,6 +379,48 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
                 })
                 .boxed()
         }
+        Load::Album(id) => catalog
+            .album(id)
+            .map(|read| page::Message::Album(album::Message::Loaded(read)))
+            .boxed(),
+        Load::Artist { id, then } => catalog.artist(id).map(then).boxed(),
+        Load::ArtistTracks(id) => catalog
+            .artist_tracks(id)
+            .map(|read| page::Message::ArtistTracks(artist_tracks::Message::Tracks(read)))
+            .boxed(),
+        Load::MoreArtistTracks { id, offset } => {
+            stream::once(catalog.more_artist_tracks(id, offset))
+                .map(move |result| {
+                    page::Message::ArtistTracks(artist_tracks::Message::More { offset, result })
+                })
+                .boxed()
+        }
+        Load::ArtistViewAll { id, section } => catalog
+            .artist_view_all(id, &section)
+            .map(move |read| {
+                page::Message::ArtistViewAll(artist_view_all::Message::Cards {
+                    section: section.clone(),
+                    read,
+                })
+            })
+            .boxed(),
+        Load::MoreArtistViewAll {
+            id,
+            section,
+            offset,
+        } => stream::once(catalog.more_artist_view_all(id, &section, offset))
+            .map(move |result| {
+                page::Message::ArtistViewAll(artist_view_all::Message::More {
+                    section: section.clone(),
+                    offset,
+                    result,
+                })
+            })
+            .boxed(),
+        Load::Mix(id) => catalog
+            .mix(&id)
+            .map(|read| page::Message::Mix(mix::Message::Loaded(read)))
+            .boxed(),
     }
 }
 
