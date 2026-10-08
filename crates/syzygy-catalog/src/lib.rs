@@ -11,6 +11,7 @@ pub mod library;
 pub mod mix;
 mod paged;
 pub mod playlist;
+pub mod search;
 mod swr;
 pub mod track;
 
@@ -36,6 +37,7 @@ pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
 pub use mix::Mix;
 pub use paged::Paged;
 pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
+pub use search::{Hit, SearchResults, Suggestion, Suggestions};
 pub use swr::Read;
 pub use track::Track;
 
@@ -407,6 +409,31 @@ impl Catalog {
         }
     }
 
+    /// What a search for `query` finds. Not cached: a search is read once
+    /// per Search Page.
+    pub fn search(
+        &self,
+        query: &str,
+    ) -> impl Future<Output = Result<SearchResults, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let query = query.to_string();
+        async move {
+            let results = tidal
+                .search(&query, PAGE_SIZE)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(SearchResults::from(results))
+        }
+    }
+
+    /// What to offer for `query` while it's typed. Nothing when TIDAL
+    /// can't say: suggestions are never worth an error.
+    pub fn suggestions(&self, query: &str) -> impl Future<Output = Suggestions> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let query = query.to_string();
+        async move { Suggestions::from(tidal.get_suggestions(&query, SUGGESTIONS).await) }
+    }
+
     /// The bytes of a picture, from the disk cache when it's there (stale
     /// is good enough: a cover doesn't change under its URL).
     pub fn image(
@@ -456,6 +483,9 @@ fn is_more_content(section: &HomePageSection) -> bool {
 
 /// How many items a paged read asks for at a time, as in sone.
 pub const PAGE_SIZE: u32 = 50;
+
+/// How many queries the dropdown suggests, as in sone.
+const SUGGESTIONS: u32 = 10;
 
 /// The tags of an artist's or album's reads, as `["artist", "artist:7"]`.
 fn artist_or_album_tags(kind: &str, id: u64) -> Vec<String> {

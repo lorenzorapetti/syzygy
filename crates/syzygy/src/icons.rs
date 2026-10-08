@@ -13,6 +13,7 @@ pub enum Icon {
     ChevronLeft,
     ChevronRight,
     ChevronUp,
+    Clock,
     FolderOpen,
     Heart,
     House,
@@ -23,12 +24,13 @@ pub enum Icon {
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 12] = [
+const SOURCES: [&str; 13] = [
     include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/chevron-down.svg"),
     include_str!("../icons/chevron-left.svg"),
     include_str!("../icons/chevron-right.svg"),
     include_str!("../icons/chevron-up.svg"),
+    include_str!("../icons/clock.svg"),
     include_str!("../icons/folder-open.svg"),
     include_str!("../icons/heart.svg"),
     include_str!("../icons/house.svg"),

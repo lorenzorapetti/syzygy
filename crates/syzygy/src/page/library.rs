@@ -105,7 +105,7 @@ impl State {
             Message::SelectKind(kind) if kind != self.kind && self.folder.is_none() => {
                 self.kind = kind;
                 match self.load() {
-                    Some(load) => Action::Replace(Route::Library { kind }, load),
+                    Some(load) => Action::Replace(Route::Library { kind }, Some(load)),
                     None => Action::None,
                 }
             }

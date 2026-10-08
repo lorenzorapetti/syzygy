@@ -148,7 +148,7 @@ impl State {
                     Route::Home {
                         tab: self.tab.clone(),
                     },
-                    Load::HomeFeed(self.tab.clone()),
+                    Some(Load::HomeFeed(self.tab.clone())),
                 )
             }
             Message::SelectTab(_) => Action::None,

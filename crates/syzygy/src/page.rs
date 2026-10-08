@@ -15,6 +15,7 @@ pub mod library;
 pub mod mix;
 pub mod paged;
 pub mod playlist;
+pub mod search;
 mod track_list;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
@@ -78,6 +79,11 @@ pub enum Route {
         id: String,
         name: String,
     },
+    /// What a search found. The type is the tab.
+    Search {
+        query: String,
+        tab: search::Tab,
+    },
 }
 
 impl Route {
@@ -126,8 +132,8 @@ pub enum Action {
     /// Go somewhere new.
     Navigate(Route),
     /// This Page now shows `route`, as after a tab switch: its Back stack
-    /// entry changes and no step is added. It starts with this read.
-    Replace(Route, Load),
+    /// entry changes and no step is added. It starts this read, if any.
+    Replace(Route, Option<Load>),
     /// Run a widget operation, such as a scroll. Its messages come back as
     /// this Page's.
     Run(Task<Message>),
@@ -205,6 +211,8 @@ pub enum Load {
         sort: Option<TrackSort>,
         offset: usize,
     },
+    /// What a search for a query finds.
+    Search(String),
 }
 
 pub enum Page {
@@ -217,6 +225,7 @@ pub enum Page {
     Playlist(playlist::State),
     Favorites(favorites::State),
     Library(library::State),
+    Search(search::State),
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +239,7 @@ pub enum Message {
     Playlist(playlist::Message),
     Favorites(favorites::Message),
     Library(library::Message),
+    Search(search::Message),
 }
 
 /// What any Page's covers, cards and links ask for.
@@ -297,6 +307,10 @@ impl Page {
                 let (state, action) = library::State::new(Kind::Playlists, Some(folder), context);
                 (Page::Library(state), action)
             }
+            Route::Search { query, tab } => {
+                let (state, action) = search::State::new(query.clone(), *tab);
+                (Page::Search(state), action)
+            }
         }
     }
 
@@ -311,6 +325,7 @@ impl Page {
             (Page::Playlist(state), Message::Playlist(message)) => state.update(message),
             (Page::Favorites(state), Message::Favorites(message)) => state.update(message),
             (Page::Library(state), Message::Library(message)) => state.update(message),
+            (Page::Search(state), Message::Search(message)) => state.update(message),
             // A message for another kind of Page.
             _ => Action::None,
         }
@@ -335,6 +350,7 @@ impl Page {
             Page::Playlist(state) => state.view(images, viewport).map(Message::Playlist),
             Page::Favorites(state) => state.view(images, viewport).map(Message::Favorites),
             Page::Library(state) => state.view(images).map(Message::Library),
+            Page::Search(state) => state.view(images, viewport).map(Message::Search),
         }
     }
 }

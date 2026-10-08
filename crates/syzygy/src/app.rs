@@ -69,6 +69,10 @@ pub enum Message {
     Images(images::Message),
     /// Remember an order the user picked.
     Sort(settings::Sort),
+    /// The user searched for this: it goes to the front of the history.
+    Searched(String),
+    /// Take a search out of the history.
+    ForgetSearch(String),
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
@@ -153,7 +157,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
         State::Fatal(error) => fatal(error),
         State::Running(app) => match &app.phase {
             Phase::Login(login) => login.view().map(Message::Login),
-            Phase::Shell(shell) => shell.view(&app.images),
+            Phase::Shell(shell) => shell.view(&app.images, &app.settings.search_history),
         },
     }
 }
@@ -211,6 +215,14 @@ impl App {
             }
             Message::Sort(sort) => {
                 self.settings.save_sort(sort);
+                self.save_settings()
+            }
+            Message::Searched(query) => {
+                self.settings.remember_search(&query);
+                self.save_settings()
+            }
+            Message::ForgetSearch(query) => {
+                self.settings.forget_search(&query);
                 self.save_settings()
             }
             Message::Images(message) => {
@@ -425,10 +437,19 @@ fn context<'a>(session: Option<&Session>, settings: &'a Settings) -> Context<'a>
 }
 
 /// Back and forward from the mouse side buttons and Alt+←/→ (a text field
-/// that takes the arrow keys keeps them), and the window regaining focus.
+/// that takes the arrow keys keeps them), the window regaining focus, and
+/// the clicks and Escape that close the search dropdown.
 fn shell_events(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
+    let search = |message| Some(Message::Shell(shell::Message::Search(message)));
     match event {
         Event::Window(window::Event::Focused) => Some(Message::WindowFocused),
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+            search(shell::search::Message::Pressed)
+        }
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(key::Named::Escape),
+            ..
+        }) => search(shell::search::Message::Escape),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Back),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Forward),
         Event::Keyboard(keyboard::Event::KeyPressed {

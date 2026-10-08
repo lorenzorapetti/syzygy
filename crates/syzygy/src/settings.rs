@@ -35,7 +35,12 @@ pub struct Settings {
     /// Each Library type's order, in the sidebar and its Library Page. A
     /// type that isn't here is in its default order.
     pub library_sorts: BTreeMap<Kind, LibrarySort>,
+    /// The last searches, newest first.
+    pub search_history: Vec<String>,
 }
+
+/// How many searches the history keeps.
+const SEARCH_HISTORY: usize = 10;
 
 /// An order the user picked for one of their lists.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +68,7 @@ impl Default for Settings {
             track_sorts: BTreeMap::new(),
             loved_tracks_sort: None,
             library_sorts: BTreeMap::new(),
+            search_history: Vec::new(),
         }
     }
 }
@@ -106,6 +112,24 @@ impl Settings {
                 self.library_sorts.insert(kind, sort);
             }
         }
+    }
+
+    /// Put a search at the front of the history, once whatever its case
+    /// (sone's `addToHistory`). Blank searches aren't kept.
+    pub fn remember_search(&mut self, query: &str) {
+        let query = query.trim();
+        if query.is_empty() {
+            return;
+        }
+        let lower = query.to_lowercase();
+        self.search_history
+            .retain(|past| past.to_lowercase() != lower);
+        self.search_history.insert(0, query.to_string());
+        self.search_history.truncate(SEARCH_HISTORY);
+    }
+
+    pub fn forget_search(&mut self, query: &str) {
+        self.search_history.retain(|past| past != query);
     }
 
     /// The order a Library type is read in.
@@ -247,6 +271,50 @@ mod tests {
     }
 
     #[test]
+    fn a_search_goes_to_the_front_of_the_history_once() {
+        let mut settings = Settings::default();
+
+        settings.remember_search("björk");
+        settings.remember_search("  Massive Attack ");
+        settings.remember_search("Björk");
+
+        assert_eq!(settings.search_history, ["Björk", "Massive Attack"]);
+    }
+
+    #[test]
+    fn the_history_keeps_the_last_ten_searches() {
+        let mut settings = Settings::default();
+
+        for n in 1..=12 {
+            settings.remember_search(&format!("query {n}"));
+        }
+
+        assert_eq!(settings.search_history.len(), 10);
+        assert_eq!(settings.search_history[0], "query 12");
+        assert_eq!(settings.search_history[9], "query 3");
+    }
+
+    #[test]
+    fn a_blank_search_isnt_remembered() {
+        let mut settings = Settings::default();
+
+        settings.remember_search("   ");
+
+        assert!(settings.search_history.is_empty());
+    }
+
+    #[test]
+    fn a_search_can_be_forgotten() {
+        let mut settings = Settings::default();
+        settings.remember_search("björk");
+        settings.remember_search("sigur rós");
+
+        settings.forget_search("björk");
+
+        assert_eq!(settings.search_history, ["sigur rós"]);
+    }
+
+    #[test]
     fn saved_settings_load_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
@@ -259,6 +327,7 @@ mod tests {
         };
         settings.save_sort(Sort::Playlist("u-1".into(), Some(by_title())));
         settings.save_sort(Sort::LovedTracks(Some(by_title())));
+        settings.remember_search("björk");
         settings.save_sort(Sort::Library(
             Kind::Mixes,
             LibrarySort {

@@ -205,19 +205,35 @@ fn entry(item: &Value) -> Option<Item> {
 
 /// A page of the user's Favorite albums.
 pub(crate) fn albums_page(page: PaginatedResponse<TidalAlbumDetail>) -> Paged<Item> {
-    paged(page, |album| {
-        let artists = track::artists(album.artists, album.artist);
-        Card {
-            title: track::with_version(album.title, album.version.as_deref()),
-            subtitle: artists
-                .iter()
-                .map(|artist| artist.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            cover: album.cover.map(Cover::Image),
-            target: Target::Album(album.id),
-        }
-    })
+    paged(page, album_card)
+}
+
+/// An album as a card: its title with its version, under its artists.
+pub(crate) fn album_card(album: TidalAlbumDetail) -> Card {
+    let artists = track::artists(album.artists, album.artist);
+    Card {
+        title: track::with_version(album.title, album.version.as_deref()),
+        subtitle: artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        cover: album.cover.map(Cover::Image),
+        target: Target::Album(album.id),
+    }
+}
+
+/// An artist's artwork, else their picture, else the album cover TIDAL
+/// falls back to (sone's `getArtistImage`).
+pub(crate) fn artist_picture(
+    artwork: Option<String>,
+    picture: Option<String>,
+    album_cover: Option<String>,
+) -> Option<Cover> {
+    artwork
+        .or(picture)
+        .map(Cover::Artist)
+        .or_else(|| album_cover.map(Cover::Image))
 }
 
 /// A page of the artists the user follows.
@@ -225,12 +241,11 @@ pub(crate) fn artists_page(page: PaginatedResponse<TidalArtistDetail>) -> Paged<
     paged(page, |artist| Card {
         title: artist.name,
         subtitle: "Artist".to_string(),
-        // sone's `getArtistImage`.
-        cover: artist
-            .artwork_id
-            .or(artist.picture)
-            .map(Cover::Artist)
-            .or_else(|| artist.selected_album_cover_fallback.map(Cover::Image)),
+        cover: artist_picture(
+            artist.artwork_id,
+            artist.picture,
+            artist.selected_album_cover_fallback,
+        ),
         target: Target::Artist(artist.id),
     })
 }

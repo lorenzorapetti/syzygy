@@ -1,15 +1,16 @@
-//! The signed-in Shell: the sidebar, the header, the current Page and the
-//! Back stack, and the toasts over them.
+//! The signed-in Shell: the sidebar, the header with its search, the
+//! current Page and the Back stack, and the toasts over them.
 
 mod back_stack;
+pub mod search;
 pub mod sidebar;
 pub mod toast;
 
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use iced::task;
-use iced::widget::{button, column, container, operation, row, scrollable, space, stack, text};
-use iced::{Alignment, Element, Length, Task, Theme};
+use iced::widget::{button, column, container, operation, row, scrollable, space, stack};
+use iced::{Alignment, Element, Length, Task};
 use syzygy_catalog::{Catalog, HomeFeed, Read};
 
 use crate::app::{self, Services};
@@ -17,15 +18,20 @@ use crate::icons::{Icon, icon};
 use crate::images::{self, Images};
 use crate::page::{
     self, Action, Context, Load, Page, PageId, Route, Viewport, album, artist_tracks,
-    artist_view_all, favorites, library, mix, playlist,
+    artist_view_all, favorites, library, mix, playlist, search as search_page,
 };
 use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
+use search::Search;
 use sidebar::Sidebar;
 use toast::{Kind, ToastId, Toasts};
 
 const HEADER_HEIGHT: f32 = 64.0;
+const HEADER_PADDING: f32 = 16.0;
+const HEADER_SPACING: f32 = 8.0;
+/// The back and forward buttons.
+const STEP_SIZE: f32 = 32.0;
 /// Pages stop growing past this on wide windows.
 const MAX_PAGE_WIDTH: f32 = 1520.0;
 /// The scrollable every Page draws in.
@@ -39,6 +45,7 @@ pub struct Shell {
     back_stack: BackStack,
     current: Current,
     sidebar: Sidebar,
+    search: Search,
     next_id: u64,
     toasts: Toasts,
     /// How tall the Page's viewport is, as last reported.
@@ -60,6 +67,7 @@ pub enum Message {
     Scrolled(PageId, Viewport),
     DismissToast(ToastId),
     Sidebar(sidebar::Message),
+    Search(search::Message),
 }
 
 impl Shell {
@@ -78,6 +86,7 @@ impl Shell {
             back_stack: BackStack::default(),
             current,
             sidebar,
+            search: Search::default(),
             next_id: 1,
             toasts: Toasts::default(),
             viewport_height: UNKNOWN_HEIGHT,
@@ -161,6 +170,10 @@ impl Shell {
                 let effect = self.sidebar.update(message);
                 return self.run_sidebar(effect, services, context);
             }
+            Message::Search(message) => {
+                let effect = self.search.update(message);
+                return self.run_search(effect, services, context);
+            }
         }
         Task::none()
     }
@@ -190,6 +203,9 @@ impl Shell {
     /// to the content, so it lands once the Page's data is tall enough.
     fn open(&mut self, entry: Entry, services: &Services, context: &Context) -> Task<app::Message> {
         let offset = entry.offset;
+        if let Route::Search { query, .. } = &entry.route {
+            self.search.showing(query);
+        }
         let (current, action) = Current::open(PageId(self.next_id), entry, context);
         self.current = current;
         self.next_id += 1;
@@ -233,7 +249,10 @@ impl Shell {
             Action::Replace(route, load) => {
                 self.current.route = route;
                 self.current.offset = 0.0;
-                let load = self.run_action(Action::Load(load), services, context);
+                let load = match load {
+                    Some(load) => self.run_action(Action::Load(load), services, context),
+                    None => Task::none(),
+                };
                 Task::batch([load, scroll_to(0.0)])
             }
             Action::Load(load) => {
@@ -283,7 +302,52 @@ impl Shell {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, app::Message> {
+    fn run_search(
+        &mut self,
+        effect: search::Effect,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let to_shell = |message| app::Message::Shell(Message::Search(message));
+        match effect {
+            search::Effect::None => Task::none(),
+            search::Effect::Wait(typed) => {
+                Task::perform(tokio::time::sleep(search::DEBOUNCE), move |()| {
+                    to_shell(search::Message::Waited(typed))
+                })
+            }
+            search::Effect::Fetch(query) => {
+                let (task, handle) =
+                    Task::perform(services.catalog.suggestions(&query), move |suggestions| {
+                        to_shell(search::Message::Arrived {
+                            query: query.clone(),
+                            suggestions,
+                        })
+                    })
+                    .abortable();
+                self.search.fetching(handle);
+                task
+            }
+            search::Effect::Search(query) => {
+                let route = Route::Search {
+                    query: query.clone(),
+                    tab: search_page::Tab::All,
+                };
+                let open = self.navigate(route, services, context);
+                Task::batch([Task::done(app::Message::Searched(query)), open])
+            }
+            search::Effect::Forget(query) => Task::done(app::Message::ForgetSearch(query)),
+            search::Effect::Follow(link) => self.run_action(link.follow(), services, context),
+            search::Effect::Focus => Search::focus(),
+        }
+    }
+
+    /// `past_searches` are the user's, for the search dropdown.
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        past_searches: &'a [String],
+    ) -> Element<'a, app::Message> {
         let id = self.current.id;
         let viewport = Viewport {
             offset: self.current.offset,
@@ -315,7 +379,13 @@ impl Shell {
             .sidebar
             .view(images, &self.current.route)
             .map(|message| app::Message::Shell(Message::Sidebar(message)));
-        let main = row![sidebar, column![self.header(), page]];
+        // The dropdown hangs over the Page, under the search field.
+        let dropdown = self.search.view(past_searches, images).map(|dropdown| {
+            let left = HEADER_PADDING + 2.0 * (STEP_SIZE + HEADER_SPACING);
+            container(dropdown.map(|message| app::Message::Shell(Message::Search(message))))
+                .padding(iced::Padding::new(0.0).left(left))
+        });
+        let main = row![sidebar, column![self.header(), stack![page].push(dropdown)]];
         let toasts = self
             .toasts
             .view()
@@ -330,7 +400,7 @@ impl Shell {
                 Some(_) => style::TEXT_PRIMARY,
                 None => style::TEXT_DISABLED,
             };
-            button(container(icon(glyph, 20.0, color)).center(32))
+            button(container(icon(glyph, 20.0, color)).center(STEP_SIZE))
                 .padding(0)
                 .on_press_maybe(message)
                 .style(style::icon_button)
@@ -345,25 +415,18 @@ impl Shell {
                 .can_go_forward()
                 .then_some(app::Message::Forward),
         );
-        let search = container(
-            row![
-                icon(Icon::Search, 16.0, style::TEXT_MUTED),
-                text("Search").size(14).color(style::TEXT_MUTED),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .padding([8, 14])
-        .width(320)
-        .style(search_box);
+        let search = self
+            .search
+            .field()
+            .map(|message| app::Message::Shell(Message::Search(message)));
         let avatar = images::placeholder(32.0, 16.0);
 
         container(
             row![back, forward, search, space::horizontal(), avatar]
-                .spacing(8)
+                .spacing(HEADER_SPACING)
                 .align_y(Alignment::Center),
         )
-        .padding([0, 16])
+        .padding([0.0, HEADER_PADDING])
         .width(Length::Fill)
         .center_y(HEADER_HEIGHT)
         .into()
@@ -389,14 +452,6 @@ impl Current {
             route: self.route.clone(),
             offset: self.offset,
         }
-    }
-}
-
-fn search_box(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(style::BG_INSET.into()),
-        border: style::rounded(18.0),
-        ..container::Style::default()
     }
 }
 
@@ -529,6 +584,9 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
                     result,
                 })
             })
+            .boxed(),
+        Load::Search(query) => stream::once(catalog.search(&query))
+            .map(|result| page::Message::Search(search_page::Message::Loaded(result)))
             .boxed(),
     }
 }

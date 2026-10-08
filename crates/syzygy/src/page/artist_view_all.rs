@@ -99,7 +99,7 @@ impl State {
                         id: self.id,
                         section: self.section.clone(),
                     },
-                    self.load(),
+                    Some(self.load()),
                 )
             }
             Message::SelectTab(_) => Action::None,

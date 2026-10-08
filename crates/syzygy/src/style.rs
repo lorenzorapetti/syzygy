@@ -114,6 +114,20 @@ pub fn unselected_tab(_theme: &Theme, status: button::Status) -> button::Style {
     pill(background, TEXT_PRIMARY)
 }
 
+/// A row in a list that does something when clicked, as a search hit.
+pub fn list_row(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(HL_MED.into()),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: TEXT_PRIMARY,
+        border: rounded(4.0),
+        ..button::Style::default()
+    }
+}
+
 /// A pill button, as Refresh under a playlist's recommendations.
 pub fn pill_button(_theme: &Theme, status: button::Status) -> button::Style {
     match status {
