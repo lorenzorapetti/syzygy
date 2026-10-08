@@ -5,12 +5,15 @@
 pub mod album;
 pub mod artist;
 mod error;
+pub mod explore;
+pub mod feed;
 mod home;
 pub mod home_feed;
 pub mod library;
 pub mod mix;
 mod paged;
 pub mod playlist;
+pub mod profile;
 pub mod search;
 mod swr;
 pub mod track;
@@ -32,11 +35,14 @@ use syzygy_tidal::models::{
 pub use album::Album;
 pub use artist::Artist;
 pub use error::Error;
+pub use explore::ExplorePage;
+pub use feed::Feed;
 pub use home_feed::{Card, Cover, HomeFeed};
 pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
 pub use mix::Mix;
 pub use paged::Paged;
 pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
+pub use profile::Profile;
 pub use search::{Hit, SearchResults, Suggestion, Suggestions};
 pub use swr::Read;
 pub use track::Track;
@@ -434,6 +440,63 @@ impl Catalog {
         async move { Suggestions::from(tidal.get_suggestions(&query, SUGGESTIONS).await) }
     }
 
+    /// An Explore Page, by its path: [`explore::ROOT`] for Explore itself.
+    pub fn explore(&self, path: &str) -> BoxStream<'static, Read<ExplorePage>> {
+        let tidal = self.tidal.clone();
+        let path = path.to_string();
+        swr::read(
+            self.cache.clone(),
+            explore_entry(&path),
+            move || async move { Ok(tidal.get_page(&path).await?) },
+        )
+        .map(|read| read.map(ExplorePage::from))
+        .boxed()
+    }
+
+    /// The user's Feed. Not cached, so how many they haven't seen is never
+    /// a stale count from before they opened it.
+    pub fn feed(
+        &self,
+        user_id: u64,
+    ) -> impl Future<Output = Result<Feed, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        async move {
+            let feed = tidal
+                .fetch_feed(user_id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(Feed::from(feed))
+        }
+    }
+
+    /// Mark everything in the user's Feed seen.
+    pub fn mark_feed_seen(
+        &self,
+        user_id: u64,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        async move {
+            tidal
+                .mark_feed_seen(user_id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))
+        }
+    }
+
+    /// A user's profile, the signed-in user's or anyone's.
+    pub fn profile(&self, user_id: u64) -> BoxStream<'static, Read<Profile>> {
+        let tidal = self.tidal.clone();
+        let entry = serde_entry(
+            format!("profile:{user_id}"),
+            vec!["profile".to_string(), format!("profile:{user_id}")],
+        );
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(tidal.get_profile(user_id).await?)
+        })
+        .map(|read| read.map(Profile::from))
+        .boxed()
+    }
+
     /// The bytes of a picture, from the disk cache when it's there (stale
     /// is good enough: a cover doesn't change under its URL).
     pub fn image(
@@ -467,6 +530,17 @@ fn home_feed_entry(slug: &str) -> Entry<HomePageResponse> {
         key: format!("home_feed_{slug}"),
         tier: CacheTier::Dynamic,
         tags: vec!["home-page".to_string()],
+        encode: home::encode,
+        decode: home::decode,
+    }
+}
+
+/// Where an Explore Page lives in the cache.
+fn explore_entry(path: &str) -> Entry<HomePageResponse> {
+    Entry {
+        key: format!("section:{path}"),
+        tier: CacheTier::Dynamic,
+        tags: vec!["section".to_string()],
         encode: home::encode,
         decode: home::decode,
     }

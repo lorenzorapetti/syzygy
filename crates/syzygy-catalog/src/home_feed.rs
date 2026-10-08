@@ -201,7 +201,7 @@ pub(crate) fn items(items: &Value) -> &[Value] {
     items.as_array().map(Vec::as_slice).unwrap_or_default()
 }
 
-fn card(item: &Value, hint: Option<&str>) -> Card {
+pub(crate) fn card(item: &Value, hint: Option<&str>) -> Card {
     Card {
         title: title(item).to_string(),
         subtitle: subtitle(item),

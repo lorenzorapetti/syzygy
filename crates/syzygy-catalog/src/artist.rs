@@ -171,7 +171,7 @@ fn picture(artist: &Value) -> Option<Cover> {
 }
 
 /// The bio without TIDAL's `[wimpLink …]` and HTML markup.
-fn strip_bio(bio: &str) -> String {
+pub(crate) fn strip_bio(bio: &str) -> String {
     let mut out = String::with_capacity(bio.len());
     let mut closer = None;
     for c in bio.chars() {

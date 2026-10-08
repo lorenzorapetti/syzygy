@@ -5,20 +5,22 @@ mod back_stack;
 pub mod search;
 pub mod sidebar;
 pub mod toast;
+mod unseen;
 
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use iced::task;
 use iced::widget::{button, column, container, operation, row, scrollable, space, stack};
 use iced::{Alignment, Element, Length, Task};
-use syzygy_catalog::{Catalog, HomeFeed, Read};
+use std::sync::Arc;
+use syzygy_catalog::{Catalog, Feed, HomeFeed, Read};
 
 use crate::app::{self, Services};
 use crate::icons::{Icon, icon};
 use crate::images::{self, Images};
 use crate::page::{
     self, Action, Context, Load, Page, PageId, Route, Viewport, album, artist_tracks,
-    artist_view_all, favorites, library, mix, playlist, search as search_page,
+    artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
 };
 use crate::settings::Sort;
 use crate::style;
@@ -26,6 +28,7 @@ use back_stack::{BackStack, Entry};
 use search::Search;
 use sidebar::Sidebar;
 use toast::{Kind, ToastId, Toasts};
+use unseen::Unseen;
 
 const HEADER_HEIGHT: f32 = 64.0;
 const HEADER_PADDING: f32 = 16.0;
@@ -42,12 +45,16 @@ const PAGE_SCROLL: iced::widget::Id = iced::widget::Id::new("page");
 const UNKNOWN_HEIGHT: f32 = 4000.0;
 
 pub struct Shell {
+    /// Who's signed in, when TIDAL has said.
+    user_id: Option<u64>,
     back_stack: BackStack,
     current: Current,
     sidebar: Sidebar,
     search: Search,
     next_id: u64,
     toasts: Toasts,
+    /// Whether the Feed has something the user hasn't seen.
+    unseen: Unseen,
     /// How tall the Page's viewport is, as last reported.
     viewport_height: f32,
 }
@@ -68,6 +75,12 @@ pub enum Message {
     DismissToast(ToastId),
     Sidebar(sidebar::Message),
     Search(search::Message),
+    /// The avatar: the user's own Profile.
+    OpenProfile,
+    /// The Feed check after login.
+    FeedChecked(Result<Feed, Arc<syzygy_catalog::Error>>),
+    /// The Feed was marked seen, or not.
+    FeedSeen(Result<(), Arc<syzygy_catalog::Error>>),
 }
 
 impl Shell {
@@ -83,17 +96,20 @@ impl Shell {
         );
         let (sidebar, read) = Sidebar::new(context.user_id, context.settings);
         let mut shell = Self {
+            user_id: context.user_id,
             back_stack: BackStack::default(),
             current,
             sidebar,
             search: Search::default(),
             next_id: 1,
             toasts: Toasts::default(),
+            unseen: Unseen::default(),
             viewport_height: UNKNOWN_HEIGHT,
         };
         let task = shell.run_action(action, services, context);
         let read = shell.run_sidebar(read, services, context);
-        (shell, Task::batch([task, read]))
+        let check = shell.check_feed(context.user_id, services);
+        (shell, Task::batch([task, read, check]))
     }
 
     /// TIDAL said who's signed in.
@@ -103,8 +119,25 @@ impl Shell {
         services: &Services,
         context: &Context,
     ) -> Task<app::Message> {
+        self.user_id = Some(user_id);
+        // The Feed opened before TIDAL said whose it was.
+        let seen = match self.current.route {
+            Route::Feed => self.feed_seen(user_id, services),
+            _ => Task::none(),
+        };
         let effect = self.sidebar.user_known(user_id);
-        self.run_sidebar(effect, services, context)
+        let read = self.run_sidebar(effect, services, context);
+        Task::batch([read, seen, self.check_feed(Some(user_id), services)])
+    }
+
+    /// Read the Feed once, for the sidebar's dot.
+    fn check_feed(&mut self, user_id: Option<u64>, services: &Services) -> Task<app::Message> {
+        match self.unseen.check(user_id) {
+            Some(user_id) => Task::perform(services.catalog.feed(user_id), |result| {
+                app::Message::Shell(Message::FeedChecked(result))
+            }),
+            None => Task::none(),
+        }
     }
 
     /// Go somewhere new. The current Page goes on the Back stack.
@@ -174,6 +207,18 @@ impl Shell {
                 let effect = self.search.update(message);
                 return self.run_search(effect, services, context);
             }
+            Message::OpenProfile => {
+                if let Some(user_id) = self.user_id {
+                    return self.navigate(Route::Profile { user_id }, services, context);
+                }
+            }
+            Message::FeedChecked(Ok(feed)) => self.unseen.arrived(feed.unseen),
+            Message::FeedChecked(Err(e)) => log::warn!("Could not check the Feed: {e}"),
+            Message::FeedSeen(result) => {
+                if let Err(e) = result {
+                    log::warn!("Could not mark the Feed seen: {e}");
+                }
+            }
         }
         Task::none()
     }
@@ -206,11 +251,24 @@ impl Shell {
         if let Route::Search { query, .. } = &entry.route {
             self.search.showing(query);
         }
+        let seen = match (&entry.route, context.user_id) {
+            (Route::Feed, Some(user_id)) => self.feed_seen(user_id, services),
+            _ => Task::none(),
+        };
         let (current, action) = Current::open(PageId(self.next_id), entry, context);
         self.current = current;
         self.next_id += 1;
         let task = self.run_action(action, services, context);
-        Task::batch([task, scroll_to(offset)])
+        Task::batch([task, seen, scroll_to(offset)])
+    }
+
+    /// The Feed opened: everything in it is seen. Not one of the Page's
+    /// reads, so leaving the Page doesn't abort it.
+    fn feed_seen(&mut self, user_id: u64, services: &Services) -> Task<app::Message> {
+        self.unseen.opened();
+        Task::perform(services.catalog.mark_feed_seen(user_id), |result| {
+            app::Message::Shell(Message::FeedSeen(result))
+        })
     }
 
     fn run_action(
@@ -377,7 +435,7 @@ impl Shell {
 
         let sidebar = self
             .sidebar
-            .view(images, &self.current.route)
+            .view(images, &self.current.route, self.unseen.any())
             .map(|message| app::Message::Shell(Message::Sidebar(message)));
         // The dropdown hangs over the Page, under the search field.
         let dropdown = self.search.view(past_searches, images).map(|dropdown| {
@@ -419,7 +477,13 @@ impl Shell {
             .search
             .field()
             .map(|message| app::Message::Shell(Message::Search(message)));
-        let avatar = images::placeholder(32.0, 16.0);
+        let avatar = button(page::no_picture(STEP_SIZE))
+            .padding(0)
+            .style(style::icon_button)
+            .on_press_maybe(
+                self.user_id
+                    .map(|_| app::Message::Shell(Message::OpenProfile)),
+            );
 
         container(
             row![back, forward, search, space::horizontal(), avatar]
@@ -588,6 +652,14 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
         Load::Search(query) => stream::once(catalog.search(&query))
             .map(|result| page::Message::Search(search_page::Message::Loaded(result)))
             .boxed(),
+        Load::Explore(path) => catalog
+            .explore(&path)
+            .map(|read| page::Message::Explore(explore::Message::Loaded(read)))
+            .boxed(),
+        Load::Feed(user_id) => stream::once(catalog.feed(user_id))
+            .map(|result| page::Message::Feed(feed::Message::Loaded(result)))
+            .boxed(),
+        Load::Profile { user_id, then } => catalog.profile(user_id).map(then).boxed(),
     }
 }
 

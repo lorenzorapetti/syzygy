@@ -9,7 +9,7 @@ use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
 use super::paged::List;
 use super::track_list::{self, Columns};
 use super::{
-    Action, Context, Link, Load, PADDING, Preview, Remote, Viewport, count, duration, hero,
+    Action, Context, Link, Load, PADDING, Preview, Remote, Route, Viewport, count, duration, hero,
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
@@ -278,17 +278,26 @@ impl State {
             count(playlist.tracks as usize, "Track"),
             duration(playlist.duration)
         );
+        // A user's name leads to their Profile.
+        let creator = creator.map(|creator| match playlist.profile() {
+            Some(user_id) => super::link(
+                text(creator).size(14),
+                Link::Open(Route::Profile { user_id }),
+            ),
+            None => text(creator).size(14).color(style::TEXT_PRIMARY).into(),
+        });
         let lines = [
-            creator.map(|creator| text(creator).size(14).color(style::TEXT_PRIMARY)),
+            creator,
             playlist.description.as_deref().map(|description| {
                 text(description)
                     .size(14)
                     .color(style::TEXT_MUTED)
                     .wrapping(text::Wrapping::None)
+                    .into()
             }),
-            Some(text(facts).size(12).color(style::TEXT_MUTED)),
+            Some(text(facts).size(12).color(style::TEXT_MUTED).into()),
         ];
-        let lines = lines.into_iter().flatten().map(Element::from).collect();
+        let lines = lines.into_iter().flatten().collect();
         hero::view(
             images,
             "PLAYLIST",

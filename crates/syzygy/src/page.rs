@@ -8,18 +8,22 @@ pub mod artist;
 pub mod artist_tracks;
 pub mod artist_view_all;
 pub mod cards;
+pub mod explore;
 pub mod favorites;
+pub mod feed;
 mod hero;
 pub mod home;
 pub mod library;
 pub mod mix;
 pub mod paged;
 pub mod playlist;
+pub mod profile;
+pub mod profile_playlists;
 pub mod search;
 mod track_list;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
-use iced::{Alignment, Color, Element, Length, Task, Theme};
+use iced::{Alignment, Color, Element, Length, Task};
 use std::sync::Arc;
 use syzygy_catalog::home_feed::Cover;
 use syzygy_catalog::track::ArtistRef;
@@ -83,6 +87,23 @@ pub enum Route {
     Search {
         query: String,
         tab: search::Tab,
+    },
+    Explore,
+    /// A Page under Explore (a genre, a mood, a decade, an editorial page)
+    /// by the path TIDAL reads it from, with its title.
+    ExplorePage {
+        path: String,
+        title: String,
+    },
+    /// New releases from the artists the user follows.
+    Feed,
+    /// A user's profile: the signed-in user's or anyone's.
+    Profile {
+        user_id: u64,
+    },
+    /// A user's public playlists in full.
+    ProfilePlaylists {
+        user_id: u64,
     },
 }
 
@@ -213,6 +234,16 @@ pub enum Load {
     },
     /// What a search for a query finds.
     Search(String),
+    /// An Explore Page, by its path.
+    Explore(String),
+    /// The user's Feed.
+    Feed(u64),
+    /// A user's profile, read by the Profile Page and the Page of its
+    /// playlists, each into its own message.
+    Profile {
+        user_id: u64,
+        then: fn(Read<syzygy_catalog::Profile>) -> Message,
+    },
 }
 
 pub enum Page {
@@ -226,6 +257,11 @@ pub enum Page {
     Favorites(favorites::State),
     Library(library::State),
     Search(search::State),
+    /// Explore and the Pages under it.
+    Explore(explore::State),
+    Feed(feed::State),
+    Profile(profile::State),
+    ProfilePlaylists(profile_playlists::State),
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +276,10 @@ pub enum Message {
     Favorites(favorites::Message),
     Library(library::Message),
     Search(search::Message),
+    Explore(explore::Message),
+    Feed(feed::Message),
+    Profile(profile::Message),
+    ProfilePlaylists(profile_playlists::Message),
 }
 
 /// What any Page's covers, cards and links ask for.
@@ -311,6 +351,26 @@ impl Page {
                 let (state, action) = search::State::new(query.clone(), *tab);
                 (Page::Search(state), action)
             }
+            Route::Explore => {
+                let (state, action) = explore::State::root();
+                (Page::Explore(state), action)
+            }
+            Route::ExplorePage { path, title } => {
+                let (state, action) = explore::State::page(path.clone(), title.clone());
+                (Page::Explore(state), action)
+            }
+            Route::Feed => {
+                let (state, action) = feed::State::new(context);
+                (Page::Feed(state), action)
+            }
+            Route::Profile { user_id } => {
+                let (state, action) = profile::State::new(*user_id);
+                (Page::Profile(state), action)
+            }
+            Route::ProfilePlaylists { user_id } => {
+                let (state, action) = profile_playlists::State::new(*user_id);
+                (Page::ProfilePlaylists(state), action)
+            }
         }
     }
 
@@ -326,6 +386,12 @@ impl Page {
             (Page::Favorites(state), Message::Favorites(message)) => state.update(message),
             (Page::Library(state), Message::Library(message)) => state.update(message),
             (Page::Search(state), Message::Search(message)) => state.update(message),
+            (Page::Explore(state), Message::Explore(message)) => state.update(message),
+            (Page::Feed(state), Message::Feed(message)) => state.update(message),
+            (Page::Profile(state), Message::Profile(message)) => state.update(message),
+            (Page::ProfilePlaylists(state), Message::ProfilePlaylists(message)) => {
+                state.update(message)
+            }
             // A message for another kind of Page.
             _ => Action::None,
         }
@@ -351,6 +417,10 @@ impl Page {
             Page::Favorites(state) => state.view(images, viewport).map(Message::Favorites),
             Page::Library(state) => state.view(images).map(Message::Library),
             Page::Search(state) => state.view(images, viewport).map(Message::Search),
+            Page::Explore(state) => state.view(images).map(Message::Explore),
+            Page::Feed(state) => state.view(images).map(Message::Feed),
+            Page::Profile(state) => state.view(images).map(Message::Profile),
+            Page::ProfilePlaylists(state) => state.view(images).map(Message::ProfilePlaylists),
         }
     }
 }
@@ -459,25 +529,22 @@ pub fn folder_art<'a, M: 'a>(size: f32, radius: f32) -> Element<'a, M> {
     .into()
 }
 
+/// A round placeholder with a person in it, `size` across: a profile
+/// with no picture.
+pub fn no_picture<'a, M: 'a>(size: f32) -> Element<'a, M> {
+    container(icon(Icon::User, (size * 0.4).round(), style::TEXT_MUTED))
+        .center(size)
+        .style(move |theme| style::placeholder(theme, size / 2.0))
+        .into()
+}
+
 /// Text that goes somewhere when clicked.
 pub fn link<'a>(label: Text<'a>, link: Link) -> Element<'a, Link> {
     button(label)
         .padding(0)
-        .style(link_style)
+        .style(style::text_link)
         .on_press(link)
         .into()
-}
-
-fn link_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let text_color = match status {
-        button::Status::Hovered | button::Status::Pressed => style::TEXT_PRIMARY,
-        _ => style::TEXT_SECONDARY,
-    };
-    button::Style {
-        background: None,
-        text_color,
-        ..button::Style::default()
-    }
 }
 
 /// "3:07", or "1:02:45" past the hour (sone's `formatTotalDuration`).

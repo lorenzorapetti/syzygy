@@ -27,6 +27,9 @@ pub struct Playlist {
 pub struct Creator {
     pub id: Option<u64>,
     pub name: Option<String>,
+    /// A user, rather than an artist or TIDAL.
+    #[serde(default)]
+    pub user: bool,
 }
 
 impl Playlist {
@@ -38,6 +41,13 @@ impl Playlist {
 
     pub fn creator_name(&self) -> Option<&str> {
         self.creator.as_ref()?.name.as_deref()
+    }
+
+    /// The user whose Profile the creator is: only a user's playlist has
+    /// one. An artist's or TIDAL's is made by someone with no profile.
+    pub fn profile(&self) -> Option<u64> {
+        let creator = self.creator.as_ref().filter(|creator| creator.user)?;
+        creator.id.filter(|&id| id != 0)
     }
 }
 
@@ -56,6 +66,7 @@ pub(crate) fn from_details(details: &Value) -> Option<Playlist> {
         creator: playlist.creator.map(|c| Creator {
             id: c.id,
             name: c.name.filter(|n| !n.is_empty()),
+            user: playlist.playlist_type.as_deref() == Some("USER"),
         }),
         tracks: playlist.number_of_tracks.unwrap_or(0),
         videos: playlist.number_of_videos.unwrap_or(0),
@@ -215,7 +226,8 @@ mod tests {
             playlist.creator,
             Some(Creator {
                 id: Some(7),
-                name: None
+                name: None,
+                user: false,
             })
         );
         assert_eq!(
@@ -234,6 +246,26 @@ mod tests {
         assert!(!made_by(Some(8)).is_own(Some(7)));
         assert!(!made_by(None).is_own(Some(7)));
         assert!(!made_by(Some(7)).is_own(None));
+    }
+
+    #[test]
+    fn only_a_users_playlist_leads_to_its_creators_profile() {
+        let playlist = |kind: &str, id: u64| {
+            from_details(&json!({
+                "uuid": "u",
+                "title": "T",
+                "type": kind,
+                "creator": { "id": id, "name": "Ada" },
+            }))
+            .unwrap()
+        };
+
+        assert_eq!(playlist("USER", 7).profile(), Some(7));
+        assert_eq!(playlist("USER", 0).profile(), None);
+        assert_eq!(playlist("EDITORIAL", 7).profile(), None);
+        assert_eq!(playlist("ARTIST", 7).profile(), None);
+        let untyped = from_details(&json!({ "uuid": "u", "title": "T", "creator": { "id": 7 } }));
+        assert_eq!(untyped.unwrap().profile(), None);
     }
 
     #[test]

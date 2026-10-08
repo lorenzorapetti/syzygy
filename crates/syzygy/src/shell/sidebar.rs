@@ -3,7 +3,7 @@
 //! list stays on screen while it's read again, until the new read arrives,
 //! so the sidebar is never emptied by a reload.
 
-use iced::widget::{Column, button, column, container, row, scrollable, space, text};
+use iced::widget::{Column, button, column, container, row, scrollable, space, stack, text};
 use iced::{Alignment, Element, Length, Theme};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -229,20 +229,35 @@ impl Sidebar {
             .expect("every type has a list")
     }
 
-    /// The sidebar, with the Page at `current` marked where it's listed.
-    pub fn view<'a>(&'a self, images: &'a Images, current: &Route) -> Element<'a, Message> {
-        let home = button(
-            row![
-                icon(Icon::House, 20.0, style::TEXT_PRIMARY),
-                text("Home").size(14)
-            ]
-            .spacing(12)
-            .align_y(Alignment::Center),
-        )
-        .padding([8, 12])
-        .on_press(Message::Link(Link::Open(Route::home())))
-        .style(item_style(matches!(current, Route::Home { .. })))
-        .width(Length::Fill);
+    /// The sidebar, with the Page at `current` marked where it's listed,
+    /// and a dot on Feed when it has something `unseen`.
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        current: &Route,
+        unseen: bool,
+    ) -> Element<'a, Message> {
+        let home = nav(
+            icon(Icon::House, 20.0, style::TEXT_PRIMARY).into(),
+            "Home",
+            Route::home(),
+            matches!(current, Route::Home { .. }),
+        );
+        let explore = nav(
+            icon(Icon::Compass, 20.0, style::TEXT_PRIMARY).into(),
+            "Explore",
+            Route::Explore,
+            matches!(current, Route::Explore | Route::ExplorePage { .. }),
+        );
+        let bell = icon(Icon::Bell, 20.0, style::TEXT_PRIMARY);
+        let bell = if unseen {
+            let dot = container(space()).style(dot).width(10).height(10);
+            stack![bell, container(dot).align_right(20).align_top(20)].into()
+        } else {
+            bell.into()
+        };
+        let feed = nav(bell, "Feed", Route::Feed, matches!(current, Route::Feed));
+        let pages = column![home, explore, feed].spacing(2);
         let show_all = button(text("Show all").size(12))
             .padding([4, 8])
             .style(show_all_style)
@@ -280,7 +295,7 @@ impl Sidebar {
         let list = scrollable(self.list(images, current))
             .height(Length::Fill)
             .width(Length::Fill);
-        let body = column![text(DISPLAY_NAME).size(22), home, header, pills, list].spacing(12);
+        let body = column![text(DISPLAY_NAME).size(22), pages, header, pills, list].spacing(12);
         container(body)
             .padding(16)
             .width(WIDTH)
@@ -368,6 +383,38 @@ impl Sidebar {
                 )
             }
         }
+    }
+}
+
+/// A Page that's always there, as Home, by its icon.
+fn nav<'a>(
+    art: Element<'a, Message>,
+    label: &'a str,
+    route: Route,
+    here: bool,
+) -> Element<'a, Message> {
+    button(
+        row![art, text(label).size(14)]
+            .spacing(12)
+            .align_y(Alignment::Center),
+    )
+    .padding([8, 12])
+    .on_press(Message::Link(Link::Open(route)))
+    .style(item_style(here))
+    .width(Length::Fill)
+    .into()
+}
+
+/// sone's unseen dot: the accent, ringed in the sidebar's colour.
+fn dot(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(style::ACCENT.into()),
+        border: iced::Border {
+            color: style::BG_SIDEBAR,
+            width: 2.0,
+            radius: 5.0.into(),
+        },
+        ..container::Style::default()
     }
 }
 

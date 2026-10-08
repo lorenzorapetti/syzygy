@@ -114,6 +114,19 @@ pub fn unselected_tab(_theme: &Theme, status: button::Status) -> button::Style {
     pill(background, TEXT_PRIMARY)
 }
 
+/// Text that goes somewhere, lighting up when hovered.
+pub fn text_link(_theme: &Theme, status: button::Status) -> button::Style {
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => TEXT_PRIMARY,
+        _ => TEXT_SECONDARY,
+    };
+    button::Style {
+        background: None,
+        text_color,
+        ..button::Style::default()
+    }
+}
+
 /// A row in a list that does something when clicked, as a search hit.
 pub fn list_row(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
