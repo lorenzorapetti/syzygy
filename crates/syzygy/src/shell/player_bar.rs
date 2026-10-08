@@ -142,11 +142,9 @@ impl PlayerBar {
 
 /// The cover, the title and the artists of what's playing.
 fn now_playing<'a>(playback: &'a Playback, images: &'a Images) -> Element<'a, Message> {
+    // The Shell shows the bar only with a current track.
     let Some(track) = playback.current() else {
-        return text("No track playing")
-            .size(14)
-            .color(style::TEXT_FAINT)
-            .into();
+        return space().into();
     };
     let cover = track.album.as_ref().and_then(|album| album.cover.as_ref());
     let details = column![

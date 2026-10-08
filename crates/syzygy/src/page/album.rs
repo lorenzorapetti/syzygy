@@ -2,14 +2,15 @@
 //! then "More by …" and the other sections TIDAL sends with it.
 
 use iced::Element;
-use iced::widget::{Column, column, text};
+use iced::widget::{Column, column, mouse_area, text};
 use syzygy_catalog::track::AlbumRef;
 use syzygy_catalog::{Album, Read};
 
 use super::cards::{self, Rows};
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Mark};
 use super::{
-    Action, Link, Load, PADDING, Preview, Remote, Viewport, artists, count, duration, hero,
+    Action, Link, Load, NowPlaying, PADDING, Preview, Remote, Viewport, artists, count, duration,
+    hero,
 };
 use crate::images::Images;
 use crate::playback::{PlayRequest, SourceRef};
@@ -32,6 +33,8 @@ pub struct State {
     /// The list's rows, with volume headings when there's more than one.
     rows: Vec<Row>,
     cards: Rows,
+    /// The track the pointer is over, by its place in the album.
+    hovered: Option<usize>,
 }
 
 enum Row {
@@ -47,6 +50,10 @@ pub enum Message {
     Link(Link),
     /// Play the album from the track at this place in it.
     Play(usize),
+    /// The pointer came over the track at this place.
+    Hovered(usize),
+    /// The pointer left the track at this place.
+    Left(usize),
     Retry,
 }
 
@@ -58,6 +65,7 @@ impl State {
             album: Remote::Loading,
             rows: Vec::new(),
             cards: Rows::default(),
+            hovered: None,
         };
         (state, Action::Load(Load::Album(id)))
     }
@@ -87,6 +95,17 @@ impl State {
                 Some(album) => Action::Play(self.play_request(album, start)),
                 None => Action::None,
             },
+            Message::Hovered(index) => {
+                self.hovered = Some(index);
+                Action::None
+            }
+            // Only the row it left: the next row's arrival may come first.
+            Message::Left(index) => {
+                if self.hovered == Some(index) {
+                    self.hovered = None;
+                }
+                Action::None
+            }
             Message::Retry => {
                 self.album = Remote::Loading;
                 Action::Load(Load::Album(self.id))
@@ -94,7 +113,18 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.album
+            .loaded()
+            .is_some_and(|album| album.tracks.iter().any(|track| track.id == track_id))
+    }
+
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        now_playing: Option<NowPlaying>,
+    ) -> Element<'a, Message> {
         let hero = match (&self.album, &self.preview) {
             (Remote::Loaded(album), _) => Some(album_hero(album, images)),
             (Remote::Loading, Some(preview)) => {
@@ -103,7 +133,7 @@ impl State {
             _ => None,
         };
         let body = self.album.view(Message::Retry, |album| {
-            let row = |i| self.row(i, album, images);
+            let row = |i| self.row(i, album, images, now_playing);
             let list = track_list::view(
                 self.rows.len(),
                 LIST_TOP,
@@ -134,13 +164,37 @@ impl State {
             .into()
     }
 
-    fn row<'a>(&self, i: usize, album: &'a Album, images: &'a Images) -> Element<'a, Message> {
+    fn row<'a>(
+        &self,
+        i: usize,
+        album: &'a Album,
+        images: &'a Images,
+        now_playing: Option<NowPlaying>,
+    ) -> Element<'a, Message> {
         match self.rows[i] {
             Row::Volume(volume) => track_list::heading(format!("Volume {volume}")),
-            Row::Track(index, number) => track_list::playable(
-                track_list::track(images, number, &album.tracks[index], COLUMNS).map(Message::Link),
-                Message::Play(index),
-            ),
+            Row::Track(index, number) => {
+                let track = &album.tracks[index];
+                let now = now_playing.filter(|now| now.track_id == track.id);
+                let mark = match now {
+                    Some(NowPlaying {
+                        playing: Some(at), ..
+                    }) => Mark::Playing(at),
+                    _ if self.hovered == Some(index) => Mark::Hovered,
+                    Some(_) => Mark::Current,
+                    None => Mark::None,
+                };
+                let line = track_list::marked(images, number, track, COLUMNS, mark);
+                let row = track_list::playable(
+                    line.map(Message::Link),
+                    Message::Play(index),
+                    now.is_some(),
+                );
+                mouse_area(row)
+                    .on_enter(Message::Hovered(index))
+                    .on_exit(Message::Left(index))
+                    .into()
+            }
         }
     }
 

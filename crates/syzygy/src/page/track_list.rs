@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 
 use super::{Link, Preview, Route, Viewport, artists, cover, duration, link};
-use crate::icons::{Icon, icon};
+use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::style;
 
@@ -146,6 +146,19 @@ fn sort_style(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// What a row's number gives way to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mark {
+    None,
+    /// The pointer is over a row that plays when clicked.
+    Hovered,
+    /// The current track, not playing: the number and title in the accent.
+    Current,
+    /// The current track, playing: bouncing bars, this many seconds into
+    /// their animation.
+    Playing(f32),
+}
+
 /// One track: its number, the cover if the list shows covers, the title
 /// over its artists, the album if shown, and how long it is.
 pub fn track<'a>(
@@ -154,6 +167,18 @@ pub fn track<'a>(
     track: &'a Track,
     columns: Columns,
 ) -> Element<'a, Link> {
+    marked(images, number, track, columns, Mark::None)
+}
+
+/// [`track`], with its number marked.
+pub fn marked<'a>(
+    images: &'a Images,
+    number: usize,
+    track: &'a Track,
+    columns: Columns,
+    mark: Mark,
+) -> Element<'a, Link> {
+    let current = matches!(mark, Mark::Current | Mark::Playing(_));
     let date_added = columns.date_added.then(|| {
         let date = track
             .date_added
@@ -171,7 +196,14 @@ pub fn track<'a>(
         .spacing(6)
         .align_y(Alignment::Center);
     let title = column![
-        text(&track.title).size(14).wrapping(text::Wrapping::None),
+        text(&track.title)
+            .size(14)
+            .color(if current {
+                style::ACCENT
+            } else {
+                style::TEXT_PRIMARY
+            })
+            .wrapping(text::Wrapping::None),
         byline,
     ]
     .spacing(4);
@@ -204,36 +236,78 @@ pub fn track<'a>(
         };
         container(album).clip(true).width(Length::FillPortion(2))
     });
-    let line = row![
-        text(number.to_string())
+    let lead: Element<'a, Link> = match mark {
+        Mark::Playing(at) => bars(at),
+        Mark::Hovered => filled(Icon::Play, 14.0, style::TEXT_PRIMARY).into(),
+        Mark::Current => text(number.to_string())
+            .size(14)
+            .color(style::ACCENT)
+            .into(),
+        Mark::None => text(number.to_string())
             .size(14)
             .color(style::TEXT_MUTED)
-            .width(NUMBER_WIDTH),
-        title,
-    ]
-    .push(album)
-    .push(date_added)
-    .push(
-        text(duration(track.duration))
-            .size(14)
-            .color(style::TEXT_MUTED)
-            .width(TIME_WIDTH)
-            .align_x(iced::alignment::Horizontal::Right),
-    )
-    .spacing(16)
-    .align_y(Alignment::Center);
+            .into(),
+    };
+    let line = row![container(lead).width(NUMBER_WIDTH), title]
+        .push(album)
+        .push(date_added)
+        .push(
+            text(duration(track.duration))
+                .size(14)
+                .color(style::TEXT_MUTED)
+                .width(TIME_WIDTH)
+                .align_x(iced::alignment::Horizontal::Right),
+        )
+        .spacing(16)
+        .align_y(Alignment::Center);
     container(line).padding([0, 16]).center_y(ROW_HEIGHT).into()
 }
 
-/// A row that plays when clicked. Links inside it still go where they lead.
+/// sone's playing indicator: three accent bars bouncing between 40% and
+/// full height once a second, each 0.2 s behind the last.
+fn bars<'a>(at: f32) -> Element<'a, Link> {
+    const HEIGHT: f32 = 16.0;
+    let bar = |delay: f32| {
+        // Eased like CSS `ease-in-out`: 0.4 at the ends of the cycle, 1 halfway.
+        let phase = (at - delay).rem_euclid(1.0);
+        let scale = 0.4 + 0.6 * (1.0 - (phase * std::f32::consts::TAU).cos()) / 2.0;
+        container(space())
+            .width(3)
+            .height(HEIGHT * scale)
+            .style(|_| container::Style {
+                background: Some(style::ACCENT.into()),
+                border: style::rounded(1.5),
+                ..container::Style::default()
+            })
+    };
+    container(
+        row![bar(0.0), bar(0.2), bar(0.4)]
+            .spacing(3)
+            .align_y(Alignment::End),
+    )
+    .align_bottom(HEIGHT)
+    .into()
+}
+
+/// A row that plays when clicked, lit while the pointer is over it, or
+/// all the time for the current track. Links inside it still go where they
+/// lead.
 pub fn playable<'a, Message: Clone + 'a>(
     row: Element<'a, Message>,
     on_play: Message,
+    current: bool,
 ) -> Element<'a, Message> {
     button(row)
         .padding(0)
         .width(Length::Fill)
-        .style(style::list_row)
+        .style(move |theme, status| {
+            let status = if current {
+                button::Status::Hovered
+            } else {
+                status
+            };
+            style::list_row(theme, status)
+        })
         .on_press(on_play)
         .into()
 }

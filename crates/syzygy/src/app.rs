@@ -46,6 +46,9 @@ pub struct App {
     /// The play being fetched and started. Replacing it aborts it, so an
     /// older choice can't reach the engine after a newer one.
     play_task: Option<task::Handle>,
+    /// What animations count their seconds from, and the last frame.
+    epoch: Instant,
+    frame: Instant,
     phase: Phase,
 }
 
@@ -77,6 +80,8 @@ pub enum Message {
     WindowFocused,
     Shell(shell::Message),
     Images(images::Message),
+    /// A frame is due, while something animates.
+    Frame(Instant),
     /// Remember an order the user picked.
     Sort(settings::Sort),
     /// The user searched for this: it goes to the front of the history.
@@ -136,6 +141,8 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         images: Images::new(images::BYTE_CAP),
         playback,
         play_task: None,
+        epoch: Instant::now(),
+        frame: Instant::now(),
         phase: Phase::Login(Box::default()),
     };
     let engine = app.configure_engine();
@@ -183,9 +190,12 @@ pub fn view(state: &State) -> Element<'_, Message> {
         State::Fatal(error) => fatal(error),
         State::Running(app) => match &app.phase {
             Phase::Login(login) => login.view().map(Message::Login),
-            Phase::Shell(shell) => {
-                shell.view(&app.images, &app.settings.search_history, &app.playback)
-            }
+            Phase::Shell(shell) => shell.view(
+                &app.images,
+                &app.settings.search_history,
+                &app.playback,
+                app.frame.duration_since(app.epoch).as_secs_f32(),
+            ),
         },
     }
 }
@@ -203,9 +213,10 @@ pub fn subscription(state: &State) -> Subscription<Message> {
                 Status::Playing => iced::time::every(TICK).map(|_| Message::Tick),
                 _ => Subscription::none(),
             };
-            // Frames only while a cover fades in; otherwise nothing redraws.
-            let frames = if app.images.is_animating() {
-                window::frames().map(|at| Message::Images(images::Message::Frame(at)))
+            // Frames only while a cover fades in or a playing row's bars
+            // bounce; otherwise nothing redraws.
+            let frames = if app.images.is_animating() || app.bars_bounce() {
+                window::frames().map(Message::Frame)
             } else {
                 Subscription::none()
             };
@@ -263,6 +274,10 @@ impl App {
             Message::ForgetSearch(query) => {
                 self.settings.forget_search(&query);
                 self.save_settings()
+            }
+            Message::Frame(at) => {
+                self.frame = at;
+                self.update(Message::Images(images::Message::Frame(at)))
             }
             Message::Images(message) => {
                 let effects = self.images.update(message);
@@ -327,6 +342,17 @@ impl App {
                 }
                 Task::none()
             }
+        }
+    }
+
+    /// Whether the playing track's row is on the Page, with its bars to
+    /// animate.
+    fn bars_bounce(&self) -> bool {
+        match (&self.phase, self.playback.current()) {
+            (Phase::Shell(shell), Some(track)) => {
+                self.playback.status() == Status::Playing && shell.shows_track(track.id)
+            }
+            _ => false,
         }
     }
 

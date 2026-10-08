@@ -138,6 +138,14 @@ pub struct Viewport {
     pub height: f32,
 }
 
+/// The current track, for track lists to mark.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NowPlaying {
+    pub track_id: u64,
+    /// While it plays: seconds on the clock its animation runs on.
+    pub playing: Option<f32>,
+}
+
 /// What a Page reads from the rest of the app as it opens.
 pub struct Context<'a> {
     /// Who's signed in, when TIDAL has said.
@@ -408,10 +416,26 @@ impl Page {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    /// Whether a track list on this Page shows the track, so its row needs
+    /// animating while it plays.
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        match self {
+            Page::Album(state) => state.shows_track(track_id),
+            _ => false,
+        }
+    }
+
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        now_playing: Option<NowPlaying>,
+    ) -> Element<'a, Message> {
         match self {
             Page::Home(state) => state.view(images).map(Message::Home),
-            Page::Album(state) => state.view(images, viewport).map(Message::Album),
+            Page::Album(state) => state
+                .view(images, viewport, now_playing)
+                .map(Message::Album),
             Page::Artist(state) => state.view(images).map(Message::Artist),
             Page::ArtistTracks(state) => state.view(images, viewport).map(Message::ArtistTracks),
             Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),

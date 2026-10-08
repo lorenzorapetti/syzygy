@@ -20,10 +20,10 @@ use crate::app::{self, Services};
 use crate::icons::{Icon, icon};
 use crate::images::{self, Images};
 use crate::page::{
-    self, Action, Context, Load, Page, PageId, Route, Viewport, album, artist_tracks,
+    self, Action, Context, Load, NowPlaying, Page, PageId, Route, Viewport, album, artist_tracks,
     artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
 };
-use crate::playback::{self, Playback};
+use crate::playback::{self, Playback, Status};
 use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
@@ -421,14 +421,26 @@ impl Shell {
         }
     }
 
-    /// `past_searches` are the user's, for the search dropdown.
+    /// Whether the Page shows the track in a list, where its row animates
+    /// while it plays.
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.current.page.shows_track(track_id)
+    }
+
+    /// `past_searches` are the user's, for the search dropdown. `clock` is
+    /// the seconds animations run on.
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
         past_searches: &'a [String],
         playback: &'a Playback,
+        clock: f32,
     ) -> Element<'a, app::Message> {
         let id = self.current.id;
+        let now_playing = playback.current().map(|track| NowPlaying {
+            track_id: track.id,
+            playing: (playback.status() == Status::Playing).then_some(clock),
+        });
         let viewport = Viewport {
             offset: self.current.offset,
             height: self.viewport_height,
@@ -436,7 +448,7 @@ impl Shell {
         let page = container(
             self.current
                 .page
-                .view(images, viewport)
+                .view(images, viewport, now_playing)
                 .map(move |m| app::Message::Page(id, m)),
         )
         .max_width(MAX_PAGE_WIDTH)
@@ -465,14 +477,16 @@ impl Shell {
             container(dropdown.map(|message| app::Message::Shell(Message::Search(message))))
                 .padding(iced::Padding::new(0.0).left(left))
         });
-        let player_bar = self
-            .player_bar
-            .view(playback, images)
-            .map(|message| app::Message::Shell(Message::PlayerBar(message)));
+        // Only once there's something to play.
+        let player_bar = playback.current().map(|_| {
+            self.player_bar
+                .view(playback, images)
+                .map(|message| app::Message::Shell(Message::PlayerBar(message)))
+        });
         let main = column![
             row![sidebar, column![self.header(), stack![page].push(dropdown)]].height(Length::Fill),
-            player_bar,
-        ];
+        ]
+        .push(player_bar);
         let toasts = self
             .toasts
             .view()
