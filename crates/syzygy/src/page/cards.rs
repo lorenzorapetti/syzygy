@@ -178,7 +178,18 @@ pub fn open(card: &Card) -> Option<Link> {
 
 /// The accent disc that plays all of what a card leads to, if it can play.
 pub fn play_button<'a>(card: &Card) -> Option<Element<'a, Link>> {
-    let playable = matches!(
+    plays(card).then(|| {
+        button(container(filled(Icon::Play, 18.0, style::TEXT_PRIMARY)).center(PLAY_SIZE))
+            .padding(0)
+            .style(play_disc)
+            .on_press(Link::PlayCard(card.clone()))
+            .into()
+    })
+}
+
+/// Whether a card's play button has something to play.
+pub fn plays(card: &Card) -> bool {
+    matches!(
         card.target,
         Target::Album(_)
             | Target::Artist(_)
@@ -186,14 +197,7 @@ pub fn play_button<'a>(card: &Card) -> Option<Element<'a, Link>> {
             | Target::Mix(_)
             | Target::Favorites
             | Target::Track(_)
-    );
-    playable.then(|| {
-        button(container(filled(Icon::Play, 18.0, style::TEXT_PRIMARY)).center(PLAY_SIZE))
-            .padding(0)
-            .style(play_disc)
-            .on_press(Link::PlayCard(card.clone()))
-            .into()
-    })
+    )
 }
 
 /// A card's shape for anything: `art` over a title and a subtitle, opening

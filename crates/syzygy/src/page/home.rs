@@ -2,7 +2,7 @@
 //! loaded as the user scrolls.
 
 use iced::widget::{button, column, container, hover, row, sensor, space, text};
-use iced::{Alignment, Element, Length, Theme};
+use iced::{Alignment, Color, Element, Length, Theme};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use syzygy_catalog::home_feed::{Card, Layout, Section, Tab};
@@ -10,6 +10,7 @@ use syzygy_catalog::{HomeFeed, Read};
 
 use super::cards::{self, Rows};
 use super::{Action, Link, Load, PADDING, Remote, Route, cover};
+use crate::icons::{Icon, filled};
 use crate::images::Images;
 use crate::style;
 
@@ -277,9 +278,21 @@ fn shortcuts<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Message> 
 
 fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     let title = text(&card.title).size(13).wrapping(text::Wrapping::None);
-    let tile = button(
+    let art = cover(images, card.cover.as_ref(), SHORTCUT_HEIGHT);
+    // As in sone: under the pointer the cover dims behind a small play.
+    let art = if cards::plays(card) {
+        let play =
+            button(container(filled(Icon::Play, 14.0, Color::WHITE)).center(SHORTCUT_HEIGHT))
+                .padding(0)
+                .style(cover_play)
+                .on_press(Link::PlayCard(card.clone()));
+        hover(art, play)
+    } else {
+        art
+    };
+    button(
         row![
-            cover(images, card.cover.as_ref(), SHORTCUT_HEIGHT).map(Message::Link),
+            art.map(Message::Link),
             container(title).clip(true).padding([0, 12]),
         ]
         .align_y(Alignment::Center),
@@ -287,16 +300,16 @@ fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     .padding(0)
     .width(Length::Fill)
     .style(shortcut_tile)
-    .on_press_maybe(cards::open(card).map(Message::Link));
-    match cards::play_button(card) {
-        Some(play) => hover(
-            tile,
-            container(play.map(Message::Link))
-                .padding([0, 8])
-                .align_right(Length::Fill)
-                .center_y(Length::Fill),
-        ),
-        None => tile.into(),
+    .on_press_maybe(cards::open(card).map(Message::Link))
+    .into()
+}
+
+/// A shortcut's play, over its cover: a 40% black veil.
+fn cover_play(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.4).into()),
+        border: style::rounded(4.0),
+        ..button::Style::default()
     }
 }
 
