@@ -225,7 +225,9 @@ fn mode<'a>(glyph: Icon, on: bool, message: Message) -> Element<'a, Message> {
     };
     let dot = container(space()).width(4).height(4);
     let dot = if on { dot.style(mode_dot) } else { dot };
-    let face = column![icon(glyph, 15.0, color), dot]
+    // A space as tall as the dot above keeps the icon centred, in line
+    // with Previous and Next.
+    let face = column![space().height(4), icon(glyph, 15.0, color), dot]
         .spacing(3)
         .align_x(Alignment::Center);
     button(container(face).center(BUTTON_SIZE))
