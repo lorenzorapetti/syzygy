@@ -2,6 +2,7 @@
 //! current Page and the Back stack, and the toasts over them.
 
 mod back_stack;
+pub mod player_bar;
 pub mod search;
 pub mod sidebar;
 pub mod toast;
@@ -22,9 +23,11 @@ use crate::page::{
     self, Action, Context, Load, Page, PageId, Route, Viewport, album, artist_tracks,
     artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
 };
+use crate::playback::{self, Playback};
 use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
+use player_bar::PlayerBar;
 use search::Search;
 use sidebar::Sidebar;
 use toast::{Kind, ToastId, Toasts};
@@ -51,6 +54,7 @@ pub struct Shell {
     current: Current,
     sidebar: Sidebar,
     search: Search,
+    player_bar: PlayerBar,
     next_id: u64,
     toasts: Toasts,
     /// Whether the Feed has something the user hasn't seen.
@@ -75,6 +79,7 @@ pub enum Message {
     DismissToast(ToastId),
     Sidebar(sidebar::Message),
     Search(search::Message),
+    PlayerBar(player_bar::Message),
     /// The avatar: the user's own Profile.
     OpenProfile,
     /// The Feed check after login.
@@ -101,6 +106,7 @@ impl Shell {
             current,
             sidebar,
             search: Search::default(),
+            player_bar: PlayerBar::default(),
             next_id: 1,
             toasts: Toasts::default(),
             unseen: Unseen::default(),
@@ -207,6 +213,18 @@ impl Shell {
                 let effect = self.search.update(message);
                 return self.run_search(effect, services, context);
             }
+            Message::PlayerBar(message) => {
+                return match self.player_bar.update(message) {
+                    player_bar::Effect::None => Task::none(),
+                    player_bar::Effect::Playback(message) => {
+                        Task::done(app::Message::Playback(message))
+                    }
+                    player_bar::Effect::SaveVolume => Task::done(app::Message::SaveVolume),
+                    player_bar::Effect::Link(link) => {
+                        self.run_action(link.follow(), services, context)
+                    }
+                };
+            }
             Message::OpenProfile => {
                 if let Some(user_id) = self.user_id {
                     return self.navigate(Route::Profile { user_id }, services, context);
@@ -300,6 +318,9 @@ impl Shell {
                 Task::batch([Task::done(app::Message::Sort(sort)), resort])
             }
             Action::Navigate(route) => self.navigate(route, services, context),
+            Action::Play(request) => {
+                Task::done(app::Message::Playback(playback::Message::Start(request)))
+            }
             Action::Run(task) => {
                 let id = self.current.id;
                 task.map(move |message| app::Message::Page(id, message))
@@ -405,6 +426,7 @@ impl Shell {
         &'a self,
         images: &'a Images,
         past_searches: &'a [String],
+        playback: &'a Playback,
     ) -> Element<'a, app::Message> {
         let id = self.current.id;
         let viewport = Viewport {
@@ -443,7 +465,14 @@ impl Shell {
             container(dropdown.map(|message| app::Message::Shell(Message::Search(message))))
                 .padding(iced::Padding::new(0.0).left(left))
         });
-        let main = row![sidebar, column![self.header(), stack![page].push(dropdown)]];
+        let player_bar = self
+            .player_bar
+            .view(playback, images)
+            .map(|message| app::Message::Shell(Message::PlayerBar(message)));
+        let main = column![
+            row![sidebar, column![self.header(), stack![page].push(dropdown)]].height(Length::Fill),
+            player_bar,
+        ];
         let toasts = self
             .toasts
             .view()

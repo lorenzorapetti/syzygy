@@ -225,6 +225,19 @@ pub fn track<'a>(
     container(line).padding([0, 16]).center_y(ROW_HEIGHT).into()
 }
 
+/// A row that plays when clicked. Links inside it still go where they lead.
+pub fn playable<'a, Message: Clone + 'a>(
+    row: Element<'a, Message>,
+    on_play: Message,
+) -> Element<'a, Message> {
+    button(row)
+        .padding(0)
+        .width(Length::Fill)
+        .style(style::list_row)
+        .on_press(on_play)
+        .into()
+}
+
 /// A heading that takes a row's place, as "Volume 2".
 pub fn heading<'a, Message: 'a>(label: String) -> Element<'a, Message> {
     container(text(label).size(16))

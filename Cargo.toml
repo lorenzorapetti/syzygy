@@ -9,18 +9,25 @@ license = "GPL-3.0-only"
 authors = ["Lorenzo Rapetti <lorenzo.rapetti.94@gmail.com>"]
 
 [workspace.dependencies]
+syzygy-audio = { path = "crates/syzygy-audio" }
 syzygy-catalog = { path = "crates/syzygy-catalog" }
 syzygy-store = { path = "crates/syzygy-store" }
 syzygy-tidal = { path = "crates/syzygy-tidal" }
 
 aes-gcm = "0.11"
+alsa = "0.12"
+arc-swap = "1"
 base64 = "0.23"
+crossbeam-channel = "0.5"
 dirs = "7"
 flexi_logger = "0.31"
 futures = "0.3"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 iced = { version = "0.14.0", features = ["tokio", "image", "svg", "lazy", "advanced", "qr_code"] }
 keyring = "4"
+libc = "0.2"
 log = "0.4"
 open = "5"
 rand = "0.10"

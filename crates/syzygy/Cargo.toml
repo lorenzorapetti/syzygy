@@ -7,6 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+syzygy-audio.workspace = true
 syzygy-catalog.workspace = true
 syzygy-store.workspace = true
 syzygy-tidal.workspace = true

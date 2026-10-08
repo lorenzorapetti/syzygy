@@ -33,10 +33,14 @@ pub const TEXT_PRIMARY: Color = Color::WHITE;
 pub const TEXT_SECONDARY: Color = color!(0xb3b3b3);
 pub const TEXT_MUTED: Color = color!(0xa6a6a6);
 pub const TEXT_DISABLED: Color = color!(0x535353);
+pub const TEXT_FAINT: Color = color!(0x666666);
 
 pub const BORDER_SUBTLE: Color = rgba(255, 255, 255, 0.06);
 pub const HL_FAINT: Color = rgba(255, 255, 255, 0.04);
 pub const HL_MED: Color = rgba(255, 255, 255, 0.08);
+
+pub const SLIDER_TRACK: Color = rgba(255, 255, 255, 0.15);
+pub const SLIDER_FILL: Color = rgba(255, 255, 255, 0.65);
 
 pub const SUCCESS: Color = color!(0x1ed760);
 pub const WARNING: Color = color!(0xffa726);

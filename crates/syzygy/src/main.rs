@@ -7,6 +7,8 @@ mod logging;
 mod login;
 mod page;
 mod persist;
+mod playback;
+mod plugin_path;
 mod session;
 mod settings;
 mod shell;
@@ -17,6 +19,8 @@ use iced::window;
 use identity::{APP_ID, Paths};
 
 fn main() -> iced::Result {
+    // Before anything starts a thread.
+    plugin_path::select();
     let paths = Paths::locate();
     // Named, not `_`, so the handle lives until iced returns and the log is
     // flushed on drop.

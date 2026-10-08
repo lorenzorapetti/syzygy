@@ -31,6 +31,7 @@ use syzygy_catalog::{Kind, Read, Shelf, TrackSort};
 
 use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
+use crate::playback::PlayRequest;
 use crate::settings::{Settings, Sort};
 use crate::style;
 
@@ -152,6 +153,8 @@ pub enum Action {
     Load(Load),
     /// Go somewhere new.
     Navigate(Route),
+    /// Start playing a source.
+    Play(PlayRequest),
     /// This Page now shows `route`, as after a tab switch: its Back stack
     /// entry changes and no step is added. It starts this read, if any.
     Replace(Route, Option<Load>),

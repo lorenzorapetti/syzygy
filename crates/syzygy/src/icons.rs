@@ -23,6 +23,8 @@ pub enum Icon {
     House,
     Library,
     Music,
+    Pause,
+    Play,
     RefreshCw,
     Search,
     ShieldCheck,
@@ -31,11 +33,14 @@ pub enum Icon {
     Trophy,
     User,
     Users,
+    Volume1,
+    Volume2,
+    VolumeX,
     X,
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 24] = [
+const SOURCES: [&str; 29] = [
     include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/bell.svg"),
     include_str!("../icons/calendar.svg"),
@@ -51,6 +56,8 @@ const SOURCES: [&str; 24] = [
     include_str!("../icons/house.svg"),
     include_str!("../icons/library.svg"),
     include_str!("../icons/music.svg"),
+    include_str!("../icons/pause.svg"),
+    include_str!("../icons/play.svg"),
     include_str!("../icons/refresh-cw.svg"),
     include_str!("../icons/search.svg"),
     include_str!("../icons/shield-check.svg"),
@@ -59,6 +66,9 @@ const SOURCES: [&str; 24] = [
     include_str!("../icons/trophy.svg"),
     include_str!("../icons/user.svg"),
     include_str!("../icons/users.svg"),
+    include_str!("../icons/volume-1.svg"),
+    include_str!("../icons/volume-2.svg"),
+    include_str!("../icons/volume-x.svg"),
     include_str!("../icons/x.svg"),
 ];
 

@@ -2,9 +2,11 @@
 
 use iced::keyboard::{self, key};
 use iced::widget::{column, container, text};
-use iced::{Element, Event, Length, Subscription, Task, Theme, event, mouse, window};
+use iced::{Element, Event, Length, Subscription, Task, Theme, event, mouse, task, window};
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use syzygy_audio::{AudioPlayer, PositionCell};
 use syzygy_catalog::Catalog;
 use syzygy_store::{DiskCache, Store};
 use syzygy_tidal::models::{AuthTokens, SessionInfo};
@@ -16,6 +18,7 @@ use crate::images::{self, Images};
 use crate::login;
 use crate::page::{self, Context, PageId};
 use crate::persist;
+use crate::playback::{self, PlayError, Playback, Status};
 use crate::session::Session;
 use crate::settings::{self, Settings};
 use crate::shell::{self, Shell};
@@ -37,7 +40,12 @@ pub struct App {
     /// The signed-in Session, as last saved. `None` on the login screen.
     session: Option<Session>,
     tidal_events: EventSource<syzygy_tidal::Event>,
+    audio_events: EventSource<syzygy_audio::Event>,
     images: Images,
+    playback: Playback,
+    /// The play being fetched and started. Replacing it aborts it, so an
+    /// older choice can't reach the engine after a newer one.
+    play_task: Option<task::Handle>,
     phase: Phase,
 }
 
@@ -55,6 +63,8 @@ pub struct Services {
     pub paths: Paths,
     pub tidal: TidalClient,
     pub catalog: Catalog,
+    pub player: AudioPlayer,
+    pub position: PositionCell,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +83,12 @@ pub enum Message {
     Searched(String),
     /// Take a search out of the history.
     ForgetSearch(String),
+    Playback(playback::Message),
+    /// The volume slider was let go: remember the volume.
+    SaveVolume,
+    Audio(syzygy_audio::Event),
+    /// Time to read where the playing track is.
+    Tick,
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
@@ -99,6 +115,10 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         tidal.clone(),
         DiskCache::new(&paths.catalog_cache_dir, &store),
     );
+    let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let player = AudioPlayer::new(audio_sender);
+    let position = player.position();
+    let playback = Playback::new(settings.volume);
 
     let mut app = App {
         services: Services {
@@ -106,13 +126,19 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
             paths,
             tidal,
             catalog,
+            player,
+            position,
         },
         settings,
         session: None,
         tidal_events: EventSource::new("tidal", receiver),
+        audio_events: EventSource::new("audio", audio_receiver),
         images: Images::new(images::BYTE_CAP),
+        playback,
+        play_task: None,
         phase: Phase::Login(Box::default()),
     };
+    let engine = app.configure_engine();
     // A stored Session opens straight into the Shell; the account refresh
     // runs behind it.
     let task = match session {
@@ -128,7 +154,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         }
         None => Task::none(),
     };
-    (State::Running(Box::new(app)), task)
+    (State::Running(Box::new(app)), Task::batch([engine, task]))
 }
 
 fn http_client() -> reqwest::Client {
@@ -157,7 +183,9 @@ pub fn view(state: &State) -> Element<'_, Message> {
         State::Fatal(error) => fatal(error),
         State::Running(app) => match &app.phase {
             Phase::Login(login) => login.view().map(Message::Login),
-            Phase::Shell(shell) => shell.view(&app.images, &app.settings.search_history),
+            Phase::Shell(shell) => {
+                shell.view(&app.images, &app.settings.search_history, &app.playback)
+            }
         },
     }
 }
@@ -169,6 +197,12 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         // Always on: the receiver can be taken only once (ADR 0003).
         State::Running(app) => {
             let tidal = app.tidal_events.subscription().map(Message::Tidal);
+            let audio = app.audio_events.subscription().map(Message::Audio);
+            // The position is read only while it moves.
+            let tick = match app.playback.status() {
+                Status::Playing => iced::time::every(TICK).map(|_| Message::Tick),
+                _ => Subscription::none(),
+            };
             // Frames only while a cover fades in; otherwise nothing redraws.
             let frames = if app.images.is_animating() {
                 window::frames().map(|at| Message::Images(images::Message::Frame(at)))
@@ -176,10 +210,15 @@ pub fn subscription(state: &State) -> Subscription<Message> {
                 Subscription::none()
             };
             match app.phase {
-                Phase::Shell(_) => {
-                    Subscription::batch([close, tidal, frames, event::listen_with(shell_events)])
-                }
-                Phase::Login(_) => Subscription::batch([close, tidal]),
+                Phase::Shell(_) => Subscription::batch([
+                    close,
+                    tidal,
+                    audio,
+                    tick,
+                    frames,
+                    event::listen_with(shell_events),
+                ]),
+                Phase::Login(_) => Subscription::batch([close, tidal, audio, tick]),
             }
         }
     }
@@ -229,6 +268,21 @@ impl App {
                 let effects = self.images.update(message);
                 Task::batch(effects.into_iter().map(|effect| self.run_images(effect)))
             }
+            Message::Playback(message) => {
+                let mute = matches!(message, playback::Message::ToggleMute);
+                let task = self.update_playback(message);
+                if mute {
+                    Task::batch([task, self.save_volume()])
+                } else {
+                    task
+                }
+            }
+            Message::SaveVolume => self.save_volume(),
+            Message::Tick => {
+                let position = self.services.position.get();
+                self.update_playback(playback::Message::Position(position))
+            }
+            Message::Audio(event) => self.audio_event(event),
             Message::Tidal(syzygy_tidal::Event::TokensRefreshed(tokens)) => {
                 self.update_session(|session| session.tokens = tokens)
             }
@@ -274,6 +328,99 @@ impl App {
                 Task::none()
             }
         }
+    }
+
+    fn update_playback(&mut self, message: playback::Message) -> Task<Message> {
+        let effects = self.playback.update(message);
+        Task::batch(
+            effects
+                .into_iter()
+                .map(|effect| self.run_playback(effect))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Turn what playback asks for into calls on the engine.
+    fn run_playback(&mut self, effect: playback::Effect) -> Task<Message> {
+        let player = &self.services.player;
+        match effect {
+            playback::Effect::Play {
+                token,
+                track_id,
+                from,
+            } => {
+                let tidal = self.services.tidal.clone();
+                let player = player.clone();
+                let quality = self.settings.max_quality;
+                let normalize = self.settings.volume_normalization;
+                let play = async move {
+                    let stream = tidal
+                        .resolve_stream(track_id, quality)
+                        .await
+                        .map_err(|e| PlayError::Resolve(Arc::new(e)))?;
+                    let audio = |e| PlayError::Audio(Arc::new(e));
+                    if normalize {
+                        let info = &stream.info;
+                        let gain = syzygy_audio::compute_norm_gain(
+                            info.track_replay_gain,
+                            info.track_peak_amplitude,
+                        );
+                        player.set_normalization_gain(gain).await.map_err(audio)?;
+                    }
+                    player.play_url(stream.uri, from).await.map_err(audio)
+                };
+                let (task, handle) = Task::perform(play, move |result| {
+                    Message::Playback(playback::Message::Played(token, result))
+                })
+                .abortable();
+                self.play_task = Some(handle.abort_on_drop());
+                task
+            }
+            playback::Effect::Pause => engine(player.pause(), "pause"),
+            playback::Effect::Resume => engine(player.resume(), "resume"),
+            playback::Effect::Seek(position) => engine(player.seek(position), "seek"),
+            playback::Effect::SetVolume(volume) => {
+                engine(player.set_volume(volume), "set the volume")
+            }
+        }
+    }
+
+    fn audio_event(&mut self, event: syzygy_audio::Event) -> Task<Message> {
+        match event {
+            syzygy_audio::Event::TrackFinished => {
+                self.update_playback(playback::Message::TrackFinished)
+            }
+            syzygy_audio::Event::Failed { kind, message } => {
+                log::warn!("Audio failed ({kind:?}): {}", message.unwrap_or_default());
+                self.update_playback(playback::Message::EngineFailed)
+            }
+            // Nothing is armed for a gapless advance yet.
+            syzygy_audio::Event::TrackAdvanced { track_id, .. } => {
+                log::warn!("Track {track_id} advanced without being armed");
+                Task::none()
+            }
+            syzygy_audio::Event::Resampled { from, to } => {
+                log::info!("Resampling from {from} Hz to {to} Hz");
+                Task::none()
+            }
+            syzygy_audio::Event::BitDepthChanged { from, to } => {
+                log::info!("Bit depth changed from {from} to {to}");
+                Task::none()
+            }
+        }
+    }
+
+    /// The engine starts at full volume: give it the saved one. Exclusive
+    /// mode and bit-perfect follow with the Settings modal, which keeps
+    /// them and the volume lock in step.
+    fn configure_engine(&self) -> Task<Message> {
+        let player = &self.services.player;
+        engine(player.set_volume(self.playback.volume()), "set the volume")
+    }
+
+    fn save_volume(&mut self) -> Task<Message> {
+        self.settings.volume = self.playback.volume();
+        self.save_settings()
     }
 
     /// Change the signed-in Session and save it. Nothing when signed out.
@@ -426,6 +573,23 @@ impl App {
             login::Effect::SignedIn(login_method, tokens) => self.sign_in(login_method, tokens),
         }
     }
+}
+
+/// How often the position is read while playing.
+const TICK: Duration = Duration::from_millis(250);
+
+/// A call on the engine whose only answer worth having is a failure, which
+/// is logged.
+fn engine(
+    call: impl Future<Output = Result<(), syzygy_audio::Error>> + Send + 'static,
+    what: &'static str,
+) -> Task<Message> {
+    Task::future(async move {
+        if let Err(e) = call.await {
+            log::warn!("Could not {what}: {e}");
+        }
+    })
+    .discard()
 }
 
 /// What Pages read as they open.

@@ -1,0 +1,20 @@
+[package]
+name = "syzygy-audio"
+description = "syzygy's audio engine: GStreamer and direct ALSA output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+arc-swap.workspace = true
+crossbeam-channel.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+log.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+alsa.workspace = true
+libc.workspace = true

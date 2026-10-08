@@ -1,0 +1,236 @@
+//! Signal path transparency tracker.
+//!
+//! Collects what is known at runtime about how audio flows from TIDAL to the
+//! DAC: which backend is active, what GStreamer decoded to, what ALSA
+//! actually negotiated, and any alterations along the way (resampling,
+//! bit-depth promotion, format fallback, software volume, ReplayGain).
+//!
+//! The tracker holds what a signal-path panel would show. Nothing is sent
+//! when it changes: a reader takes a [`SignalPathTracker::snapshot`].
+
+use std::sync::Mutex;
+
+/// Snapshot of the runtime signal path.
+#[derive(Debug, Clone, Default)]
+pub struct SignalPath {
+    /// "Normal" (autoaudiosink → system mixer) or "DirectAlsa" (exclusive ALSA).
+    pub backend: Option<String>,
+
+    /// PCM format the GStreamer pipeline decodes to (DirectAlsa only — the
+    /// system mixer hides this in Normal mode).
+    pub decoded_format: Option<String>,
+    pub decoded_rate: Option<u32>,
+    pub decoded_channels: Option<u32>,
+
+    /// What ALSA actually negotiated. DirectAlsa only.
+    pub output_format: Option<String>,
+    pub output_rate: Option<u32>,
+    pub output_channels: Option<u32>,
+    pub output_device: Option<String>,
+
+    /// Mode flags reflected from settings.
+    pub exclusive_mode: bool,
+    pub bit_perfect: bool,
+    pub volume_normalization: bool,
+
+    /// User-set volume multiplier (1.0 = unity, no software attenuation).
+    pub user_volume: f32,
+    /// Linear ReplayGain multiplier currently applied (1.0 = none).
+    pub norm_gain_factor: f32,
+
+    /// Resampling that occurred (DAC-supported rate fallback in non-bit-perfect mode).
+    pub resampled_from: Option<u32>,
+    pub resampled_to: Option<u32>,
+
+    /// Bit-depth container promotion (bit-perfect: source widened to nearest
+    /// DAC-supported container; pure bit op via zero-padding).
+    pub promoted_from: Option<String>,
+    pub promoted_to: Option<String>,
+
+    /// Format fallback (non-bit-perfect: DAC didn't accept requested format).
+    pub format_fallback_from: Option<String>,
+    pub format_fallback_to: Option<String>,
+
+    /// Ground-truth kernel hw_params for the active DAC. Populated by
+    /// pipeline_probe; None until first refresh or when no DAC active.
+    pub dac: Option<crate::pipeline_probe::DacHwParams>,
+
+    /// OS-mixer info (PulseAudio/PipeWire). None when probe failed or
+    /// pactl is unavailable.
+    pub os_mixer: Option<crate::pipeline_probe::OsMixerInfo>,
+}
+
+pub struct SignalPathTracker {
+    state: Mutex<SignalPath>,
+}
+
+impl Default for SignalPathTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SignalPathTracker {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(SignalPath {
+                user_volume: 1.0,
+                norm_gain_factor: 1.0,
+                ..Default::default()
+            }),
+        }
+    }
+
+    pub fn snapshot(&self) -> SignalPath {
+        self.state.lock().unwrap().clone()
+    }
+
+    /// Clear per-track signal info but keep mode flags / volume / device.
+    /// Called at the start of each `PlayUrl`.
+    pub fn reset_for_track(&self) {
+        let mut s = self.state.lock().unwrap();
+        s.decoded_format = None;
+        s.decoded_rate = None;
+        s.decoded_channels = None;
+        s.output_format = None;
+        s.output_rate = None;
+        s.output_channels = None;
+        s.resampled_from = None;
+        s.resampled_to = None;
+        s.promoted_from = None;
+        s.promoted_to = None;
+        s.format_fallback_from = None;
+        s.format_fallback_to = None;
+        s.norm_gain_factor = 1.0; // next track may have no RG; don't carry old gain
+    }
+
+    pub fn set_backend(&self, backend: &str, device: Option<String>) {
+        let mut s = self.state.lock().unwrap();
+        s.backend = Some(backend.to_string());
+        s.output_device = device;
+    }
+
+    pub fn set_audio_modes(&self, exclusive: bool, bit_perfect: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.exclusive_mode = exclusive;
+        s.bit_perfect = bit_perfect;
+    }
+
+    pub fn set_normalization_enabled(&self, enabled: bool) {
+        let mut s = self.state.lock().unwrap();
+        s.volume_normalization = enabled;
+        if !enabled {
+            // RG is off → factor irrelevant, render as 1.0 (unity).
+            s.norm_gain_factor = 1.0;
+        }
+    }
+
+    pub fn set_decoded(&self, fmt: &str, rate: u32, channels: u32) {
+        let mut s = self.state.lock().unwrap();
+        s.decoded_format = Some(fmt.to_string());
+        s.decoded_rate = Some(rate);
+        s.decoded_channels = Some(channels);
+    }
+
+    pub fn set_output(&self, fmt: &str, rate: u32, channels: u32) {
+        let mut s = self.state.lock().unwrap();
+        s.output_format = Some(fmt.to_string());
+        s.output_rate = Some(rate);
+        s.output_channels = Some(channels);
+    }
+
+    pub fn set_user_volume(&self, vol: f32) {
+        let mut s = self.state.lock().unwrap();
+        if (s.user_volume - vol).abs() < 1e-3 {
+            return; // dedup: slider drag fires hundreds of events
+        }
+        s.user_volume = vol;
+    }
+
+    pub fn set_norm_gain_factor(&self, factor: f32) {
+        let mut s = self.state.lock().unwrap();
+        s.norm_gain_factor = factor;
+    }
+
+    pub fn record_resample(&self, from: u32, to: u32) {
+        let mut s = self.state.lock().unwrap();
+        s.resampled_from = Some(from);
+        s.resampled_to = Some(to);
+    }
+
+    pub fn record_bit_depth_promotion(&self, from: &str, to: &str) {
+        let mut s = self.state.lock().unwrap();
+        s.promoted_from = Some(from.to_string());
+        s.promoted_to = Some(to.to_string());
+    }
+
+    pub fn record_format_fallback(&self, from: &str, to: &str) {
+        let mut s = self.state.lock().unwrap();
+        s.format_fallback_from = Some(from.to_string());
+        s.format_fallback_to = Some(to.to_string());
+    }
+
+    pub fn clear_resample(&self) {
+        let mut s = self.state.lock().unwrap();
+        if s.resampled_from.is_none() && s.resampled_to.is_none() {
+            return;
+        }
+        s.resampled_from = None;
+        s.resampled_to = None;
+    }
+
+    pub fn clear_format_fallback(&self) {
+        let mut s = self.state.lock().unwrap();
+        if s.format_fallback_from.is_none() && s.format_fallback_to.is_none() {
+            return;
+        }
+        s.format_fallback_from = None;
+        s.format_fallback_to = None;
+    }
+
+    pub fn set_dac(&self, dac: Option<crate::pipeline_probe::DacHwParams>) {
+        let mut s = self.state.lock().unwrap();
+        if s.dac == dac {
+            return; // dedup
+        }
+        s.dac = dac;
+    }
+
+    pub fn set_os_mixer(&self, mixer: Option<crate::pipeline_probe::OsMixerInfo>) {
+        let mut s = self.state.lock().unwrap();
+        if s.os_mixer == mixer {
+            return;
+        }
+        s.os_mixer = mixer;
+    }
+
+    /// Set decoded-pad caps from a probe (both modes). Stage = Decoded
+    /// is what GStreamer's audioconvert src pad reports.
+    pub fn set_decoded_caps(&self, caps: Option<crate::pipeline_probe::PadCaps>) {
+        let mut s = self.state.lock().unwrap();
+        let (fmt, rate, ch) = match caps {
+            Some(c) => (Some(c.format), Some(c.rate), Some(c.channels)),
+            None => (None, None, None),
+        };
+        if s.decoded_format == fmt && s.decoded_rate == rate && s.decoded_channels == ch {
+            return;
+        }
+        s.decoded_format = fmt;
+        s.decoded_rate = rate;
+        s.decoded_channels = ch;
+    }
+
+    pub fn set_output_caps(&self, caps: Option<crate::pipeline_probe::PadCaps>) {
+        let mut s = self.state.lock().unwrap();
+        let (fmt, rate, ch) = match caps {
+            Some(c) => (Some(c.format), Some(c.rate), Some(c.channels)),
+            None => (None, None, None),
+        };
+        if s.output_format == fmt && s.output_rate == rate && s.output_channels == ch {
+            return;
+        }
+        s.output_format = fmt;
+        s.output_rate = rate;
+        s.output_channels = ch;
+    }
+}

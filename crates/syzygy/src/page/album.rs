@@ -3,6 +3,7 @@
 
 use iced::Element;
 use iced::widget::{Column, column, text};
+use syzygy_catalog::track::AlbumRef;
 use syzygy_catalog::{Album, Read};
 
 use super::cards::{self, Rows};
@@ -11,6 +12,7 @@ use super::{
     Action, Link, Load, PADDING, Preview, Remote, Viewport, artists, count, duration, hero,
 };
 use crate::images::Images;
+use crate::playback::{PlayRequest, SourceRef};
 use crate::style;
 
 /// Between the hero, the list and the sections.
@@ -43,6 +45,8 @@ pub enum Message {
     Loaded(Read<Album>),
     Cards(cards::Message),
     Link(Link),
+    /// Play the album from the track at this place in it.
+    Play(usize),
     Retry,
 }
 
@@ -79,6 +83,10 @@ impl State {
                 })
             }
             Message::Link(link) => link.follow(),
+            Message::Play(start) => match self.album.loaded() {
+                Some(album) => Action::Play(self.play_request(album, start)),
+                None => Action::None,
+            },
             Message::Retry => {
                 self.album = Remote::Loading;
                 Action::Load(Load::Album(self.id))
@@ -129,9 +137,29 @@ impl State {
     fn row<'a>(&self, i: usize, album: &'a Album, images: &'a Images) -> Element<'a, Message> {
         match self.rows[i] {
             Row::Volume(volume) => track_list::heading(format!("Volume {volume}")),
-            Row::Track(index, number) => {
-                track_list::track(images, number, &album.tracks[index], COLUMNS).map(Message::Link)
-            }
+            Row::Track(index, number) => track_list::playable(
+                track_list::track(images, number, &album.tracks[index], COLUMNS).map(Message::Link),
+                Message::Play(index),
+            ),
+        }
+    }
+
+    /// The album from track `start`. Each track carries the album, for the
+    /// player bar's cover, even where TIDAL left it out.
+    fn play_request(&self, album: &Album, start: usize) -> PlayRequest {
+        let tracks = album.tracks.iter().map(|track| {
+            let mut track = track.clone();
+            track.album.get_or_insert_with(|| AlbumRef {
+                id: self.id,
+                title: album.title.clone(),
+                cover: album.cover.clone(),
+            });
+            track
+        });
+        PlayRequest {
+            source: SourceRef::Album(self.id),
+            first_page: tracks.collect(),
+            start,
         }
     }
 }
