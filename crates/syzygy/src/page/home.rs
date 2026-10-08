@@ -9,7 +9,7 @@ use syzygy_catalog::home_feed::{Card, Layout, Section, Tab};
 use syzygy_catalog::{HomeFeed, Read};
 
 use super::cards::{self, Rows};
-use super::{Action, Link, Load, PADDING, Remote, Route, cover};
+use super::{Action, Link, Load, PADDING, Remote, Route};
 use crate::icons::{Icon, filled};
 use crate::images::Images;
 use crate::style;
@@ -278,21 +278,9 @@ fn shortcuts<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Message> 
 
 fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     let title = text(&card.title).size(13).wrapping(text::Wrapping::None);
-    let art = cover(images, card.cover.as_ref(), SHORTCUT_HEIGHT);
-    // As in sone: under the pointer the cover dims behind a small play.
-    let art = if cards::plays(card) {
-        let play =
-            button(container(filled(Icon::Play, 14.0, Color::WHITE)).center(SHORTCUT_HEIGHT))
-                .padding(0)
-                .style(cover_play)
-                .on_press(Link::PlayCard(card.clone()));
-        hover(art, play)
-    } else {
-        art
-    };
-    button(
+    let tile = button(
         row![
-            art.map(Message::Link),
+            cards::art(card, images, SHORTCUT_HEIGHT).map(Message::Link),
             container(title).clip(true).padding([0, 12]),
         ]
         .align_y(Alignment::Center),
@@ -300,8 +288,17 @@ fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     .padding(0)
     .width(Length::Fill)
     .style(shortcut_tile)
-    .on_press_maybe(cards::open(card).map(Message::Link))
-    .into()
+    .on_press_maybe(cards::open(card).map(Message::Link));
+    if !cards::plays(card) {
+        return tile.into();
+    }
+    // As in sone: with the pointer anywhere on the tile, its cover dims
+    // behind a small play.
+    let play = button(container(filled(Icon::Play, 14.0, Color::WHITE)).center(SHORTCUT_HEIGHT))
+        .padding(0)
+        .style(cover_play)
+        .on_press(Message::Link(Link::PlayCard(card.clone())));
+    hover(tile, play)
 }
 
 /// A shortcut's play, over its cover: a 40% black veil.

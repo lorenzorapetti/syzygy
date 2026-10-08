@@ -10,7 +10,7 @@ use iced::{Alignment, Element, Length, Theme};
 use std::collections::HashMap;
 use syzygy_catalog::home_feed::{Card, Target};
 
-use super::{Action, Link, Preview, Route, cover};
+use super::{Action, COVER_RADIUS, Link, Preview, Route, cover, loved_art};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::style;
@@ -154,7 +154,7 @@ pub fn wrapped<'a>(tiles: impl IntoIterator<Item = Element<'a, Link>>) -> Elemen
 /// A card. Under the pointer, what can play shows a play button over its
 /// cover; a track's card plays wherever it's clicked.
 pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
-    let art = cover(images, card.cover.as_ref(), CARD_WIDTH);
+    let art = art(card, images, CARD_WIDTH);
     let art = match play_button(card) {
         Some(play) => hover(
             art,
@@ -166,6 +166,15 @@ pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
         None => art,
     };
     tile(art, &card.title, &card.subtitle, open(card))
+}
+
+/// A card's picture, `size` square: its cover, or the Loved tracks' heart,
+/// which TIDAL sends no cover for.
+pub fn art<'a>(card: &Card, images: &'a Images, size: f32) -> Element<'a, Link> {
+    match (&card.target, &card.cover) {
+        (Target::Favorites, None) => loved_art(size, COVER_RADIUS),
+        (_, cover_id) => cover(images, cover_id.as_ref(), size),
+    }
 }
 
 /// What clicking a card does: open its Page, or play a track's.
