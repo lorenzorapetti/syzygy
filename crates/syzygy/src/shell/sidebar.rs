@@ -272,6 +272,11 @@ impl Sidebar {
         }))
         .spacing(6)
         .padding([0, 8]);
+        // Wider than the sidebar: they scroll sideways, with no scrollbar,
+        // as in sone.
+        let pills = scrollable(pills).direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::hidden(),
+        ));
         let list = scrollable(self.list(images, current))
             .height(Length::Fill)
             .width(Length::Fill);
