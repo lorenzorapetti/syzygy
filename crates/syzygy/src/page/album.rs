@@ -176,12 +176,13 @@ impl State {
             Row::Track(index, number) => {
                 let track = &album.tracks[index];
                 let now = now_playing.filter(|now| now.track_id == track.id);
+                let hovered = self.hovered == Some(index);
                 let mark = match now {
                     Some(NowPlaying {
                         playing: Some(at), ..
                     }) => Mark::Playing(at),
-                    _ if self.hovered == Some(index) => Mark::Hovered,
-                    Some(_) => Mark::Current,
+                    Some(_) => Mark::Current { hovered },
+                    None if hovered => Mark::Hovered,
                     None => Mark::None,
                 };
                 let line = track_list::marked(images, number, track, COLUMNS, mark);

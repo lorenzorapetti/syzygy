@@ -152,8 +152,11 @@ pub enum Mark {
     None,
     /// The pointer is over a row that plays when clicked.
     Hovered,
-    /// The current track, not playing: the number and title in the accent.
-    Current,
+    /// The current track, not playing: the title in the accent, and the
+    /// number too unless the pointer is over it, which shows a play icon.
+    Current {
+        hovered: bool,
+    },
     /// The current track, playing: bouncing bars, this many seconds into
     /// their animation.
     Playing(f32),
@@ -178,7 +181,7 @@ pub fn marked<'a>(
     columns: Columns,
     mark: Mark,
 ) -> Element<'a, Link> {
-    let current = matches!(mark, Mark::Current | Mark::Playing(_));
+    let current = matches!(mark, Mark::Current { .. } | Mark::Playing(_));
     let date_added = columns.date_added.then(|| {
         let date = track
             .date_added
@@ -238,8 +241,10 @@ pub fn marked<'a>(
     });
     let lead: Element<'a, Link> = match mark {
         Mark::Playing(at) => bars(at),
-        Mark::Hovered => filled(Icon::Play, 14.0, style::TEXT_PRIMARY).into(),
-        Mark::Current => text(number.to_string())
+        Mark::Hovered | Mark::Current { hovered: true } => {
+            filled(Icon::Play, 14.0, style::TEXT_PRIMARY).into()
+        }
+        Mark::Current { hovered: false } => text(number.to_string())
             .size(14)
             .color(style::ACCENT)
             .into(),
