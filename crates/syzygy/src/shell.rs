@@ -2,6 +2,7 @@
 //! current Page and the Back stack, and the toasts over them.
 
 mod back_stack;
+mod play_card;
 pub mod player_bar;
 pub mod search;
 pub mod sidebar;
@@ -23,7 +24,7 @@ use crate::page::{
     self, Action, Context, Load, NowPlaying, Page, PageId, Route, Viewport, album, artist_tracks,
     artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
 };
-use crate::playback::{self, Playback, Status};
+use crate::playback::{self, PlayRequest, Playback, Status};
 use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
@@ -61,6 +62,8 @@ pub struct Shell {
     unseen: Unseen,
     /// How tall the Page's viewport is, as last reported.
     viewport_height: f32,
+    /// A card's source being read to play. A newer play aborts it.
+    card_play: Option<task::Handle>,
 }
 
 /// The Page on screen and the reads it started. Dropping it aborts them.
@@ -86,6 +89,8 @@ pub enum Message {
     FeedChecked(Result<Feed, Arc<syzygy_catalog::Error>>),
     /// The Feed was marked seen, or not.
     FeedSeen(Result<(), Arc<syzygy_catalog::Error>>),
+    /// A card's source was read, to play.
+    CardRead(Result<Option<PlayRequest>, Arc<syzygy_catalog::Error>>),
 }
 
 impl Shell {
@@ -111,6 +116,7 @@ impl Shell {
             toasts: Toasts::default(),
             unseen: Unseen::default(),
             viewport_height: UNKNOWN_HEIGHT,
+            card_play: None,
         };
         let task = shell.run_action(action, services, context);
         let read = shell.run_sidebar(read, services, context);
@@ -237,12 +243,22 @@ impl Shell {
                     log::warn!("Could not mark the Feed seen: {e}");
                 }
             }
+            Message::CardRead(result) => {
+                self.card_play = None;
+                return match result {
+                    Ok(Some(request)) => play(request),
+                    Ok(None) => Task::none(),
+                    Err(e) => {
+                        log::warn!("Could not read what to play: {e}");
+                        self.toast(Kind::Error, format!("Couldn't play it: {e}"))
+                    }
+                };
+            }
         }
         Task::none()
     }
 
     /// Show a toast that dismisses itself.
-    #[expect(dead_code, reason = "Library edits and playback show the first toasts")]
     pub fn toast(&mut self, kind: Kind, text: impl Into<String>) -> Task<app::Message> {
         self.toasts
             .push(kind, text.into())
@@ -319,8 +335,20 @@ impl Shell {
             }
             Action::Navigate(route) => self.navigate(route, services, context),
             Action::Play(request) => {
-                Task::done(app::Message::Playback(playback::Message::Start(request)))
+                // The newer choice wins over a card still being read.
+                self.card_play = None;
+                play(request)
             }
+            Action::PlayCard(card) => {
+                let (task, handle) = Task::perform(
+                    play_card::read(card, &services.catalog, context),
+                    |result| app::Message::Shell(Message::CardRead(result)),
+                )
+                .abortable();
+                self.card_play = Some(handle.abort_on_drop());
+                task
+            }
+            Action::TogglePlay => Task::done(app::Message::Playback(playback::Message::TogglePlay)),
             Action::Run(task) => {
                 let id = self.current.id;
                 task.map(move |message| app::Message::Page(id, message))
@@ -437,10 +465,14 @@ impl Shell {
         clock: f32,
     ) -> Element<'a, app::Message> {
         let id = self.current.id;
-        let now_playing = playback.current().map(|track| NowPlaying {
-            track_id: track.id,
-            playing: (playback.status() == Status::Playing).then_some(clock),
-        });
+        let now_playing = playback
+            .current()
+            .zip(playback.playing_from())
+            .map(|(track, from)| NowPlaying {
+                track_id: track.id,
+                playing: (playback.status() == Status::Playing).then_some(clock),
+                source: &from.kind,
+            });
         let viewport = Viewport {
             offset: self.current.offset,
             height: self.viewport_height,
@@ -560,6 +592,10 @@ impl Current {
             offset: self.offset,
         }
     }
+}
+
+fn play(request: PlayRequest) -> Task<app::Message> {
+    Task::done(app::Message::Playback(playback::Message::Start(request)))
 }
 
 fn scroll_to(offset: f32) -> Task<app::Message> {

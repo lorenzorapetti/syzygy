@@ -84,7 +84,7 @@ pub fn preview<'a>(
     )
 }
 
-fn bold() -> Font {
+pub fn bold() -> Font {
     Font {
         weight: font::Weight::Bold,
         ..Font::default()

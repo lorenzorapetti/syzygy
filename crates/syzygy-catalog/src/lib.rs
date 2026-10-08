@@ -415,6 +415,21 @@ impl Catalog {
         }
     }
 
+    /// One track, to play on its own. Not cached: it's read once per play.
+    pub fn track(
+        &self,
+        id: u64,
+    ) -> impl Future<Output = Result<Track, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        async move {
+            let value = tidal
+                .get_track(id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Track::from_value(&value).ok_or_else(|| Arc::new(Error::NotATrack(id)))
+        }
+    }
+
     /// What a search for `query` finds. Not cached: a search is read once
     /// per Search Page.
     pub fn search(

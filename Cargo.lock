@@ -5177,6 +5177,7 @@ dependencies = [
  "image",
  "log",
  "open",
+ "rand 0.10.3",
  "reqwest",
  "serde",
  "serde_json",

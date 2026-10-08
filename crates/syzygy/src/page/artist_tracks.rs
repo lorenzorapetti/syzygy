@@ -1,15 +1,16 @@
 //! All of an artist's top tracks, loaded a page at a time as the user
 //! scrolls.
 
-use iced::widget::{Column, column, container, text};
+use iced::widget::{Column, column, container, row, space, text};
 use iced::{Element, Length};
 use std::sync::Arc;
 use syzygy_catalog::{Artist, Paged, Read, Track};
 
 use super::paged::List;
 use super::track_list::{self, Columns};
-use super::{Action, Link, Load, PADDING, Remote, Viewport};
+use super::{Action, Link, Load, NowPlaying, PADDING, Remote, Viewport, play_buttons};
 use crate::images::Images;
+use crate::playback::{SourceRef, Start};
 use crate::style;
 
 const SPACING: f32 = 24.0;
@@ -42,6 +43,9 @@ pub enum Message {
     /// Try loading more again after it failed.
     RetryMore,
     Link(Link),
+    /// Play the loaded tracks, from one by its place or all of them.
+    Play(Start),
+    TogglePlay,
     Retry,
 }
 
@@ -76,6 +80,18 @@ impl State {
             Message::EndInView => load_more(self.id, self.tracks.next()),
             Message::RetryMore => load_more(self.id, self.tracks.retry()),
             Message::Link(link) => link.follow(),
+            Message::Play(start) => match self.tracks.items() {
+                [] => Action::None,
+                tracks => {
+                    let name = self
+                        .artist
+                        .loaded()
+                        .map_or("", |artist| artist.name.as_str());
+                    let source = SourceRef::Artist(self.id);
+                    Action::Play(super::request(source, name, tracks, start))
+                }
+            },
+            Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
                 self.tracks = List::new();
                 let tracks = Action::Load(Load::ArtistTracks(self.id));
@@ -89,17 +105,35 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        now_playing: Option<NowPlaying<'a>>,
+    ) -> Element<'a, Message> {
         let name = self
             .artist
             .loaded()
             .map_or("", |artist| artist.name.as_str());
+        let buttons = (!self.tracks.items().is_empty()).then(|| {
+            play_buttons(
+                &SourceRef::Artist(self.id),
+                now_playing,
+                Message::Play,
+                Message::TogglePlay,
+            )
+        });
         let title = container(
-            column![
-                text("Popular tracks").size(32),
-                text(name).size(14).color(style::TEXT_SECONDARY),
+            row![
+                column![
+                    text("Popular tracks").size(32),
+                    text(name).size(14).color(style::TEXT_SECONDARY),
+                ]
+                .spacing(4),
+                space::horizontal(),
             ]
-            .spacing(4),
+            .push(buttons)
+            .align_y(iced::Alignment::End),
         )
         .width(Length::Fill)
         .align_bottom(TITLE_HEIGHT);
@@ -110,7 +144,16 @@ impl State {
                 LIST_TOP,
                 viewport,
                 track_list::header(COLUMNS),
-                |i| track_list::track(images, i + 1, &tracks[i], COLUMNS).map(Message::Link),
+                |i| {
+                    let track = &tracks[i];
+                    let row = track_list::track(images, i + 1, track, COLUMNS);
+                    track_list::playable_track(
+                        row.map(Message::Link),
+                        track,
+                        now_playing,
+                        Message::Play(Start::Track(i)),
+                    )
+                },
             );
             Column::new()
                 .push(list)

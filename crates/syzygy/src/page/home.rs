@@ -1,7 +1,7 @@
 //! The Home Page: TIDAL's home feed, one tab at a time, with more sections
 //! loaded as the user scrolls.
 
-use iced::widget::{button, column, container, row, sensor, space, text};
+use iced::widget::{button, column, container, hover, row, sensor, space, text};
 use iced::{Alignment, Element, Length, Theme};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -277,7 +277,7 @@ fn shortcuts<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Message> 
 
 fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     let title = text(&card.title).size(13).wrapping(text::Wrapping::None);
-    button(
+    let tile = button(
         row![
             cover(images, card.cover.as_ref(), SHORTCUT_HEIGHT).map(Message::Link),
             container(title).clip(true).padding([0, 12]),
@@ -287,8 +287,17 @@ fn shortcut<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Message> {
     .padding(0)
     .width(Length::Fill)
     .style(shortcut_tile)
-    .on_press_maybe(cards::route(card).map(|route| Message::Link(Link::Open(route))))
-    .into()
+    .on_press_maybe(cards::open(card).map(Message::Link));
+    match cards::play_button(card) {
+        Some(play) => hover(
+            tile,
+            container(play.map(Message::Link))
+                .padding([0, 8])
+                .align_right(Length::Fill)
+                .center_y(Length::Fill),
+        ),
+        None => tile.into(),
+    }
 }
 
 fn shortcut_tile(_theme: &Theme, status: button::Status) -> button::Style {

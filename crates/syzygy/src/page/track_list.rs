@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 
-use super::{Link, Preview, Route, Viewport, artists, cover, duration, link};
+use super::{Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::style;
@@ -315,6 +315,17 @@ pub fn playable<'a, Message: Clone + 'a>(
         })
         .on_press(on_play)
         .into()
+}
+
+/// [`playable`] for `track`'s row, lit while it's the current track.
+pub fn playable_track<'a, Message: Clone + 'a>(
+    row: Element<'a, Message>,
+    track: &Track,
+    now_playing: Option<NowPlaying>,
+    on_play: Message,
+) -> Element<'a, Message> {
+    let current = now_playing.is_some_and(|now| now.track_id == track.id);
+    playable(row, on_play, current)
 }
 
 /// A heading that takes a row's place, as "Volume 2".

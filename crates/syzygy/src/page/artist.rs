@@ -9,8 +9,12 @@ use syzygy_catalog::{Artist, Read};
 
 use super::cards::{self, Rows};
 use super::track_list::{self, Columns};
-use super::{Action, Link, Load, PADDING, Preview, Remote, Route, hero, link};
+use super::{
+    Action, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, hero, link, play_buttons,
+    top_tracks,
+};
 use crate::images::Images;
+use crate::playback::{SourceRef, Start};
 use crate::style;
 
 const SPACING: f32 = 32.0;
@@ -34,6 +38,9 @@ pub enum Message {
     Loaded(Read<Artist>),
     Cards(cards::Message),
     Link(Link),
+    /// Play the top tracks, from one by its place or all of them.
+    Play(Start),
+    TogglePlay,
     Retry,
 }
 
@@ -68,6 +75,19 @@ impl State {
                 })
             }
             Message::Link(link) => link.follow(),
+            Message::Play(start) => match self.artist.loaded() {
+                Some(artist) => match top_tracks(artist) {
+                    Some((_, tracks)) => Action::Play(super::request(
+                        SourceRef::Artist(self.id),
+                        &artist.name,
+                        tracks,
+                        start,
+                    )),
+                    None => Action::None,
+                },
+                None => Action::None,
+            },
+            Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
                 self.artist = Remote::Loading;
                 Action::Load(load(self.id))
@@ -75,7 +95,11 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        now_playing: Option<NowPlaying<'a>>,
+    ) -> Element<'a, Message> {
         let hero = match (&self.artist, &self.preview) {
             (Remote::Loaded(artist), _) => Some(artist_hero(artist, images)),
             (Remote::Loading, Some(preview)) => {
@@ -89,12 +113,25 @@ impl State {
                     .style(text::secondary)
                     .into();
             }
-            let sections = artist
-                .sections
-                .iter()
-                .enumerate()
-                .map(|(index, section)| self.section(index, section, images));
-            Column::from_iter(sections).spacing(SPACING).into()
+            let top = top_tracks(artist).map(|(index, _)| index);
+            let buttons = top.map(|_| {
+                play_buttons(
+                    &SourceRef::Artist(self.id),
+                    now_playing,
+                    Message::Play,
+                    Message::TogglePlay,
+                )
+            });
+            let sections = artist.sections.iter().enumerate().map(|(index, section)| {
+                // Only the top tracks play, as the artist's source.
+                let now_playing = (top == Some(index)).then_some(now_playing);
+                self.section(index, section, images, now_playing)
+            });
+            Column::new()
+                .push(buttons)
+                .extend(sections)
+                .spacing(SPACING)
+                .into()
         });
         Column::new()
             .push(hero.map(|hero| hero.map(Message::Link)))
@@ -109,6 +146,7 @@ impl State {
         index: usize,
         section: &'a Section,
         images: &'a Images,
+        playable: Option<Option<NowPlaying>>,
     ) -> Element<'a, Message> {
         match &section.content {
             Content::Tracks(tracks) => {
@@ -123,8 +161,23 @@ impl State {
                     .iter()
                     .take(TRACKS_SHOWN)
                     .enumerate()
-                    .map(|(i, track)| track_list::track(images, i + 1, track, COLUMNS));
-                Element::from(column![header].extend(rows).spacing(8)).map(Message::Link)
+                    .map(|(i, track)| {
+                        let row =
+                            track_list::track(images, i + 1, track, COLUMNS).map(Message::Link);
+                        match playable {
+                            Some(now_playing) => track_list::playable_track(
+                                row,
+                                track,
+                                now_playing,
+                                Message::Play(Start::Track(i)),
+                            ),
+                            None => row,
+                        }
+                    });
+                column![Element::from(header).map(Message::Link)]
+                    .extend(rows)
+                    .spacing(8)
+                    .into()
             }
             Content::Cards(cards) => {
                 let view_all = section.view_all.as_ref().map(|path| Route::ArtistViewAll {

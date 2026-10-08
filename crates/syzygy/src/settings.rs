@@ -12,6 +12,8 @@ use syzygy_catalog::{Kind, LibrarySort, TrackSort};
 use syzygy_store::Store;
 use syzygy_tidal::Quality;
 
+use crate::playback::Repeat;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -23,6 +25,8 @@ pub struct Settings {
     pub exclusive_device: Option<String>,
     pub bit_perfect: bool,
     pub gapless: bool,
+    pub shuffle: bool,
+    pub repeat: Repeat,
     pub autoplay: bool,
     pub allow_explicit: bool,
     /// Report plays to TIDAL so they show in Recently Played.
@@ -62,6 +66,8 @@ impl Default for Settings {
             exclusive_device: None,
             bit_perfect: false,
             gapless: true,
+            shuffle: false,
+            repeat: Repeat::Off,
             autoplay: false,
             allow_explicit: true,
             report_plays: true,

@@ -22,6 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 open.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
 

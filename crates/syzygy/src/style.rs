@@ -28,6 +28,8 @@ pub const BG_BUTTON: Color = color!(0x342947);
 pub const BG_BUTTON_HOVER: Color = color!(0x403257);
 
 pub const ACCENT: Color = color!(0xA855F7);
+/// The accent, brightened as sone's `hover:brightness-110`.
+pub const ACCENT_HOVER: Color = color!(0xB95EFF);
 
 pub const TEXT_PRIMARY: Color = Color::WHITE;
 pub const TEXT_SECONDARY: Color = color!(0xb3b3b3);
@@ -151,6 +153,24 @@ pub fn pill_button(_theme: &Theme, status: button::Status) -> button::Style {
         button::Status::Active => pill(BG_BUTTON, TEXT_PRIMARY),
         button::Status::Disabled => pill(BG_BUTTON, TEXT_DISABLED),
     }
+}
+
+/// The accent pill: a Page's Play.
+pub fn accent_pill(_theme: &Theme, status: button::Status) -> button::Style {
+    pill(accent(status), TEXT_PRIMARY)
+}
+
+/// The accent, brighter under the pointer.
+pub fn accent(status: button::Status) -> Color {
+    match status {
+        button::Status::Hovered | button::Status::Pressed => ACCENT_HOVER,
+        _ => ACCENT,
+    }
+}
+
+/// A button with no look of its own, around something that has one.
+pub fn bare_button(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style::default()
 }
 
 /// A rounded field on an inset background, as a Page's filter.

@@ -6,6 +6,9 @@ pub enum Error {
     /// A read of the user's Library before TIDAL has said who they are.
     #[error("syzygy doesn't know who's signed in yet")]
     UnknownUser,
+    /// TIDAL answered for a track with something that isn't one.
+    #[error("TIDAL sent something other than track {0}")]
+    NotATrack(u64),
 }
 
 impl Error {

@@ -11,6 +11,8 @@ pub struct Mix {
     pub title: String,
     pub subtitle: Option<String>,
     pub cover: Option<Cover>,
+    /// A track's mix, which plays as that track's Track radio.
+    pub track_radio: bool,
     pub tracks: Vec<Track>,
 }
 
@@ -20,6 +22,7 @@ impl From<MixPageResult> for Mix {
             title: mix.title.unwrap_or_default(),
             subtitle: mix.subtitle.filter(|s| !s.is_empty()),
             cover: mix.image.map(Cover::Url),
+            track_radio: mix.mix_type.as_deref() == Some("TRACK_MIX"),
             tracks: mix.tracks.into_iter().map(Track::from).collect(),
         }
     }

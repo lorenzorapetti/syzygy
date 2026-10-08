@@ -11,8 +11,9 @@ use syzygy_catalog::{Hit, Read, SearchResults, Track};
 
 use super::cards;
 use super::track_list::{self, Columns};
-use super::{Action, Link, Load, PADDING, Preview, Remote, Route, Viewport, rounded_cover};
+use super::{Action, Link, Load, PADDING, Remote, Route, Viewport, rounded_cover, single};
 use crate::images::Images;
+use crate::playback::{SourceRef, Start};
 use crate::style;
 
 /// Between the tabs and the results, and between sections.
@@ -74,6 +75,8 @@ pub enum Message {
     Loaded(Result<SearchResults, Arc<syzygy_catalog::Error>>),
     SelectTab(Tab),
     Link(Link),
+    /// Play the tracks found, from the one at this place.
+    Play(usize),
     Retry,
 }
 
@@ -104,6 +107,15 @@ impl State {
             }
             Message::SelectTab(_) => Action::None,
             Message::Link(link) => link.follow(),
+            Message::Play(index) => match self.results.loaded() {
+                Some(results) => Action::Play(super::request(
+                    SourceRef::Search(self.query.clone()),
+                    &self.query,
+                    &results.tracks,
+                    Start::Track(index),
+                )),
+                None => Action::None,
+            },
             Message::Retry => {
                 self.results = Remote::Loading;
                 Action::Load(Load::Search(self.query.clone()))
@@ -178,8 +190,8 @@ fn all<'a>(results: &'a SearchResults, images: &'a Images) -> Element<'a, Messag
             .iter()
             .take(TRACKS_PREVIEW)
             .enumerate()
-            .map(|(i, track)| track_list::track(images, i + 1, track, COLUMNS));
-        let list = Element::from(Column::with_children(rows)).map(Message::Link);
+            .map(|(i, track)| track_row(images, i, track));
+        let list = Column::with_children(rows).into();
         sections.push(section("Tracks", Tab::Tracks, list));
     }
     for (title, tab, list) in [
@@ -213,8 +225,14 @@ fn tracks<'a>(tracks: &'a [Track], images: &'a Images, viewport: Viewport) -> El
         LIST_TOP,
         viewport,
         track_list::header(COLUMNS),
-        |i| track_list::track(images, i + 1, &tracks[i], COLUMNS).map(Message::Link),
+        |i| track_row(images, i, &tracks[i]),
     )
+}
+
+/// A track found, which plays the tracks found from there.
+fn track_row<'a>(images: &'a Images, index: usize, track: &'a Track) -> Element<'a, Message> {
+    let row = track_list::track(images, index + 1, track, COLUMNS).map(Message::Link);
+    track_list::playable(row, Message::Play(index), false)
 }
 
 fn grid<'a>(cards: &'a [Card], what: &str, images: &'a Images) -> Element<'a, Message> {
@@ -231,7 +249,7 @@ fn none_found<'a>(what: &str) -> Element<'a, Message> {
 }
 
 /// One of the best matches, as a row: its picture, its title, and what it
-/// is and by whom. A track leads to its album until there's playback.
+/// is and by whom. A track plays on its own.
 pub fn hit<'a>(hit: &'a Hit, images: &'a Images) -> Element<'a, Link> {
     let (art, title, subtitle, open) = match hit {
         Hit::Card(card) => {
@@ -241,7 +259,7 @@ pub fn hit<'a>(hit: &'a Hit, images: &'a Images) -> Element<'a, Link> {
                 rounded_cover(images, card.cover.as_ref(), HIT_ART, radius),
                 card.title.as_str(),
                 card.subtitle.clone(),
-                cards::route(card),
+                cards::route(card).map(Link::Open),
             )
         }
         Hit::Track(track) => {
@@ -252,20 +270,12 @@ pub fn hit<'a>(hit: &'a Hit, images: &'a Images) -> Element<'a, Link> {
             } else {
                 format!("Track · {}", names.join(", "))
             };
-            let open = album.map(|album| Route::Album {
-                id: album.id,
-                preview: Some(Preview {
-                    title: album.title.clone(),
-                    cover: album.cover.clone(),
-                    artist: names.first().map(|name| name.to_string()),
-                }),
-            });
             let cover = album.and_then(|album| album.cover.as_ref());
             (
                 rounded_cover(images, cover, HIT_ART, 4.0),
                 track.title.as_str(),
                 subtitle,
-                open,
+                Some(Link::Play(single(track))),
             )
         }
     };
@@ -279,7 +289,7 @@ pub fn hit<'a>(hit: &'a Hit, images: &'a Images) -> Element<'a, Link> {
         .padding([6, 12])
         .width(Length::Fill)
         .style(style::list_row)
-        .on_press_maybe(open.map(Link::Open))
+        .on_press_maybe(open)
         .into()
 }
 

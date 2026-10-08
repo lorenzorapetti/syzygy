@@ -1,6 +1,6 @@
-//! The 90px player bar along the bottom, split 30/40/30: what's playing on
-//! the left, play and pause over the seek bar in the middle, the volume on
-//! the right.
+//! The 90px player bar along the bottom, split 30/40/30: what's playing
+//! and where from on the left, the transport over the seek bar in the
+//! middle, the volume on the right.
 
 use iced::widget::slider::{Handle, HandleShape, Rail};
 use iced::widget::{Space, button, column, container, row, slider, space, text};
@@ -9,13 +9,15 @@ use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme, f
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::page::{self, Link};
-use crate::playback::{self, Playback, Status};
+use crate::playback::{self, Playback, Repeat, Status};
 use crate::style;
 
 const HEIGHT: f32 = 90.0;
 const COVER_SIZE: f32 = 64.0;
 /// The play and pause disc.
 const PLAY_SIZE: f32 = 36.0;
+/// Shuffle, Previous, Next and Repeat.
+const BUTTON_SIZE: f32 = 32.0;
 /// The seek bar stops growing past this.
 const SEEK_WIDTH: f32 = 600.0;
 const TIME_WIDTH: f32 = 40.0;
@@ -35,6 +37,10 @@ pub struct PlayerBar {
 #[derive(Debug, Clone)]
 pub enum Message {
     TogglePlay,
+    Next,
+    Previous,
+    ToggleShuffle,
+    CycleRepeat,
     /// The seek bar's handle moved.
     Scrub(f32),
     /// The seek bar's handle was let go.
@@ -58,6 +64,10 @@ impl PlayerBar {
     pub fn update(&mut self, message: Message) -> Effect {
         match message {
             Message::TogglePlay => Effect::Playback(playback::Message::TogglePlay),
+            Message::Next => Effect::Playback(playback::Message::Next),
+            Message::Previous => Effect::Playback(playback::Message::Previous),
+            Message::ToggleShuffle => Effect::Playback(playback::Message::ToggleShuffle),
+            Message::CycleRepeat => Effect::Playback(playback::Message::CycleRepeat),
             Message::Scrub(position) => {
                 self.scrubbing = Some(position);
                 Effect::None
@@ -96,8 +106,8 @@ impl PlayerBar {
             .into()
     }
 
-    /// Play or pause over the seek bar, between the time played and the
-    /// track's length.
+    /// Shuffle, Previous, play or pause, Next and Repeat over the seek bar,
+    /// between the time played and the track's length.
     fn controls<'a>(&self, playback: &'a Playback) -> Element<'a, Message> {
         let glyph = match playback.status() {
             Status::Playing => Icon::Pause,
@@ -107,6 +117,29 @@ impl PlayerBar {
             .padding(0)
             .style(play_button)
             .on_press_maybe(playback.current().map(|_| Message::TogglePlay));
+        let skip = |glyph, message| {
+            button(container(filled(glyph, 18.0, style::TEXT_SECONDARY)).center(BUTTON_SIZE))
+                .padding(0)
+                .style(style::icon_button)
+                .on_press(message)
+        };
+        let repeat = match playback.repeat() {
+            Repeat::One => Icon::Repeat1,
+            Repeat::Off | Repeat::All => Icon::Repeat,
+        };
+        let transport = row![
+            mode(Icon::Shuffle, playback.shuffle(), Message::ToggleShuffle),
+            skip(Icon::SkipBack, Message::Previous),
+            play,
+            skip(Icon::SkipForward, Message::Next),
+            mode(
+                repeat,
+                playback.repeat() != Repeat::Off,
+                Message::CycleRepeat
+            ),
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center);
 
         let length = playback.current().map_or(0, |track| track.duration) as f32;
         let at = self
@@ -132,7 +165,7 @@ impl PlayerBar {
         let seek = row![time(at).align_x(Alignment::End), seek, time(length)]
             .spacing(8)
             .align_y(Alignment::Center);
-        column![play, seek]
+        column![transport, seek]
             .spacing(4)
             .align_x(Alignment::Center)
             .max_width(SEEK_WIDTH)
@@ -140,28 +173,66 @@ impl PlayerBar {
     }
 }
 
-/// The cover, the title and the artists of what's playing.
+/// The cover, the title, the artists and "Playing from" of what's playing.
+/// The cover and "Playing from" lead to the Playback source.
 fn now_playing<'a>(playback: &'a Playback, images: &'a Images) -> Element<'a, Message> {
     // The Shell shows the bar only with a current track.
-    let Some(track) = playback.current() else {
+    let (Some(track), Some(source)) = (playback.current(), playback.playing_from()) else {
         return space().into();
     };
-    let cover = track.album.as_ref().and_then(|album| album.cover.as_ref());
+    let route = page::source_route(source, track);
+    let from = row![
+        text("Playing from").size(10).color(style::TEXT_DISABLED),
+        match route.clone() {
+            Some(route) => page::link(
+                text(&source.name).size(10).wrapping(text::Wrapping::None),
+                Link::Open(route),
+            ),
+            None => text(&source.name)
+                .size(10)
+                .color(style::TEXT_DISABLED)
+                .wrapping(text::Wrapping::None)
+                .into(),
+        },
+    ]
+    .spacing(4);
     let details = column![
         text(&track.title)
             .size(13)
             .font(SEMIBOLD)
             .wrapping(text::Wrapping::None),
         page::artists(&track.artists, 11.0),
+        container(from).padding(iced::Padding::new(0.0).top(4.0)),
     ]
     .spacing(2);
-    let line = row![
-        page::rounded_cover(images, cover, COVER_SIZE, 6.0),
-        container(details).clip(true)
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center);
+    let cover = track.album.as_ref().and_then(|album| album.cover.as_ref());
+    let cover = button(page::rounded_cover(images, cover, COVER_SIZE, 6.0))
+        .padding(0)
+        .style(style::bare_button)
+        .on_press_maybe(route.map(Link::Open));
+    let line = row![cover, container(details).clip(true)]
+        .spacing(12)
+        .align_y(Alignment::Center);
     Element::from(line).map(Message::Link)
+}
+
+/// Shuffle or Repeat: the accent with a dot under it while on.
+fn mode<'a>(glyph: Icon, on: bool, message: Message) -> Element<'a, Message> {
+    let color = if on {
+        style::ACCENT
+    } else {
+        style::TEXT_SECONDARY
+    };
+    let dot = container(space()).width(4).height(4);
+    let dot = if on { dot.style(mode_dot) } else { dot };
+    let face = column![icon(glyph, 15.0, color), dot]
+        .spacing(3)
+        .align_x(Alignment::Center);
+    button(container(face).center(BUTTON_SIZE))
+        .padding(0)
+        .style(style::icon_button)
+        .on_press(message)
+        .into()
 }
 
 /// Mute, and the volume. Its icon says how loud: crossed out at 0, one
@@ -188,6 +259,15 @@ fn volume(playback: &Playback) -> Element<'_, Message> {
         .spacing(8)
         .align_y(Alignment::Center)
         .into()
+}
+
+/// The dot under Shuffle or Repeat while it's on.
+fn mode_dot(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(style::ACCENT.into()),
+        border: style::rounded(2.0),
+        ..container::Style::default()
+    }
 }
 
 /// The player bar's play and pause: a white disc.

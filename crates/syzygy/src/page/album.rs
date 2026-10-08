@@ -3,23 +3,22 @@
 
 use iced::Element;
 use iced::widget::{Column, column, mouse_area, text};
-use syzygy_catalog::track::AlbumRef;
 use syzygy_catalog::{Album, Read};
 
 use super::cards::{self, Rows};
 use super::track_list::{self, Columns, Mark};
 use super::{
-    Action, Link, Load, NowPlaying, PADDING, Preview, Remote, Viewport, artists, count, duration,
-    hero,
+    Action, Link, Load, NowPlaying, PADDING, PLAY_BUTTONS_HEIGHT, Preview, Remote, Viewport,
+    album_tracks, artists, count, duration, hero, play_buttons,
 };
 use crate::images::Images;
-use crate::playback::{PlayRequest, SourceRef};
+use crate::playback::{SourceRef, Start};
 use crate::style;
 
 /// Between the hero, the list and the sections.
 const SPACING: f32 = 32.0;
 /// Where the track list starts.
-const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING;
+const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING + PLAY_BUTTONS_HEIGHT + SPACING;
 const COLUMNS: Columns = Columns {
     cover: false,
     album: false,
@@ -48,8 +47,9 @@ pub enum Message {
     Loaded(Read<Album>),
     Cards(cards::Message),
     Link(Link),
-    /// Play the album from the track at this place in it.
-    Play(usize),
+    /// Play the album, from a track by its place in the album or all of it.
+    Play(Start),
+    TogglePlay,
     /// The pointer came over the track at this place.
     Hovered(usize),
     /// The pointer left the track at this place.
@@ -92,9 +92,15 @@ impl State {
             }
             Message::Link(link) => link.follow(),
             Message::Play(start) => match self.album.loaded() {
-                Some(album) => Action::Play(self.play_request(album, start)),
+                Some(album) => Action::Play(super::request(
+                    SourceRef::Album(self.id),
+                    &album.title,
+                    &album_tracks(self.id, album),
+                    start,
+                )),
                 None => Action::None,
             },
+            Message::TogglePlay => Action::TogglePlay,
             Message::Hovered(index) => {
                 self.hovered = Some(index);
                 Action::None
@@ -123,7 +129,7 @@ impl State {
         &'a self,
         images: &'a Images,
         viewport: Viewport,
-        now_playing: Option<NowPlaying>,
+        now_playing: Option<NowPlaying<'a>>,
     ) -> Element<'a, Message> {
         let hero = match (&self.album, &self.preview) {
             (Remote::Loaded(album), _) => Some(album_hero(album, images)),
@@ -151,7 +157,13 @@ impl State {
                     .view(index, &section.title, &section.cards, None, images)
                     .map(Message::Cards)
             });
-            column![list, footer]
+            let buttons = play_buttons(
+                &SourceRef::Album(self.id),
+                now_playing,
+                Message::Play,
+                Message::TogglePlay,
+            );
+            column![buttons, list, footer]
                 .extend(sections)
                 .spacing(SPACING)
                 .into()
@@ -188,7 +200,7 @@ impl State {
                 let line = track_list::marked(images, number, track, COLUMNS, mark);
                 let row = track_list::playable(
                     line.map(Message::Link),
-                    Message::Play(index),
+                    Message::Play(Start::Track(index)),
                     now.is_some(),
                 );
                 mouse_area(row)
@@ -196,25 +208,6 @@ impl State {
                     .on_exit(Message::Left(index))
                     .into()
             }
-        }
-    }
-
-    /// The album from track `start`. Each track carries the album, for the
-    /// player bar's cover, even where TIDAL left it out.
-    fn play_request(&self, album: &Album, start: usize) -> PlayRequest {
-        let tracks = album.tracks.iter().map(|track| {
-            let mut track = track.clone();
-            track.album.get_or_insert_with(|| AlbumRef {
-                id: self.id,
-                title: album.title.clone(),
-                cover: album.cover.clone(),
-            });
-            track
-        });
-        PlayRequest {
-            source: SourceRef::Album(self.id),
-            first_page: tracks.collect(),
-            start,
         }
     }
 }

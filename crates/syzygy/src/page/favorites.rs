@@ -1,15 +1,19 @@
 //! The Favorites Page: the user's Loved tracks a page at a time, last added
 //! first or sorted by TIDAL, and filtered here.
 
-use iced::widget::{Column, column, container, text, text_input};
+use iced::widget::{Column, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Length};
 use std::sync::Arc;
 use syzygy_catalog::{Direction, Paged, Read, Track, TrackOrder, TrackSort};
 
 use super::paged::List;
 use super::track_list::{self, Columns};
-use super::{Action, Context, Link, Load, PADDING, Viewport, count, hero, loved_art};
+use super::{
+    Action, Context, Link, Load, NowPlaying, PADDING, Viewport, count, hero, loved_art,
+    play_buttons,
+};
 use crate::images::Images;
+use crate::playback::{SourceRef, Start};
 use crate::settings::Sort;
 use crate::style;
 
@@ -60,6 +64,10 @@ pub enum Message {
     Sort(Option<TrackOrder>),
     Filter(String),
     Link(Link),
+    /// Play the loaded tracks, in the order shown, from a track by its
+    /// place in the list or all of them.
+    Play(Start),
+    TogglePlay,
     Retry,
 }
 
@@ -111,6 +119,16 @@ impl State {
                 self.loaded()
             }
             Message::Link(link) => link.follow(),
+            Message::Play(start) => match self.tracks.items() {
+                [] => Action::None,
+                tracks => Action::Play(super::request(
+                    SourceRef::LovedTracks,
+                    "Loved Tracks",
+                    tracks,
+                    start,
+                )),
+            },
+            Message::TogglePlay => Action::TogglePlay,
             Message::Retry => self.load(),
         }
     }
@@ -163,7 +181,12 @@ impl State {
         self.sort.unwrap_or(LAST_ADDED_FIRST)
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        now_playing: Option<NowPlaying<'a>>,
+    ) -> Element<'a, Message> {
         let total = self
             .tracks
             .total()
@@ -185,6 +208,13 @@ impl State {
                 .style(style::filter_input),
         )
         .center_y(FILTER_HEIGHT);
+        let buttons = play_buttons(
+            &SourceRef::LovedTracks,
+            now_playing,
+            Message::Play,
+            Message::TogglePlay,
+        );
+        let filter = row![buttons, space::horizontal(), filter].align_y(Alignment::Center);
         let body = self.tracks.list.view(Message::Retry, |_| {
             let tracks = self.tracks.items();
             if tracks.is_empty() {
@@ -194,8 +224,14 @@ impl State {
                 track_list::sortable_header(COLUMNS, Some(self.shown_sort()), Message::Sort);
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let position = self.shown[i];
-                track_list::track(images, position + 1, &tracks[position], COLUMNS)
-                    .map(Message::Link)
+                let track = &tracks[position];
+                let row = track_list::track(images, position + 1, track, COLUMNS);
+                track_list::playable_track(
+                    row.map(Message::Link),
+                    track,
+                    now_playing,
+                    Message::Play(Start::Track(position)),
+                )
             });
             let nothing_matches = (self.shown.is_empty() && !self.filter.trim().is_empty())
                 .then(|| empty("Nothing matches", "Try another title, artist or album."));

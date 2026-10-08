@@ -1,7 +1,7 @@
 //! The Playlist Page: a playlist's tracks a page at a time, sorted by TIDAL
 //! and filtered here, then the tracks TIDAL recommends for it.
 
-use iced::widget::{Column, button, column, container, row, text, text_input};
+use iced::widget::{Column, button, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Length};
 use std::sync::Arc;
 use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
@@ -9,10 +9,12 @@ use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
 use super::paged::List;
 use super::track_list::{self, Columns};
 use super::{
-    Action, Context, Link, Load, PADDING, Preview, Remote, Route, Viewport, count, duration, hero,
+    Action, Context, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, Viewport, count,
+    duration, hero, play_buttons,
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
+use crate::playback::{SourceRef, Start};
 use crate::settings::Sort;
 use crate::style;
 
@@ -66,6 +68,10 @@ pub enum Message {
     /// Show the next recommendations.
     MoreRecommendations,
     Link(Link),
+    /// Play the loaded tracks, in the order shown, from a track by its
+    /// place in the list or all of them.
+    Play(Start),
+    TogglePlay,
     Retry,
 }
 
@@ -143,6 +149,20 @@ impl State {
                 None => Action::None,
             },
             Message::Link(link) => link.follow(),
+            Message::Play(start) => {
+                let tracks = self.tracks.items();
+                if tracks.is_empty() {
+                    return Action::None;
+                }
+                let name = match (&self.playlist, &self.preview) {
+                    (Remote::Loaded(playlist), _) => playlist.title.as_str(),
+                    (_, Some(preview)) => preview.title.as_str(),
+                    _ => "Playlist",
+                };
+                let source = SourceRef::Playlist(self.uuid.clone());
+                Action::Play(super::request(source, name, tracks, start))
+            }
+            Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
                 self.reset_tracks();
                 let tracks = Action::Load(tracks(&self.uuid, self.sort));
@@ -201,7 +221,12 @@ impl State {
             .is_some_and(|playlist| playlist.is_own(self.user_id))
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        now_playing: Option<NowPlaying<'a>>,
+    ) -> Element<'a, Message> {
         let hero = match (&self.playlist, &self.preview) {
             (Remote::Loaded(playlist), _) => Some(self.hero(playlist, images)),
             (Remote::Loading, Some(preview)) => {
@@ -218,6 +243,13 @@ impl State {
                 .style(style::filter_input),
         )
         .center_y(FILTER_HEIGHT);
+        let buttons = play_buttons(
+            &SourceRef::Playlist(self.uuid.clone()),
+            now_playing,
+            Message::Play,
+            Message::TogglePlay,
+        );
+        let filter = row![buttons, space::horizontal(), filter].align_y(Alignment::Center);
         let columns = Columns {
             cover: true,
             album: true,
@@ -234,8 +266,14 @@ impl State {
             let header = track_list::sortable_header(columns, self.sort, Message::Sort);
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let position = self.shown[i];
-                track_list::track(images, position + 1, &tracks[position], columns)
-                    .map(Message::Link)
+                let track = &tracks[position];
+                let row = track_list::track(images, position + 1, track, columns);
+                track_list::playable_track(
+                    row.map(Message::Link),
+                    track,
+                    now_playing,
+                    Message::Play(Start::Track(position)),
+                )
             });
             let nothing_matches = (self.shown.is_empty() && !self.filter.trim().is_empty())
                 .then(|| empty("Nothing matches", "Try another title, artist or album."));

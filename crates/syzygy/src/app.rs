@@ -123,7 +123,14 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
     let (audio_sender, audio_receiver) = tokio::sync::mpsc::unbounded_channel();
     let player = AudioPlayer::new(audio_sender);
     let position = player.position();
-    let playback = Playback::new(settings.volume);
+    let playback = Playback::new(
+        playback::Preferences {
+            volume: settings.volume,
+            shuffle: settings.shuffle,
+            repeat: settings.repeat,
+        },
+        rand::make_rng(),
+    );
 
     let mut app = App {
         services: Services {
@@ -285,12 +292,19 @@ impl App {
             }
             Message::Playback(message) => {
                 let mute = matches!(message, playback::Message::ToggleMute);
+                let modes = matches!(
+                    message,
+                    playback::Message::ToggleShuffle | playback::Message::CycleRepeat
+                );
                 let task = self.update_playback(message);
-                if mute {
-                    Task::batch([task, self.save_volume()])
+                let save = if mute {
+                    self.save_volume()
+                } else if modes {
+                    self.save_modes()
                 } else {
-                    task
-                }
+                    Task::none()
+                };
+                Task::batch([task, save])
             }
             Message::SaveVolume => self.save_volume(),
             Message::Tick => {
@@ -374,6 +388,7 @@ impl App {
                 token,
                 track_id,
                 from,
+                album_gain,
             } => {
                 let tidal = self.services.tidal.clone();
                 let player = player.clone();
@@ -387,10 +402,13 @@ impl App {
                     let audio = |e| PlayError::Audio(Arc::new(e));
                     if normalize {
                         let info = &stream.info;
-                        let gain = syzygy_audio::compute_norm_gain(
-                            info.track_replay_gain,
-                            info.track_peak_amplitude,
-                        );
+                        // An album's gain when it plays in album order and
+                        // TIDAL has one, the track's otherwise.
+                        let (replay_gain, peak) = match info.album_replay_gain {
+                            Some(gain) if album_gain => (Some(gain), info.album_peak_amplitude),
+                            _ => (info.track_replay_gain, info.track_peak_amplitude),
+                        };
+                        let gain = syzygy_audio::compute_norm_gain(replay_gain, peak);
                         player.set_normalization_gain(gain).await.map_err(audio)?;
                     }
                     player.play_url(stream.uri, from).await.map_err(audio)
@@ -404,6 +422,11 @@ impl App {
             }
             playback::Effect::Pause => engine(player.pause(), "pause"),
             playback::Effect::Resume => engine(player.resume(), "resume"),
+            playback::Effect::Stop => {
+                // A play still loading would start after the stop.
+                self.play_task = None;
+                engine(player.stop(), "stop")
+            }
             playback::Effect::Seek(position) => engine(player.seek(position), "seek"),
             playback::Effect::SetVolume(volume) => {
                 engine(player.set_volume(volume), "set the volume")
@@ -446,6 +469,13 @@ impl App {
 
     fn save_volume(&mut self) -> Task<Message> {
         self.settings.volume = self.playback.volume();
+        self.save_settings()
+    }
+
+    /// Remember Shuffle and Repeat mode.
+    fn save_modes(&mut self) -> Task<Message> {
+        self.settings.shuffle = self.playback.shuffle();
+        self.settings.repeat = self.playback.repeat();
         self.save_settings()
     }
 

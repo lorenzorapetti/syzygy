@@ -9,14 +9,28 @@
 //! play order (indices into those tracks) and a cursor: the upcoming tracks
 //! are the play order after the cursor.
 
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use syzygy_catalog::Track;
 
 #[cfg(test)]
 mod tests;
 
+/// How many tracks History keeps.
+const HISTORY: usize = 500;
+/// Past this many seconds in, Previous restarts the track.
+const RESTART_AFTER: f32 = 3.0;
+
 pub struct Playback {
-    source_play: Option<SourcePlay>,
+    listening: Listening,
+    shuffle: bool,
+    repeat: Repeat,
+    /// Every shuffle draws from it: seeded from entropy at boot, fixed in
+    /// tests.
+    rng: SmallRng,
     status: Status,
     /// Seconds into the current track: from the engine while playing, the
     /// target while loading, where play starts again while stopped.
@@ -27,44 +41,122 @@ pub struct Playback {
     /// What to go back to if the play loading now fails.
     rollback: Option<Rollback>,
     next_token: u64,
+    /// Stamped on each source play, so History can tell a step back in the
+    /// play order from a track that played under another one.
+    next_play: u64,
+}
+
+/// Where listening is: the source, the current track and History.
+/// Snapshotted whole for a rollback.
+#[derive(Clone, Default)]
+struct Listening {
+    source: Option<SourcePlay>,
+    current: Option<Item>,
+    /// Oldest first.
+    history: VecDeque<Item>,
 }
 
 /// The Playback source and where playback is in it: its tracks, the order
-/// they play in and the cursor. Not the Manual queue.
+/// they play in and how far along that order it is. Not the Manual queue.
 #[derive(Clone)]
 struct SourcePlay {
-    #[expect(dead_code, reason = "\"Playing from\" (ticket 23) reads it")]
-    source: SourceRef,
+    /// Which play of a source this is; a Repeat all round is a new one.
+    play: u64,
+    source: Arc<Source>,
     /// The source's tracks, in source order.
     tracks: Arc<Vec<Track>>,
     /// Indices into `tracks`, in the order they play.
     order: Vec<usize>,
-    /// Where the current track is in `order`.
-    cursor: usize,
+    /// The steps before this have played or are playing; the rest are
+    /// upcoming.
+    next: usize,
+    /// The order isn't the source's: a Shuffle play, or Shuffle on.
+    shuffled: bool,
+}
+
+/// A track that plays, played or is playing, and where it came from.
+#[derive(Clone)]
+struct Item {
+    track: Track,
+    from: Arc<Source>,
+    /// Its step in the play it came from.
+    step: Option<Step>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Step {
+    play: u64,
+    index: usize,
 }
 
 /// What a play replaced, put back if it fails.
 struct Rollback {
-    source_play: Option<SourcePlay>,
+    listening: Listening,
     status: Status,
     position: f32,
+}
+
+/// The Playback source: what it is, and its name for "Playing from".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub kind: SourceRef,
+    pub name: String,
 }
 
 /// What playback is working through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceRef {
     Album(u64),
+    /// By uuid.
+    Playlist(String),
+    Mix(String),
+    /// A track's mix, by the mix's id.
+    TrackRadio(String),
+    /// An artist's top tracks.
+    Artist(u64),
+    LovedTracks,
+    /// The tracks a search found, by its query.
+    Search(String),
+    /// One track played on its own.
+    Track(u64),
 }
 
 /// How every play starts: the source, its tracks (all of them, or the first
-/// page of them) and the one to start at. Playback goes from there to the
-/// end of the source, never around to its start.
+/// page of them) and where to start. Playback goes from there to the end
+/// of the source, never around to its start.
 #[derive(Debug, Clone)]
 pub struct PlayRequest {
-    pub source: SourceRef,
+    pub source: Source,
     pub first_page: Vec<Track>,
-    /// Where in `first_page` to start.
-    pub start: usize,
+    pub start: Start,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    /// From the track at this place in `first_page` to the end, the rest
+    /// shuffled when Shuffle is on.
+    Track(usize),
+    /// The whole source, as Shuffle says: a Page's or a card's Play.
+    All,
+    /// The whole source in random order, once, leaving Shuffle as it is.
+    Shuffled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Repeat {
+    #[default]
+    Off,
+    /// Start the source over when it runs out.
+    All,
+    /// Replay the track when it ends. Next still moves on.
+    One,
+}
+
+/// What playback starts with, from `Settings`.
+pub struct Preferences {
+    pub volume: f32,
+    pub shuffle: bool,
+    pub repeat: Repeat,
 }
 
 /// Stamped on each play and echoed by its result, so a result for an older
@@ -86,6 +178,13 @@ pub enum Message {
     Start(PlayRequest),
     /// Play or pause, as the player bar's button.
     TogglePlay,
+    /// Skip to what comes next.
+    Next,
+    /// Restart the track, or go back through History.
+    Previous,
+    ToggleShuffle,
+    /// Off, all, one, off.
+    CycleRepeat,
     /// Go to this many seconds into the current track.
     Seek(f32),
     /// From 0 to 1.
@@ -122,28 +221,36 @@ impl std::fmt::Display for PlayError {
 /// What playback asks of the audio engine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
-    /// Fetch the track's stream and play it, from `from` seconds in.
+    /// Fetch the track's stream and play it, from `from` seconds in, with
+    /// the album's gain rather than the track's when normalizing.
     Play {
         token: PlayToken,
         track_id: u64,
         from: Option<f32>,
+        album_gain: bool,
     },
     Pause,
     Resume,
+    /// Let go of the track, and of any play still loading.
+    Stop,
     Seek(f32),
     SetVolume(f32),
 }
 
 impl Playback {
-    pub fn new(volume: f32) -> Self {
+    pub fn new(preferences: Preferences, rng: SmallRng) -> Self {
         Self {
-            source_play: None,
+            listening: Listening::default(),
+            shuffle: preferences.shuffle,
+            repeat: preferences.repeat,
+            rng,
             status: Status::Stopped,
             position: 0.0,
-            volume: volume.clamp(0.0, 1.0),
+            volume: preferences.volume.clamp(0.0, 1.0),
             pre_mute: 0.0,
             rollback: None,
             next_token: 0,
+            next_play: 0,
         }
     }
 
@@ -159,19 +266,44 @@ impl Playback {
                     self.status = Status::Playing;
                     vec![Effect::Resume]
                 }
-                Status::Stopped if self.source_play.is_some() => {
+                Status::Stopped if self.listening.current.is_some() => {
                     self.snapshot();
                     let from = (self.position > 0.0).then_some(self.position);
                     self.play(from)
                 }
                 Status::Stopped | Status::Loading(_) => vec![],
             },
+            Message::Next => self.next(),
+            Message::Previous => self.previous(),
+            Message::ToggleShuffle => {
+                self.shuffle = !self.shuffle;
+                if let Some(play) = &mut self.listening.source {
+                    let tail = &mut play.order[play.next..];
+                    if self.shuffle {
+                        tail.shuffle(&mut self.rng);
+                    } else {
+                        // The tail holds what hasn't played and wasn't
+                        // removed, so sorting it is source order minus those.
+                        tail.sort_unstable();
+                    }
+                    play.shuffled = self.shuffle;
+                }
+                vec![]
+            }
+            Message::CycleRepeat => {
+                self.repeat = match self.repeat {
+                    Repeat::Off => Repeat::All,
+                    Repeat::All => Repeat::One,
+                    Repeat::One => Repeat::Off,
+                };
+                vec![]
+            }
             Message::Seek(position) => match self.status {
                 Status::Playing | Status::Paused => {
                     self.position = position;
                     vec![Effect::Seek(position)]
                 }
-                Status::Stopped if self.source_play.is_some() => {
+                Status::Stopped if self.listening.current.is_some() => {
                     self.position = position;
                     vec![]
                 }
@@ -209,7 +341,7 @@ impl Playback {
                     (Ok(()), _) => self.status = Status::Playing,
                     (Err(e), Some(rollback)) => {
                         log::warn!("Could not play the track: {e}");
-                        self.source_play = rollback.source_play;
+                        self.listening = rollback.listening;
                         self.position = rollback.position;
                         self.status = match e {
                             PlayError::Resolve(_) => rollback.status,
@@ -234,18 +366,17 @@ impl Playback {
                 // The finished track is what a failed next one rolls back to.
                 self.status = Status::Stopped;
                 self.position = 0.0;
-                let next = self
-                    .source_play
-                    .as_ref()
-                    .is_some_and(|play| play.cursor + 1 < play.order.len());
-                if !next {
-                    return vec![];
+                if self.repeat == Repeat::One {
+                    self.snapshot();
+                    return self.play(None);
                 }
                 self.snapshot();
-                if let Some(play) = &mut self.source_play {
-                    play.cursor += 1;
+                if self.advance() {
+                    self.play(None)
+                } else {
+                    self.rollback = None;
+                    vec![]
                 }
-                self.play(None)
             }
             Message::EngineFailed => {
                 match self.status {
@@ -263,21 +394,37 @@ impl Playback {
 
     /// The track playing, or that would play.
     pub fn current(&self) -> Option<&Track> {
-        let play = self.source_play.as_ref()?;
-        play.tracks.get(play.order[play.cursor])
+        self.listening.current.as_ref().map(|entry| &entry.track)
+    }
+
+    /// Where the current track comes from.
+    pub fn playing_from(&self) -> Option<&Source> {
+        self.listening
+            .current
+            .as_ref()
+            .map(|entry| entry.from.as_ref())
     }
 
     /// What plays after the current track, in order.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the SourcePlay tab (ticket 29) lists them")
+        expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
     )]
     pub fn upcoming(&self) -> impl Iterator<Item = &Track> {
-        self.source_play.iter().flat_map(|play| {
-            play.order[play.cursor + 1..]
+        self.listening.source.iter().flat_map(|play| {
+            play.order[play.next..]
                 .iter()
                 .map(|&index| &play.tracks[index])
         })
+    }
+
+    /// The tracks already played, oldest first.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
+    )]
+    pub fn history(&self) -> impl Iterator<Item = &Track> {
+        self.listening.history.iter().map(|entry| &entry.track)
     }
 
     pub fn status(&self) -> Status {
@@ -292,19 +439,171 @@ impl Playback {
         self.volume
     }
 
+    pub fn shuffle(&self) -> bool {
+        self.shuffle
+    }
+
+    pub fn repeat(&self) -> Repeat {
+        self.repeat
+    }
+
     fn start(&mut self, request: PlayRequest) -> Vec<Effect> {
-        if request.start >= request.first_page.len() {
+        let len = request.first_page.len();
+        let (mut order, shuffled) = match request.start {
+            Start::Track(index) if index < len => ((index..len).collect::<Vec<_>>(), self.shuffle),
+            Start::All | Start::Shuffled if len > 0 => (
+                (0..len).collect(),
+                self.shuffle || request.start == Start::Shuffled,
+            ),
+            _ => return vec![],
+        };
+        match request.start {
+            // The chosen track plays first whatever Shuffle says.
+            Start::Track(_) if shuffled => order[1..].shuffle(&mut self.rng),
+            _ if shuffled => order.shuffle(&mut self.rng),
+            _ => {}
+        }
+        self.snapshot();
+        self.retire_current();
+        self.listening.source = Some(SourcePlay {
+            play: self.stamp_play(),
+            source: Arc::new(request.source),
+            tracks: Arc::new(request.first_page),
+            order,
+            next: 0,
+            shuffled,
+        });
+        self.advance();
+        self.play(None)
+    }
+
+    /// Next, chosen by the user: on even under Repeat one. Past the end it
+    /// starts over under Repeat all, and otherwise stops.
+    fn next(&mut self) -> Vec<Effect> {
+        if self.listening.current.is_none() {
             return vec![];
         }
         self.snapshot();
-        self.source_play = Some(SourcePlay {
-            source: request.source,
-            order: (0..request.first_page.len()).collect(),
-            tracks: Arc::new(request.first_page),
-            cursor: request.start,
-        });
+        if self.advance() {
+            return self.play(None);
+        }
+        self.rollback = None;
         self.position = 0.0;
+        match self.status {
+            Status::Stopped => vec![],
+            _ => {
+                self.status = Status::Stopped;
+                vec![Effect::Stop]
+            }
+        }
+    }
+
+    /// Past 3 s in, or with nothing in History, restart the track.
+    /// Otherwise play the last track in History: a step back in the play
+    /// order when it's the step before, or else under its own source, with
+    /// the current track back at the head of what's upcoming.
+    fn previous(&mut self) -> Vec<Effect> {
+        if self.listening.current.is_none() {
+            return vec![];
+        }
+        if self.position > RESTART_AFTER || self.listening.history.is_empty() {
+            return self.restart();
+        }
+        self.snapshot();
+        let listening = &mut self.listening;
+        let entry = listening.history.pop_back().expect("History isn't empty");
+        let current = listening.current.as_ref().and_then(|entry| entry.step);
+        if let Some(play) = &mut listening.source
+            && let Some(step) = current
+            && step.play == play.play
+            && step.index + 1 == play.next
+        {
+            // The current track goes back to being upcoming.
+            play.next = step.index;
+        }
+        listening.current = Some(entry);
         self.play(None)
+    }
+
+    fn restart(&mut self) -> Vec<Effect> {
+        self.position = 0.0;
+        match self.status {
+            Status::Playing | Status::Paused => vec![Effect::Seek(0.0)],
+            Status::Stopped | Status::Loading(_) => vec![],
+        }
+    }
+
+    /// Put the current track in History and make what comes next current:
+    /// the next step of the play order, or under Repeat all the first step
+    /// of a new round. False, with nothing changed, when nothing comes next.
+    fn advance(&mut self) -> bool {
+        let Some(play) = &self.listening.source else {
+            return false;
+        };
+        if play.next == play.order.len() {
+            if self.repeat != Repeat::All || play.tracks.is_empty() {
+                return false;
+            }
+            self.start_over();
+        }
+        self.retire_current();
+        let Some(play) = &mut self.listening.source else {
+            return false;
+        };
+        let index = play.next;
+        play.next += 1;
+        self.listening.current = Some(Item {
+            track: play.tracks[play.order[index]].clone(),
+            from: play.source.clone(),
+            step: Some(Step {
+                play: play.play,
+                index,
+            }),
+        });
+        true
+    }
+
+    /// Repeat all: a new round of the whole source, reshuffled if Shuffle is
+    /// on and in source order if not.
+    fn start_over(&mut self) {
+        let round = self.stamp_play();
+        let Some(play) = &mut self.listening.source else {
+            return;
+        };
+        play.play = round;
+        play.order = (0..play.tracks.len()).collect();
+        if self.shuffle {
+            play.order.shuffle(&mut self.rng);
+        }
+        play.shuffled = self.shuffle;
+        play.next = 0;
+    }
+
+    /// The current track has played: into History, which keeps the last
+    /// [`HISTORY`].
+    fn retire_current(&mut self) {
+        if let Some(entry) = self.listening.current.take() {
+            self.listening.history.push_back(entry);
+            if self.listening.history.len() > HISTORY {
+                self.listening.history.pop_front();
+            }
+        }
+    }
+
+    fn stamp_play(&mut self) -> u64 {
+        self.next_play += 1;
+        self.next_play
+    }
+
+    /// Album gain only for an album's own track in album order: not after
+    /// a Shuffle play or with Shuffle on.
+    fn album_gain(&self) -> bool {
+        let (Some(play), Some(entry)) = (&self.listening.source, &self.listening.current) else {
+            return false;
+        };
+        matches!(entry.from.kind, SourceRef::Album(_))
+            && entry.step.is_some_and(|step| step.play == play.play)
+            && !play.shuffled
     }
 
     /// Remember what's playing, to go back to if the next play fails. While
@@ -312,7 +611,7 @@ impl Playback {
     fn snapshot(&mut self) {
         if !matches!(self.status, Status::Loading(_)) {
             self.rollback = Some(Rollback {
-                source_play: self.source_play.clone(),
+                listening: self.listening.clone(),
                 status: self.status,
                 position: self.position,
             });
@@ -343,6 +642,7 @@ impl Playback {
             token,
             track_id,
             from,
+            album_gain: self.album_gain(),
         }]
     }
 }

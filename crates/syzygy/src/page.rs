@@ -25,13 +25,14 @@ mod track_list;
 use iced::widget::{Row, Text, button, column, container, row, text};
 use iced::{Alignment, Color, Element, Length, Task};
 use std::sync::Arc;
-use syzygy_catalog::home_feed::Cover;
-use syzygy_catalog::track::ArtistRef;
-use syzygy_catalog::{Kind, Read, Shelf, TrackSort};
+use syzygy_catalog::artist::Content;
+use syzygy_catalog::home_feed::{Card, Cover};
+use syzygy_catalog::track::{AlbumRef, ArtistRef};
+use syzygy_catalog::{Album, Artist, Kind, Mix, Read, Shelf, Track, TrackSort};
 
 use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
-use crate::playback::PlayRequest;
+use crate::playback::{PlayRequest, Source, SourceRef, Start};
 use crate::settings::{Settings, Sort};
 use crate::style;
 
@@ -39,6 +40,8 @@ use crate::style;
 const COVER_RADIUS: f32 = 4.0;
 /// Around every Page's content.
 const PADDING: f32 = 24.0;
+/// The row of Play and Shuffle under a Page's hero.
+const PLAY_BUTTONS_HEIGHT: f32 = 40.0;
 
 /// Where a Page is. Plain data, so the Back stack can rebuild a Page from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,12 +141,14 @@ pub struct Viewport {
     pub height: f32,
 }
 
-/// The current track, for track lists to mark.
+/// The current track, for track lists to mark, and where it plays from,
+/// for a Page's Play.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NowPlaying {
+pub struct NowPlaying<'a> {
     pub track_id: u64,
     /// While it plays: seconds on the clock its animation runs on.
     pub playing: Option<f32>,
+    pub source: &'a SourceRef,
 }
 
 /// What a Page reads from the rest of the app as it opens.
@@ -163,6 +168,10 @@ pub enum Action {
     Navigate(Route),
     /// Start playing a source.
     Play(PlayRequest),
+    /// Read what a card leads to, then play all of it.
+    PlayCard(Card),
+    /// Pause or resume what's playing.
+    TogglePlay,
     /// This Page now shows `route`, as after a tab switch: its Back stack
     /// entry changes and no step is added. It starts this read, if any.
     Replace(Route, Option<Load>),
@@ -299,6 +308,9 @@ pub enum Link {
     /// A cover came into view.
     CoverWanted(String),
     Open(Route),
+    Play(PlayRequest),
+    /// A card's play button.
+    PlayCard(Card),
 }
 
 impl Link {
@@ -306,6 +318,8 @@ impl Link {
         match self {
             Link::CoverWanted(url) => Action::FetchImages(vec![url]),
             Link::Open(route) => Action::Navigate(route),
+            Link::Play(request) => Action::Play(request),
+            Link::PlayCard(card) => Action::PlayCard(card),
         }
     }
 }
@@ -429,19 +443,25 @@ impl Page {
         &'a self,
         images: &'a Images,
         viewport: Viewport,
-        now_playing: Option<NowPlaying>,
+        now_playing: Option<NowPlaying<'a>>,
     ) -> Element<'a, Message> {
         match self {
             Page::Home(state) => state.view(images).map(Message::Home),
             Page::Album(state) => state
                 .view(images, viewport, now_playing)
                 .map(Message::Album),
-            Page::Artist(state) => state.view(images).map(Message::Artist),
-            Page::ArtistTracks(state) => state.view(images, viewport).map(Message::ArtistTracks),
+            Page::Artist(state) => state.view(images, now_playing).map(Message::Artist),
+            Page::ArtistTracks(state) => state
+                .view(images, viewport, now_playing)
+                .map(Message::ArtistTracks),
             Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),
-            Page::Mix(state) => state.view(images, viewport).map(Message::Mix),
-            Page::Playlist(state) => state.view(images, viewport).map(Message::Playlist),
-            Page::Favorites(state) => state.view(images, viewport).map(Message::Favorites),
+            Page::Mix(state) => state.view(images, viewport, now_playing).map(Message::Mix),
+            Page::Playlist(state) => state
+                .view(images, viewport, now_playing)
+                .map(Message::Playlist),
+            Page::Favorites(state) => state
+                .view(images, viewport, now_playing)
+                .map(Message::Favorites),
             Page::Library(state) => state.view(images).map(Message::Library),
             Page::Search(state) => state.view(images, viewport).map(Message::Search),
             Page::Explore(state) => state.view(images).map(Message::Explore),
@@ -610,4 +630,179 @@ pub fn artists<'a>(artists: &'a [ArtistRef], size: f32) -> Row<'a, Link> {
         }
     });
     row(names).spacing(4).align_y(Alignment::Center)
+}
+
+/// A Page's Play and Shuffle. Play starts `source` as Shuffle says, or
+/// pauses and resumes it while it's what plays. Shuffle is a Shuffle play.
+pub fn play_buttons<'a, M: Clone + 'a>(
+    source: &SourceRef,
+    now_playing: Option<NowPlaying>,
+    play_from: fn(Start) -> M,
+    toggle: M,
+) -> Element<'a, M> {
+    let this = now_playing.filter(|now| now.source == source);
+    let (glyph, label, on_play) = match this {
+        Some(NowPlaying {
+            playing: Some(_), ..
+        }) => (Icon::Pause, "Pause", toggle),
+        Some(_) => (Icon::Play, "Resume", toggle),
+        None => (Icon::Play, "Play", play_from(Start::All)),
+    };
+    let play = pill(
+        filled(glyph, 18.0, style::TEXT_PRIMARY),
+        label,
+        style::accent_pill,
+        on_play,
+    );
+    let shuffle = pill(
+        icon(Icon::Shuffle, 18.0, style::TEXT_PRIMARY),
+        "Shuffle",
+        style::pill_button,
+        play_from(Start::Shuffled),
+    );
+    container(row![play, shuffle].spacing(12))
+        .center_y(PLAY_BUTTONS_HEIGHT)
+        .into()
+}
+
+fn pill<'a, M: Clone + 'a>(
+    glyph: impl Into<Element<'a, M>>,
+    label: &'a str,
+    style: fn(&iced::Theme, button::Status) -> button::Style,
+    on_press: M,
+) -> Element<'a, M> {
+    button(
+        row![glyph.into(), text(label).size(14).font(hero::bold())]
+            .spacing(8)
+            .align_y(Alignment::Center),
+    )
+    .padding([10, 24])
+    .style(style)
+    .on_press(on_press)
+    .into()
+}
+
+/// A track on its own: its own Playback source.
+pub fn single(track: &Track) -> PlayRequest {
+    PlayRequest {
+        source: Source {
+            kind: SourceRef::Track(track.id),
+            name: track.title.clone(),
+        },
+        first_page: vec![track.clone()],
+        start: Start::Track(0),
+    }
+}
+
+/// An album's tracks, each carrying the album, for the player bar's cover,
+/// even where TIDAL left it out.
+pub fn album_tracks(id: u64, album: &Album) -> Vec<Track> {
+    album
+        .tracks
+        .iter()
+        .map(|track| {
+            let mut track = track.clone();
+            track.album.get_or_insert_with(|| AlbumRef {
+                id,
+                title: album.title.clone(),
+                cover: album.cover.clone(),
+            });
+            track
+        })
+        .collect()
+}
+
+/// A mix as a Playback source: a track's mix plays as its Track radio.
+/// Named `fallback` when TIDAL sent no title.
+pub fn mix_source(id: &str, mix: &Mix, fallback: &str) -> Source {
+    let kind = if mix.track_radio {
+        SourceRef::TrackRadio(id.to_string())
+    } else {
+        SourceRef::Mix(id.to_string())
+    };
+    let name = if mix.title.is_empty() {
+        fallback
+    } else {
+        &mix.title
+    };
+    Source {
+        kind,
+        name: name.to_string(),
+    }
+}
+
+/// What plays as the artist: their first track section with tracks in it,
+/// by its place among their sections.
+pub fn top_tracks(artist: &Artist) -> Option<(usize, &[Track])> {
+    artist
+        .sections
+        .iter()
+        .enumerate()
+        .find_map(|(index, section)| match &section.content {
+            Content::Tracks(tracks) if !tracks.is_empty() => Some((index, tracks.as_slice())),
+            _ => None,
+        })
+}
+
+/// `tracks` from `source`, started as `start` says.
+pub fn request(kind: SourceRef, name: &str, tracks: &[Track], start: Start) -> PlayRequest {
+    PlayRequest {
+        source: Source {
+            kind,
+            name: name.to_string(),
+        },
+        first_page: tracks.to_vec(),
+        start,
+    }
+}
+
+/// Where "Playing from" leads: the source's Page, or for a track played on
+/// its own, its album's.
+pub fn source_route(source: &Source, track: &Track) -> Option<Route> {
+    let preview = || {
+        Some(Preview {
+            title: source.name.clone(),
+            cover: None,
+            artist: None,
+        })
+    };
+    let route = match &source.kind {
+        SourceRef::Album(id) => Route::Album {
+            id: *id,
+            preview: Some(Preview {
+                title: source.name.clone(),
+                cover: track.album.as_ref().and_then(|album| album.cover.clone()),
+                artist: None,
+            }),
+        },
+        SourceRef::Playlist(uuid) => Route::Playlist {
+            uuid: uuid.clone(),
+            preview: preview(),
+        },
+        SourceRef::Mix(id) | SourceRef::TrackRadio(id) => Route::Mix {
+            id: id.clone(),
+            preview: preview(),
+        },
+        SourceRef::Artist(id) => Route::Artist {
+            id: *id,
+            preview: preview(),
+        },
+        SourceRef::LovedTracks => Route::Favorites,
+        SourceRef::Search(query) => Route::Search {
+            query: query.clone(),
+            tab: search::Tab::Tracks,
+        },
+        SourceRef::Track(_) => {
+            let album = track.album.as_ref()?;
+            Route::Album {
+                id: album.id,
+                preview: Some(Preview {
+                    title: album.title.clone(),
+                    cover: album.cover.clone(),
+                    artist: None,
+                }),
+            }
+        }
+    };
+    Some(route)
 }

@@ -5,13 +5,17 @@ use iced::widget::{Column, text};
 use syzygy_catalog::{Mix, Read};
 
 use super::track_list::{self, Columns};
-use super::{Action, Link, Load, PADDING, Preview, Remote, Viewport, count, hero};
+use super::{
+    Action, Link, Load, NowPlaying, PADDING, PLAY_BUTTONS_HEIGHT, Preview, Remote, Viewport, count,
+    hero, mix_source, play_buttons,
+};
 use crate::images::Images;
+use crate::playback::{Source, Start};
 use crate::style;
 
 const SPACING: f32 = 32.0;
 /// Where the track list starts.
-const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING;
+const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING + PLAY_BUTTONS_HEIGHT + SPACING;
 const COLUMNS: Columns = Columns {
     cover: true,
     album: true,
@@ -28,6 +32,9 @@ pub struct State {
 pub enum Message {
     Loaded(Read<Mix>),
     Link(Link),
+    /// Play the mix, from a track by its place or all of it.
+    Play(Start),
+    TogglePlay,
     Retry,
 }
 
@@ -49,6 +56,19 @@ impl State {
                 Action::None
             }
             Message::Link(link) => link.follow(),
+            Message::Play(start) => match self.mix.loaded() {
+                Some(mix) => {
+                    let source = self.source(mix);
+                    Action::Play(super::request(
+                        source.kind,
+                        &source.name,
+                        &mix.tracks,
+                        start,
+                    ))
+                }
+                None => Action::None,
+            },
+            Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
                 self.mix = Remote::Loading;
                 Action::Load(Load::Mix(self.id.clone()))
@@ -56,20 +76,50 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    fn source(&self, mix: &Mix) -> Source {
+        let fallback = self.preview.as_ref().map_or("", |p| p.title.as_str());
+        mix_source(&self.id, mix, fallback)
+    }
+
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        now_playing: Option<NowPlaying<'a>>,
+    ) -> Element<'a, Message> {
         let hero = match (&self.mix, &self.preview) {
             (Remote::Loaded(mix), preview) => Some(mix_hero(mix, preview.as_ref(), images)),
             (Remote::Loading, Some(preview)) => Some(hero::preview(images, "MIX", preview, false)),
             _ => None,
         };
         let body = self.mix.view(Message::Retry, |mix| {
-            track_list::view(
+            let buttons = play_buttons(
+                &self.source(mix).kind,
+                now_playing,
+                Message::Play,
+                Message::TogglePlay,
+            );
+            let list = track_list::view(
                 mix.tracks.len(),
                 LIST_TOP,
                 viewport,
                 track_list::header(COLUMNS),
-                |i| track_list::track(images, i + 1, &mix.tracks[i], COLUMNS).map(Message::Link),
-            )
+                |i| {
+                    let track = &mix.tracks[i];
+                    let row = track_list::track(images, i + 1, track, COLUMNS);
+                    track_list::playable_track(
+                        row.map(Message::Link),
+                        track,
+                        now_playing,
+                        Message::Play(Start::Track(i)),
+                    )
+                },
+            );
+            Column::new()
+                .push(buttons)
+                .push(list)
+                .spacing(SPACING)
+                .into()
         });
         Column::new()
             .push(hero.map(|hero| hero.map(Message::Link)))

@@ -26,8 +26,13 @@ pub enum Icon {
     Pause,
     Play,
     RefreshCw,
+    Repeat,
+    Repeat1,
     Search,
     ShieldCheck,
+    Shuffle,
+    SkipBack,
+    SkipForward,
     SquarePlay,
     Star,
     Trophy,
@@ -40,7 +45,7 @@ pub enum Icon {
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 29] = [
+const SOURCES: [&str; 34] = [
     include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/bell.svg"),
     include_str!("../icons/calendar.svg"),
@@ -59,8 +64,13 @@ const SOURCES: [&str; 29] = [
     include_str!("../icons/pause.svg"),
     include_str!("../icons/play.svg"),
     include_str!("../icons/refresh-cw.svg"),
+    include_str!("../icons/repeat.svg"),
+    include_str!("../icons/repeat-1.svg"),
     include_str!("../icons/search.svg"),
     include_str!("../icons/shield-check.svg"),
+    include_str!("../icons/shuffle.svg"),
+    include_str!("../icons/skip-back.svg"),
+    include_str!("../icons/skip-forward.svg"),
     include_str!("../icons/square-play.svg"),
     include_str!("../icons/star.svg"),
     include_str!("../icons/trophy.svg"),

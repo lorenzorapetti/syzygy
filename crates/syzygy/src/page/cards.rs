@@ -3,20 +3,22 @@
 //! artist's view-all Page share them.
 
 use iced::widget::{
-    self as widget, Text, button, column, container, operation, row, scrollable, sensor, space,
-    text,
+    self as widget, Text, button, column, container, hover, operation, row, scrollable, sensor,
+    space, text,
 };
-use iced::{Alignment, Element, Theme};
+use iced::{Alignment, Element, Length, Theme};
 use std::collections::HashMap;
 use syzygy_catalog::home_feed::{Card, Target};
 
 use super::{Action, Link, Preview, Route, cover};
-use crate::icons::{Icon, icon};
+use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::style;
 
 pub const CARD_WIDTH: f32 = 160.0;
 const CARD_GAP: f32 = 16.0;
+/// The play button over a card's cover.
+const PLAY_SIZE: f32 = 40.0;
 /// A row this close to an end counts as at that end.
 const SCROLL_SLACK: f32 = 10.0;
 
@@ -149,13 +151,49 @@ pub fn wrapped<'a>(tiles: impl IntoIterator<Item = Element<'a, Link>>) -> Elemen
         .into()
 }
 
+/// A card. Under the pointer, what can play shows a play button over its
+/// cover; a track's card plays wherever it's clicked.
 pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
-    tile(
-        cover(images, card.cover.as_ref(), CARD_WIDTH),
-        &card.title,
-        &card.subtitle,
-        route(card).map(Link::Open),
-    )
+    let art = cover(images, card.cover.as_ref(), CARD_WIDTH);
+    let art = match play_button(card) {
+        Some(play) => hover(
+            art,
+            container(play)
+                .padding(8)
+                .align_bottom(Length::Fill)
+                .align_right(Length::Fill),
+        ),
+        None => art,
+    };
+    tile(art, &card.title, &card.subtitle, open(card))
+}
+
+/// What clicking a card does: open its Page, or play a track's.
+pub fn open(card: &Card) -> Option<Link> {
+    match card.target {
+        Target::Track(_) => Some(Link::PlayCard(card.clone())),
+        _ => route(card).map(Link::Open),
+    }
+}
+
+/// The accent disc that plays all of what a card leads to, if it can play.
+pub fn play_button<'a>(card: &Card) -> Option<Element<'a, Link>> {
+    let playable = matches!(
+        card.target,
+        Target::Album(_)
+            | Target::Artist(_)
+            | Target::Playlist(_)
+            | Target::Mix(_)
+            | Target::Favorites
+            | Target::Track(_)
+    );
+    playable.then(|| {
+        button(container(filled(Icon::Play, 18.0, style::TEXT_PRIMARY)).center(PLAY_SIZE))
+            .padding(0)
+            .style(play_disc)
+            .on_press(Link::PlayCard(card.clone()))
+            .into()
+    })
 }
 
 /// A card's shape for anything: `art` over a title and a subtitle, opening
@@ -185,8 +223,8 @@ pub fn tile<'a>(
     .into()
 }
 
-/// Where a card leads, with what its Page can draw straight away. Tracks
-/// and videos play once there's playback.
+/// Where a card leads, with what its Page can draw straight away. A track's
+/// card plays instead, and a video's leads nowhere yet.
 pub fn route(card: &Card) -> Option<Route> {
     // Only an album card's subtitle is its artist.
     let preview = |artist: bool| {
@@ -243,6 +281,20 @@ fn card_button(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: None,
         text_color,
+        ..button::Style::default()
+    }
+}
+
+/// A card's play button: an accent disc.
+fn play_disc(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(style::accent(status).into()),
+        border: style::rounded(PLAY_SIZE / 2.0),
+        shadow: iced::Shadow {
+            color: iced::Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 12.0,
+        },
         ..button::Style::default()
     }
 }
