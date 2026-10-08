@@ -137,7 +137,12 @@ impl Rows {
 
 /// Cards wrapped onto as many lines as they need.
 pub fn grid<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Link> {
-    row(cards.iter().map(|c| card(c, images)))
+    wrapped(cards.iter().map(|c| card(c, images)))
+}
+
+/// Cards or tiles wrapped onto as many lines as they need.
+pub fn wrapped<'a>(tiles: impl IntoIterator<Item = Element<'a, Link>>) -> Element<'a, Link> {
+    row(tiles)
         .spacing(CARD_GAP)
         .wrap()
         .vertical_spacing(24)
@@ -145,6 +150,22 @@ pub fn grid<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Link> {
 }
 
 pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
+    tile(
+        cover(images, card.cover.as_ref(), CARD_WIDTH),
+        &card.title,
+        &card.subtitle,
+        route(card).map(Link::Open),
+    )
+}
+
+/// A card's shape for anything: `art` over a title and a subtitle, opening
+/// `open` when clicked.
+pub fn tile<'a>(
+    art: Element<'a, Link>,
+    title: impl text::IntoFragment<'a>,
+    subtitle: impl text::IntoFragment<'a>,
+    open: Option<Link>,
+) -> Element<'a, Link> {
     let line = |line: Text<'a>| {
         container(line.wrapping(text::Wrapping::None))
             .width(CARD_WIDTH)
@@ -152,15 +173,15 @@ pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
     };
     button(
         column![
-            cover(images, card.cover.as_ref(), CARD_WIDTH),
-            line(text(&card.title).size(14)),
-            line(text(&card.subtitle).size(12).style(text::secondary)),
+            art,
+            line(text(title).size(14)),
+            line(text(subtitle).size(12).style(text::secondary)),
         ]
         .spacing(6),
     )
     .padding(0)
     .style(card_button)
-    .on_press_maybe(route(card).map(Link::Open))
+    .on_press_maybe(open)
     .into()
 }
 

@@ -14,10 +14,10 @@ use crate::events::EventSource;
 use crate::identity::{DISPLAY_NAME, Paths};
 use crate::images::{self, Images};
 use crate::login;
-use crate::page::{self, Context, PageId, Route};
+use crate::page::{self, Context, PageId};
 use crate::persist;
 use crate::session::Session;
-use crate::settings::Settings;
+use crate::settings::{self, Settings};
 use crate::shell::{self, Shell};
 use crate::style;
 
@@ -61,15 +61,14 @@ pub struct Services {
 pub enum Message {
     Login(login::Message),
     Page(PageId, page::Message),
-    Navigate(Route),
     Back,
     Forward,
     /// The window came back into focus.
     WindowFocused,
     Shell(shell::Message),
     Images(images::Message),
-    /// Remember a playlist's track sort; `None` forgets it.
-    TrackSort(String, Option<syzygy_catalog::TrackSort>),
+    /// Remember an order the user picked.
+    Sort(settings::Sort),
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
@@ -204,15 +203,14 @@ impl App {
             Message::Page(id, message) => self.in_shell(|shell, services, context| {
                 shell.update_page(id, message, services, context)
             }),
-            Message::Navigate(route) => {
-                self.in_shell(|shell, services, context| shell.navigate(route, services, context))
-            }
             Message::Back => self.in_shell(Shell::back),
             Message::Forward => self.in_shell(Shell::forward),
             Message::WindowFocused => self.in_shell(Shell::focused),
-            Message::Shell(message) => self.in_shell(|shell, _, _| shell.update(message)),
-            Message::TrackSort(uuid, sort) => {
-                self.settings.set_track_sort(uuid, sort);
+            Message::Shell(message) => {
+                self.in_shell(|shell, services, context| shell.update(message, services, context))
+            }
+            Message::Sort(sort) => {
+                self.settings.save_sort(sort);
                 self.save_settings()
             }
             Message::Images(message) => {
@@ -235,12 +233,18 @@ impl App {
                     Message::SessionSaved,
                 )
             }
-            Message::SessionInfo(Ok(info)) => self.update_session(|session| {
-                session.user_id = Some(info.user_id);
-                if info.country_code.is_some() {
-                    session.country_code = info.country_code;
-                }
-            }),
+            Message::SessionInfo(Ok(info)) => {
+                let saved = self.update_session(|session| {
+                    session.user_id = Some(info.user_id);
+                    if info.country_code.is_some() {
+                        session.country_code = info.country_code;
+                    }
+                });
+                let known = self.in_shell(|shell, services, context| {
+                    shell.user_known(info.user_id, services, context)
+                });
+                Task::batch([saved, known])
+            }
             Message::SessionInfo(Err(e)) => {
                 log::warn!("Could not refresh the account info: {e}");
                 Task::none()

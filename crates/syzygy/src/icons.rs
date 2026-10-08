@@ -8,10 +8,13 @@ use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Icon {
+    ArrowUpDown,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     ChevronUp,
+    FolderOpen,
+    Heart,
     House,
     Library,
     RefreshCw,
@@ -20,11 +23,14 @@ pub enum Icon {
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 9] = [
+const SOURCES: [&str; 12] = [
+    include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/chevron-down.svg"),
     include_str!("../icons/chevron-left.svg"),
     include_str!("../icons/chevron-right.svg"),
     include_str!("../icons/chevron-up.svg"),
+    include_str!("../icons/folder-open.svg"),
+    include_str!("../icons/heart.svg"),
     include_str!("../icons/house.svg"),
     include_str!("../icons/library.svg"),
     include_str!("../icons/refresh-cw.svg"),
@@ -59,10 +65,6 @@ pub fn icon<'a>(icon: Icon, size: f32, color: Color) -> Svg<'a> {
 }
 
 /// A solid icon, `size` square, in `color`.
-#[expect(
-    dead_code,
-    reason = "the player bar's Play and Pause and a loved Heart are the first"
-)]
 pub fn filled<'a>(icon: Icon, size: f32, color: Color) -> Svg<'a> {
     tinted(FILLED[icon as usize].clone(), size, color)
 }

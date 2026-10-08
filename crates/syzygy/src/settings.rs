@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use syzygy_catalog::TrackSort;
+use syzygy_catalog::{Kind, LibrarySort, TrackSort};
 use syzygy_store::Store;
 use syzygy_tidal::Quality;
 
@@ -30,6 +30,21 @@ pub struct Settings {
     /// Each playlist's track sort, by uuid. A playlist that isn't here is
     /// in its own order.
     pub track_sorts: BTreeMap<String, TrackSort>,
+    /// The Loved tracks' sort. Without one they're last added first.
+    pub loved_tracks_sort: Option<TrackSort>,
+    /// Each Library type's order, in the sidebar and its Library Page. A
+    /// type that isn't here is in its default order.
+    pub library_sorts: BTreeMap<Kind, LibrarySort>,
+}
+
+/// An order the user picked for one of their lists.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sort {
+    /// A playlist's track sort; `None` is its own order.
+    Playlist(String, Option<TrackSort>),
+    /// `None` is last added first.
+    LovedTracks(Option<TrackSort>),
+    Library(Kind, LibrarySort),
 }
 
 impl Default for Settings {
@@ -46,6 +61,8 @@ impl Default for Settings {
             allow_explicit: true,
             report_plays: true,
             track_sorts: BTreeMap::new(),
+            loved_tracks_sort: None,
+            library_sorts: BTreeMap::new(),
         }
     }
 }
@@ -75,12 +92,28 @@ impl Settings {
         }
     }
 
-    /// Remember `sort` for a playlist; `None` forgets it.
-    pub fn set_track_sort(&mut self, uuid: String, sort: Option<TrackSort>) {
+    /// Remember an order the user picked.
+    pub fn save_sort(&mut self, sort: Sort) {
         match sort {
-            Some(sort) => self.track_sorts.insert(uuid, sort),
-            None => self.track_sorts.remove(&uuid),
-        };
+            Sort::Playlist(uuid, Some(sort)) => {
+                self.track_sorts.insert(uuid, sort);
+            }
+            Sort::Playlist(uuid, None) => {
+                self.track_sorts.remove(&uuid);
+            }
+            Sort::LovedTracks(sort) => self.loved_tracks_sort = sort,
+            Sort::Library(kind, sort) => {
+                self.library_sorts.insert(kind, sort);
+            }
+        }
+    }
+
+    /// The order a Library type is read in.
+    pub fn library_sort(&self, kind: Kind) -> LibrarySort {
+        self.library_sorts
+            .get(&kind)
+            .copied()
+            .unwrap_or_else(|| kind.default_sort())
     }
 
     /// Encrypt and write the settings off the UI thread.
@@ -96,7 +129,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syzygy_catalog::{Direction, TrackOrder};
+    use syzygy_catalog::{Direction, LibraryOrder, TrackOrder};
     use syzygy_store::{KeySource, Store};
 
     fn store(dir: &std::path::Path) -> Store {
@@ -177,12 +210,40 @@ mod tests {
     fn a_track_sort_is_kept_per_playlist_until_it_goes_back_to_the_own_order() {
         let mut settings = Settings::default();
 
-        settings.set_track_sort("u-1".into(), Some(by_title()));
-        settings.set_track_sort("u-2".into(), Some(by_title()));
-        settings.set_track_sort("u-2".into(), None);
+        settings.save_sort(Sort::Playlist("u-1".into(), Some(by_title())));
+        settings.save_sort(Sort::Playlist("u-2".into(), Some(by_title())));
+        settings.save_sort(Sort::Playlist("u-2".into(), None));
 
         assert_eq!(settings.track_sorts.get("u-1"), Some(&by_title()));
         assert_eq!(settings.track_sorts.get("u-2"), None);
+    }
+
+    #[test]
+    fn a_library_type_is_in_its_default_order_until_one_is_picked() {
+        let mut settings = Settings::default();
+        let by_name = LibrarySort {
+            order: LibraryOrder::Name,
+            direction: Direction::Ascending,
+        };
+
+        settings.save_sort(Sort::Library(Kind::Albums, by_name));
+
+        assert_eq!(settings.library_sort(Kind::Albums), by_name);
+        assert_eq!(
+            settings.library_sort(Kind::Playlists),
+            Kind::Playlists.default_sort()
+        );
+    }
+
+    #[test]
+    fn the_loved_tracks_sort_is_kept_until_it_goes_back_to_the_default() {
+        let mut settings = Settings::default();
+
+        settings.save_sort(Sort::LovedTracks(Some(by_title())));
+        assert_eq!(settings.loved_tracks_sort, Some(by_title()));
+
+        settings.save_sort(Sort::LovedTracks(None));
+        assert_eq!(settings.loved_tracks_sort, None);
     }
 
     #[test]
@@ -196,7 +257,15 @@ mod tests {
             exclusive_device: Some("hw:1,0".into()),
             ..Settings::default()
         };
-        settings.set_track_sort("u-1".into(), Some(by_title()));
+        settings.save_sort(Sort::Playlist("u-1".into(), Some(by_title())));
+        settings.save_sort(Sort::LovedTracks(Some(by_title())));
+        settings.save_sort(Sort::Library(
+            Kind::Mixes,
+            LibrarySort {
+                order: LibraryOrder::MixType,
+                direction: Direction::Ascending,
+            },
+        ));
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

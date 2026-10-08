@@ -397,7 +397,7 @@ fn subtitle(item: &Value) -> String {
 }
 
 /// "2 Videos · 12 Tracks", as sone's `playlistCountLabel`.
-fn count_label(tracks: u64, videos: u64) -> String {
+pub(crate) fn count_label(tracks: u64, videos: u64) -> String {
     let plural = |n: u64, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
     let mut parts = Vec::new();
     if videos > 0 {

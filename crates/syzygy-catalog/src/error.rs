@@ -3,6 +3,9 @@
 pub enum Error {
     #[error(transparent)]
     Tidal(#[from] syzygy_tidal::Error),
+    /// A read of the user's Library before TIDAL has said who they are.
+    #[error("syzygy doesn't know who's signed in yet")]
+    UnknownUser,
 }
 
 impl Error {

@@ -7,24 +7,26 @@ pub mod album;
 pub mod artist;
 pub mod artist_tracks;
 pub mod artist_view_all;
-mod cards;
+pub mod cards;
+pub mod favorites;
 mod hero;
 pub mod home;
+pub mod library;
 pub mod mix;
-mod paged;
+pub mod paged;
 pub mod playlist;
 mod track_list;
-mod unbuilt;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
-use iced::{Alignment, Element, Length, Task, Theme};
+use iced::{Alignment, Color, Element, Length, Task, Theme};
 use std::sync::Arc;
 use syzygy_catalog::home_feed::Cover;
 use syzygy_catalog::track::ArtistRef;
-use syzygy_catalog::{Read, TrackSort};
+use syzygy_catalog::{Kind, Read, Shelf, TrackSort};
 
+use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
-use crate::settings::Settings;
+use crate::settings::{Settings, Sort};
 use crate::style;
 
 /// How round a cover's corners are.
@@ -67,6 +69,15 @@ pub enum Route {
     },
     /// The user's Loved tracks.
     Favorites,
+    /// One type of the user's Library in full. The type is the tab.
+    Library {
+        kind: Kind,
+    },
+    /// A Folder's playlists, by its id, with its name for the title.
+    Folder {
+        id: String,
+        name: String,
+    },
 }
 
 impl Route {
@@ -122,8 +133,8 @@ pub enum Action {
     Run(Task<Message>),
     /// Load these covers into the image cache.
     FetchImages(Vec<String>),
-    /// Remember a playlist's track sort in `Settings`; `None` forgets it.
-    SaveTrackSort(String, Option<TrackSort>),
+    /// Remember an order the user picked, in `Settings`.
+    SaveSort(Sort),
     /// All of these.
     Batch(Vec<Action>),
 }
@@ -175,6 +186,25 @@ pub enum Load {
     },
     /// The tracks TIDAL recommends for a playlist, from `offset`.
     PlaylistRecommendations { uuid: String, offset: usize },
+    /// The first page of a shelf of the user's Library.
+    Library(Shelf),
+    /// A shelf after the first `offset` items, from `cursor` for playlists.
+    MoreLibrary {
+        shelf: Shelf,
+        offset: usize,
+        cursor: Option<String>,
+    },
+    /// The first page of the user's Loved tracks.
+    LovedTracks {
+        user_id: u64,
+        sort: Option<TrackSort>,
+    },
+    /// The Loved tracks after the first `offset`.
+    MoreLovedTracks {
+        user_id: u64,
+        sort: Option<TrackSort>,
+        offset: usize,
+    },
 }
 
 pub enum Page {
@@ -185,7 +215,8 @@ pub enum Page {
     ArtistViewAll(artist_view_all::State),
     Mix(mix::State),
     Playlist(playlist::State),
-    Unbuilt(unbuilt::State),
+    Favorites(favorites::State),
+    Library(library::State),
 }
 
 #[derive(Debug, Clone)]
@@ -197,8 +228,8 @@ pub enum Message {
     ArtistViewAll(artist_view_all::Message),
     Mix(mix::Message),
     Playlist(playlist::Message),
-    /// From a Page with no messages of its own.
-    Link(Link),
+    Favorites(favorites::Message),
+    Library(library::Message),
 }
 
 /// What any Page's covers, cards and links ask for.
@@ -250,14 +281,22 @@ impl Page {
                 let (state, action) = playlist::State::new(uuid.clone(), preview.clone(), context);
                 (Page::Playlist(state), action)
             }
-            Route::Favorites => (
-                Page::Unbuilt(unbuilt::State::new(Some(Preview {
-                    title: "Loved Tracks".to_string(),
-                    cover: None,
-                    artist: None,
-                }))),
-                Action::None,
-            ),
+            Route::Favorites => {
+                let (state, action) = favorites::State::new(context);
+                (Page::Favorites(state), action)
+            }
+            Route::Library { kind } => {
+                let (state, action) = library::State::new(*kind, None, context);
+                (Page::Library(state), action)
+            }
+            Route::Folder { id, name } => {
+                let folder = library::FolderRef {
+                    id: id.clone(),
+                    name: name.clone(),
+                };
+                let (state, action) = library::State::new(Kind::Playlists, Some(folder), context);
+                (Page::Library(state), action)
+            }
         }
     }
 
@@ -270,7 +309,8 @@ impl Page {
             (Page::ArtistViewAll(state), Message::ArtistViewAll(message)) => state.update(message),
             (Page::Mix(state), Message::Mix(message)) => state.update(message),
             (Page::Playlist(state), Message::Playlist(message)) => state.update(message),
-            (_, Message::Link(link)) => link.follow(),
+            (Page::Favorites(state), Message::Favorites(message)) => state.update(message),
+            (Page::Library(state), Message::Library(message)) => state.update(message),
             // A message for another kind of Page.
             _ => Action::None,
         }
@@ -293,7 +333,8 @@ impl Page {
             Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),
             Page::Mix(state) => state.view(images, viewport).map(Message::Mix),
             Page::Playlist(state) => state.view(images, viewport).map(Message::Playlist),
-            Page::Unbuilt(state) => state.view(images).map(Message::Link),
+            Page::Favorites(state) => state.view(images, viewport).map(Message::Favorites),
+            Page::Library(state) => state.view(images).map(Message::Library),
         }
     }
 }
@@ -380,6 +421,26 @@ pub fn rounded_cover<'a>(
         }
         None => images::placeholder(size, radius),
     }
+}
+
+/// The Loved tracks' picture: a heart on sone's gradient, `size` square.
+pub fn loved_art<'a, M: 'a>(size: f32, radius: f32) -> Element<'a, M> {
+    container(filled(Icon::Heart, (size * 0.375).round(), Color::WHITE))
+        .center(size)
+        .style(move |_| style::loved(radius))
+        .into()
+}
+
+/// A Folder's picture: an open folder, `size` square.
+pub fn folder_art<'a, M: 'a>(size: f32, radius: f32) -> Element<'a, M> {
+    container(icon(
+        Icon::FolderOpen,
+        (size * 0.45).min(32.0).round(),
+        style::TEXT_MUTED,
+    ))
+    .center(size)
+    .style(move |theme| style::placeholder(theme, radius))
+    .into()
 }
 
 /// Text that goes somewhere when clicked.

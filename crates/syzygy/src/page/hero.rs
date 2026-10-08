@@ -25,6 +25,21 @@ pub fn view<'a>(
     lines: Vec<Element<'a, Link>>,
 ) -> Element<'a, Link> {
     let radius = if round { HEIGHT / 2.0 } else { RADIUS };
+    with_art(
+        rounded_cover(images, cover, HEIGHT, radius),
+        kind,
+        title,
+        lines,
+    )
+}
+
+/// The hero with `art` in the cover's place.
+pub fn with_art<'a>(
+    art: Element<'a, Link>,
+    kind: &'a str,
+    title: &'a str,
+    lines: Vec<Element<'a, Link>>,
+) -> Element<'a, Link> {
     let details = column![
         text(kind)
             .size(12)
@@ -38,12 +53,9 @@ pub fn view<'a>(
     .extend(lines)
     .spacing(8);
     container(
-        row![
-            rounded_cover(images, cover, HEIGHT, radius),
-            container(details).clip(true),
-        ]
-        .spacing(28)
-        .align_y(Alignment::End),
+        row![art, container(details).clip(true)]
+            .spacing(28)
+            .align_y(Alignment::End),
     )
     .align_bottom(HEIGHT)
     .clip(true)

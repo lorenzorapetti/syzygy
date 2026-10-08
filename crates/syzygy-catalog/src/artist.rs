@@ -79,6 +79,8 @@ pub(crate) fn tracks_page(page: &Value, limit: usize) -> Paged<Track> {
         items: items.iter().filter_map(Track::from_value).collect(),
         // TIDAL sends no total here: a full page probably has more after it.
         has_more: items.len() >= limit,
+        cursor: None,
+        total: None,
     }
 }
 
@@ -92,6 +94,8 @@ pub(crate) fn cards_page(page: &Value, limit: usize) -> Paged<Card> {
     Paged {
         items,
         has_more: raw.len() >= limit,
+        cursor: None,
+        total: None,
     }
 }
 

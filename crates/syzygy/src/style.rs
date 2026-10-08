@@ -5,8 +5,9 @@
 //! such). Every widget syzygy styles gets a plain style fn that reads these
 //! tokens; the ones shared across modules live here.
 
+use iced::gradient::Linear;
 use iced::widget::{button, container, text_input};
-use iced::{Background, Border, Color, Theme, color};
+use iced::{Background, Border, Color, Degrees, Theme, color};
 
 const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
     Color {
@@ -35,6 +36,7 @@ pub const TEXT_DISABLED: Color = color!(0x535353);
 
 pub const BORDER_SUBTLE: Color = rgba(255, 255, 255, 0.06);
 pub const HL_FAINT: Color = rgba(255, 255, 255, 0.04);
+pub const HL_MED: Color = rgba(255, 255, 255, 0.08);
 
 pub const SUCCESS: Color = color!(0x1ed760);
 pub const WARNING: Color = color!(0xffa726);
@@ -66,6 +68,20 @@ pub fn rounded(radius: f32) -> Border {
 pub fn placeholder(_theme: &Theme, radius: f32) -> container::Style {
     container::Style {
         background: Some(Background::Color(BG_SURFACE_HOVER)),
+        border: rounded(radius),
+        ..container::Style::default()
+    }
+}
+
+/// The Loved tracks' picture: sone's violet-to-cyan gradient, from the
+/// top left.
+pub fn loved(radius: f32) -> container::Style {
+    let gradient = Linear::new(Degrees(135.0))
+        .add_stop(0.0, color!(0x450af5))
+        .add_stop(0.5, color!(0x8e2de2))
+        .add_stop(1.0, color!(0x00d2ff));
+    container::Style {
+        background: Some(Background::Gradient(gradient.into())),
         border: rounded(radius),
         ..container::Style::default()
     }

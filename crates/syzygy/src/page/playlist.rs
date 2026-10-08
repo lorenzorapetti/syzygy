@@ -13,6 +13,7 @@ use super::{
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
+use crate::settings::Sort;
 use crate::style;
 
 const SPACING: f32 = 32.0;
@@ -124,7 +125,7 @@ impl State {
                 self.reset_tracks();
                 Action::Batch(vec![
                     Action::Load(tracks(&self.uuid, sort)),
-                    Action::SaveTrackSort(self.uuid.clone(), sort),
+                    Action::SaveSort(Sort::Playlist(self.uuid.clone(), sort)),
                 ])
             }
             Message::Filter(filter) => {
@@ -166,7 +167,7 @@ impl State {
     /// The tracks or the filter changed: filter them again, and while a
     /// filter is on, load the rest so it sees every track.
     fn loaded(&mut self) -> Action {
-        self.shown = matching(self.tracks.items(), &self.filter);
+        self.shown = track_list::matching(self.tracks.items(), &self.filter);
         self.load_rest_if_filtering()
     }
 
@@ -363,27 +364,6 @@ fn recommendations(uuid: &str, offset: usize) -> Load {
     }
 }
 
-/// Where in `tracks` the ones whose title, artists or album contain
-/// `filter` are, ignoring case. All of them for an empty filter.
-fn matching(tracks: &[Track], filter: &str) -> Vec<usize> {
-    let filter = filter.trim().to_lowercase();
-    let contains = |s: &str| s.to_lowercase().contains(&filter);
-    tracks
-        .iter()
-        .enumerate()
-        .filter(|(_, track)| {
-            filter.is_empty()
-                || contains(&track.title)
-                || track.artists.iter().any(|artist| contains(&artist.name))
-                || track
-                    .album
-                    .as_ref()
-                    .is_some_and(|album| contains(&album.title))
-        })
-        .map(|(i, _)| i)
-        .collect()
-}
-
 /// The tracks TIDAL recommends, read a batch at a time and shown ten at a
 /// time, as in sone: Refresh shows the next ten, reads the next batch when
 /// these run out, and starts over when TIDAL has no more.
@@ -468,32 +448,6 @@ mod tests {
             volume: 1,
             date_added: None,
         }
-    }
-
-    fn tracks() -> Vec<Track> {
-        vec![
-            track(1, "Jóga", "Björk", "Homogenic"),
-            track(2, "Hyperballad", "Björk", "Post"),
-            track(3, "Teardrop", "Massive Attack", "Mezzanine"),
-            track(4, "Postcards", "Someone", "Letters"),
-        ]
-    }
-
-    #[test]
-    fn an_empty_filter_lets_every_track_through() {
-        assert_eq!(matching(&tracks(), "  "), vec![0, 1, 2, 3]);
-    }
-
-    #[test]
-    fn the_filter_looks_at_title_artist_and_album_ignoring_case() {
-        assert_eq!(matching(&tracks(), "teardrop"), vec![2]);
-        assert_eq!(matching(&tracks(), "BJÖRK"), vec![0, 1]);
-        assert_eq!(matching(&tracks(), "post"), vec![1, 3]);
-    }
-
-    #[test]
-    fn filtered_rows_keep_their_place_in_the_list() {
-        assert_eq!(matching(&tracks(), "mezzanine"), vec![2]);
     }
 
     fn batch(n: usize) -> Vec<Track> {

@@ -108,11 +108,7 @@ impl TrackSort {
             TrackOrder::DateAdded => "DATE",
             TrackOrder::Duration => "LENGTH",
         };
-        let direction = match self.direction {
-            Direction::Ascending => "ASC",
-            Direction::Descending => "DESC",
-        };
-        (order, direction)
+        (order, self.direction.param())
     }
 
     /// How the sort tells cache keys apart, as `"NAME:ASC"`.
@@ -128,10 +124,18 @@ impl TrackSort {
 }
 
 impl Direction {
-    fn flipped(self) -> Direction {
+    pub(crate) fn flipped(self) -> Direction {
         match self {
             Direction::Ascending => Direction::Descending,
             Direction::Descending => Direction::Ascending,
+        }
+    }
+
+    /// TIDAL's `orderDirection`.
+    pub(crate) fn param(self) -> &'static str {
+        match self {
+            Direction::Ascending => "ASC",
+            Direction::Descending => "DESC",
         }
     }
 }
@@ -142,6 +146,8 @@ pub(crate) fn tracks_page(page: PaginatedTracks) -> Paged<Track> {
     Paged {
         has_more: !page.items.is_empty() && end < page.total_number_of_items as usize,
         items: page.items.into_iter().map(Track::from).collect(),
+        cursor: None,
+        total: Some(page.total_number_of_items as usize),
     }
 }
 

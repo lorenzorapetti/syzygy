@@ -7,6 +7,7 @@ pub mod artist;
 mod error;
 mod home;
 pub mod home_feed;
+pub mod library;
 pub mod mix;
 mod paged;
 pub mod playlist;
@@ -15,17 +16,23 @@ pub mod track;
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 use syzygy_store::{CacheResult, CacheTier, DiskCache};
 use syzygy_tidal::TidalClient;
-use syzygy_tidal::models::{HomePageResponse, HomePageSection};
+use syzygy_tidal::models::{
+    HomePageResponse, HomePageSection, PaginatedResponse, TidalAlbumDetail, TidalArtistDetail,
+    TidalFavoriteMix,
+};
 
 pub use album::Album;
 pub use artist::Artist;
 pub use error::Error;
 pub use home_feed::{Card, Cover, HomeFeed};
+pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
 pub use mix::Mix;
 pub use paged::Paged;
 pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
@@ -293,6 +300,113 @@ impl Catalog {
         }
     }
 
+    /// The first page of a shelf of the user's Library.
+    pub fn library(&self, shelf: &Shelf) -> BoxStream<'static, Read<Paged<library::Item>>> {
+        let tidal = self.tidal.clone();
+        let shelf = shelf.clone();
+        let key = format!(
+            "library:{}:{:?}:{}:{}",
+            shelf.user_id,
+            shelf.kind,
+            shelf.folder_id(),
+            shelf.sort.key()
+        );
+        let tags = library_tags(&shelf);
+        let cache = self.cache.clone();
+        match shelf.kind {
+            Kind::Playlists => {
+                swr::read(cache, serde_entry::<Value>(key, tags), move || async move {
+                    Ok(folder(&tidal, &shelf, 0, None).await?)
+                })
+                .map(|read| read.map(|page| library::folder_page(&page)))
+                .boxed()
+            }
+            Kind::Albums => swr::read(cache, serde_entry(key, tags), move || async move {
+                Ok(favorite_albums(&tidal, &shelf, 0).await?)
+            })
+            .map(|read| read.map(library::albums_page))
+            .boxed(),
+            Kind::Artists => swr::read(cache, serde_entry(key, tags), move || async move {
+                Ok(favorite_artists(&tidal, &shelf, 0).await?)
+            })
+            .map(|read| read.map(library::artists_page))
+            .boxed(),
+            Kind::Mixes => swr::read(cache, serde_entry(key, tags), move || async move {
+                Ok(favorite_mixes(&tidal, &shelf, 0).await?)
+            })
+            .map(|read| read.map(library::mixes_page))
+            .boxed(),
+        }
+    }
+
+    /// A shelf after the first `offset` items, from `cursor` for the
+    /// playlists. Not cached: they only follow on from the pages on screen.
+    pub fn more_library(
+        &self,
+        shelf: &Shelf,
+        offset: usize,
+        cursor: Option<String>,
+    ) -> impl Future<Output = Result<Paged<library::Item>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let shelf = shelf.clone();
+        async move {
+            let offset = offset as u32;
+            let page = match shelf.kind {
+                Kind::Playlists => folder(&tidal, &shelf, offset, cursor.as_deref())
+                    .await
+                    .map(|page| library::folder_page(&page)),
+                Kind::Albums => favorite_albums(&tidal, &shelf, offset)
+                    .await
+                    .map(library::albums_page),
+                Kind::Artists => favorite_artists(&tidal, &shelf, offset)
+                    .await
+                    .map(library::artists_page),
+                Kind::Mixes => favorite_mixes(&tidal, &shelf, offset)
+                    .await
+                    .map(library::mixes_page),
+            };
+            page.map_err(|e| Arc::new(Error::from(e)))
+        }
+    }
+
+    /// The first page of the user's Loved tracks, in `sort`'s order or else
+    /// last added first.
+    pub fn loved_tracks(
+        &self,
+        user_id: u64,
+        sort: Option<TrackSort>,
+    ) -> BoxStream<'static, Read<Paged<Track>>> {
+        let tidal = self.tidal.clone();
+        let entry = Entry {
+            key: format!("fav-tracks:{user_id}:{}", TrackSort::key(sort)),
+            tier: CacheTier::UserContent,
+            tags: vec!["fav-tracks".to_string(), format!("user:{user_id}")],
+            encode: playlist::encode_page,
+            decode: playlist::decode_page,
+        };
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(loved_page(&tidal, user_id, sort, 0).await?)
+        })
+        .map(|read| read.map(playlist::tracks_page))
+        .boxed()
+    }
+
+    /// The user's Loved tracks after the first `offset`. Not cached.
+    pub fn more_loved_tracks(
+        &self,
+        user_id: u64,
+        sort: Option<TrackSort>,
+        offset: usize,
+    ) -> impl Future<Output = Result<Paged<Track>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        async move {
+            let page = loved_page(&tidal, user_id, sort, offset as u32)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(playlist::tracks_page(page))
+        }
+    }
+
     /// The bytes of a picture, from the disk cache when it's there (stale
     /// is good enough: a cover doesn't change under its URL).
     pub fn image(
@@ -370,6 +484,100 @@ async fn playlist_page(
             params.map(|(_, direction)| direction),
         )
         .await
+}
+
+/// The tags of a Library shelf's reads: what its edits invalidate.
+fn library_tags(shelf: &Shelf) -> Vec<String> {
+    let kind = match shelf.kind {
+        // Favorite playlists sit among the user's own, and in Folders.
+        Kind::Playlists => vec!["folders".to_string(), "fav-playlists".to_string()],
+        Kind::Albums => vec!["fav-albums".to_string()],
+        Kind::Artists => vec!["fav-artists".to_string()],
+        Kind::Mixes => vec!["fav-mixes".to_string()],
+    };
+    kind.into_iter()
+        .chain([format!("user:{}", shelf.user_id)])
+        .collect()
+}
+
+/// `PAGE_SIZE` of a Folder's playlists and Folders from `offset`, or from
+/// `cursor` past the first page.
+async fn folder(
+    tidal: &TidalClient,
+    shelf: &Shelf,
+    offset: u32,
+    cursor: Option<&str>,
+) -> Result<Value, syzygy_tidal::Error> {
+    let (order, direction) = shelf.sort.params();
+    tidal
+        .get_playlist_folders(
+            shelf.folder_id(),
+            "",
+            offset,
+            PAGE_SIZE,
+            order,
+            direction,
+            cursor.unwrap_or_default(),
+        )
+        .await
+}
+
+async fn favorite_albums(
+    tidal: &TidalClient,
+    shelf: &Shelf,
+    offset: u32,
+) -> Result<PaginatedResponse<TidalAlbumDetail>, syzygy_tidal::Error> {
+    let (order, direction) = shelf.sort.params();
+    tidal
+        .get_favorite_albums(shelf.user_id, offset, PAGE_SIZE, order, direction)
+        .await
+}
+
+async fn favorite_artists(
+    tidal: &TidalClient,
+    shelf: &Shelf,
+    offset: u32,
+) -> Result<PaginatedResponse<TidalArtistDetail>, syzygy_tidal::Error> {
+    let (order, direction) = shelf.sort.params();
+    tidal
+        .get_favorite_artists(shelf.user_id, offset, PAGE_SIZE, order, direction)
+        .await
+}
+
+async fn favorite_mixes(
+    tidal: &TidalClient,
+    shelf: &Shelf,
+    offset: u32,
+) -> Result<PaginatedResponse<TidalFavoriteMix>, syzygy_tidal::Error> {
+    let (order, direction) = shelf.sort.params();
+    tidal
+        .get_favorite_mixes(offset, PAGE_SIZE, order, direction)
+        .await
+}
+
+/// `PAGE_SIZE` of the user's Loved tracks from `offset`, sorted by TIDAL:
+/// last added first unless a sort says otherwise, as in sone.
+async fn loved_page(
+    tidal: &TidalClient,
+    user_id: u64,
+    sort: Option<TrackSort>,
+    offset: u32,
+) -> Result<syzygy_tidal::models::PaginatedTracks, syzygy_tidal::Error> {
+    let (order, direction) = sort.map_or(("DATE", "DESC"), TrackSort::params);
+    tidal
+        .get_favorite_tracks(user_id, offset, PAGE_SIZE, order, direction)
+        .await
+}
+
+/// A typed read, cached as JSON, in the tier for the user's own content.
+fn serde_entry<T: Serialize + DeserializeOwned>(key: String, tags: Vec<String>) -> Entry<T> {
+    Entry {
+        key,
+        tier: CacheTier::UserContent,
+        tags,
+        encode: |value| serde_json::to_vec(value).ok(),
+        decode: |bytes| serde_json::from_slice(bytes).ok(),
+    }
 }
 
 /// A raw JSON read, cached as it came, in the Dynamic tier.

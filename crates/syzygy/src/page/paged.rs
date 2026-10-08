@@ -39,6 +39,21 @@ impl<T> List<T> {
         self.list.loaded().map_or(&[], |page| &page.items)
     }
 
+    /// Where TIDAL's next page starts, for a list it pages by cursor.
+    pub fn cursor(&self) -> Option<String> {
+        self.list.loaded()?.cursor.clone()
+    }
+
+    /// How long the whole list is, when TIDAL says.
+    pub fn total(&self) -> Option<usize> {
+        self.list.loaded()?.total
+    }
+
+    /// The list can't be read: show `error` in its place.
+    pub fn fail(&mut self, error: syzygy_catalog::Error) {
+        self.list = Remote::Failed(Arc::new(error));
+    }
+
     /// A read of the first page.
     pub fn apply(&mut self, read: Read<Paged<T>>, what: &str) {
         if self.extended {
@@ -62,6 +77,8 @@ impl<T> List<T> {
                 self.more = More::Idle;
                 page.items.extend(more.items);
                 page.has_more = more.has_more;
+                page.cursor = more.cursor;
+                page.total = more.total.or(page.total);
                 self.extended = true;
             }
             Err(e) => {

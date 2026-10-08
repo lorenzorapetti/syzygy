@@ -2,6 +2,7 @@
 //! Back stack, and the toasts over them.
 
 mod back_stack;
+pub mod sidebar;
 pub mod toast;
 
 use futures::StreamExt;
@@ -13,17 +14,17 @@ use syzygy_catalog::{Catalog, HomeFeed, Read};
 
 use crate::app::{self, Services};
 use crate::icons::{Icon, icon};
-use crate::identity::DISPLAY_NAME;
 use crate::images::{self, Images};
 use crate::page::{
     self, Action, Context, Load, Page, PageId, Route, Viewport, album, artist_tracks,
-    artist_view_all, mix, playlist,
+    artist_view_all, favorites, library, mix, playlist,
 };
+use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
+use sidebar::Sidebar;
 use toast::{Kind, ToastId, Toasts};
 
-const SIDEBAR_WIDTH: f32 = 280.0;
 const HEADER_HEIGHT: f32 = 64.0;
 /// Pages stop growing past this on wide windows.
 const MAX_PAGE_WIDTH: f32 = 1520.0;
@@ -37,6 +38,7 @@ const UNKNOWN_HEIGHT: f32 = 4000.0;
 pub struct Shell {
     back_stack: BackStack,
     current: Current,
+    sidebar: Sidebar,
     next_id: u64,
     toasts: Toasts,
     /// How tall the Page's viewport is, as last reported.
@@ -57,6 +59,7 @@ struct Current {
 pub enum Message {
     Scrolled(PageId, Viewport),
     DismissToast(ToastId),
+    Sidebar(sidebar::Message),
 }
 
 impl Shell {
@@ -70,15 +73,29 @@ impl Shell {
             },
             context,
         );
+        let (sidebar, read) = Sidebar::new(context.user_id, context.settings);
         let mut shell = Self {
             back_stack: BackStack::default(),
             current,
+            sidebar,
             next_id: 1,
             toasts: Toasts::default(),
             viewport_height: UNKNOWN_HEIGHT,
         };
         let task = shell.run_action(action, services, context);
-        (shell, task)
+        let read = shell.run_sidebar(read, services, context);
+        (shell, Task::batch([task, read]))
+    }
+
+    /// TIDAL said who's signed in.
+    pub fn user_known(
+        &mut self,
+        user_id: u64,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let effect = self.sidebar.user_known(user_id);
+        self.run_sidebar(effect, services, context)
     }
 
     /// Go somewhere new. The current Page goes on the Back stack.
@@ -126,7 +143,12 @@ impl Shell {
         self.run_action(action, services, context)
     }
 
-    pub fn update(&mut self, message: Message) -> Task<app::Message> {
+    pub fn update(
+        &mut self,
+        message: Message,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
         match message {
             Message::Scrolled(id, viewport) => {
                 self.viewport_height = viewport.height;
@@ -135,6 +157,10 @@ impl Shell {
                 }
             }
             Message::DismissToast(id) => self.toasts.dismiss(id),
+            Message::Sidebar(message) => {
+                let effect = self.sidebar.update(message);
+                return self.run_sidebar(effect, services, context);
+            }
         }
         Task::none()
     }
@@ -188,7 +214,17 @@ impl Shell {
             Action::FetchImages(urls) => {
                 Task::done(app::Message::Images(images::Message::Wanted(urls)))
             }
-            Action::SaveTrackSort(uuid, sort) => Task::done(app::Message::TrackSort(uuid, sort)),
+            Action::SaveSort(sort) => {
+                // The sidebar lists each Library type in the same order.
+                let resort = match &sort {
+                    Sort::Library(kind, library_sort) => {
+                        let effect = self.sidebar.sorted(*kind, *library_sort);
+                        self.run_sidebar(effect, services, context)
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([Task::done(app::Message::Sort(sort)), resort])
+            }
             Action::Navigate(route) => self.navigate(route, services, context),
             Action::Run(task) => {
                 let id = self.current.id;
@@ -209,6 +245,41 @@ impl Shell {
                 self.current.loads.push(handle.abort_on_drop());
                 task
             }
+        }
+    }
+
+    fn run_sidebar(
+        &mut self,
+        effect: sidebar::Effect,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let to_shell = |message| app::Message::Shell(Message::Sidebar(message));
+        match effect {
+            sidebar::Effect::None => Task::none(),
+            sidebar::Effect::Read(shelf) => {
+                Task::run(services.catalog.library(&shelf), move |read| {
+                    to_shell(sidebar::Message::Items {
+                        shelf: shelf.clone(),
+                        read,
+                    })
+                })
+            }
+            sidebar::Effect::More {
+                shelf,
+                offset,
+                cursor,
+            } => Task::perform(
+                services.catalog.more_library(&shelf, offset, cursor),
+                move |result| {
+                    to_shell(sidebar::Message::More {
+                        shelf: shelf.clone(),
+                        offset,
+                        result,
+                    })
+                },
+            ),
+            sidebar::Effect::Link(link) => self.run_action(link.follow(), services, context),
         }
     }
 
@@ -240,7 +311,11 @@ impl Shell {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let main = row![sidebar(), column![self.header(), page]];
+        let sidebar = self
+            .sidebar
+            .view(images, &self.current.route)
+            .map(|message| app::Message::Shell(Message::Sidebar(message)));
+        let main = row![sidebar, column![self.header(), page]];
         let toasts = self
             .toasts
             .view()
@@ -314,56 +389,6 @@ impl Current {
             route: self.route.clone(),
             offset: self.offset,
         }
-    }
-}
-
-/// The sidebar frame. The Library lists land here.
-fn sidebar<'a>() -> Element<'a, app::Message> {
-    let home = button(
-        row![
-            icon(Icon::House, 20.0, style::TEXT_PRIMARY),
-            text("Home").size(14)
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center),
-    )
-    .padding([8, 12])
-    .on_press(app::Message::Navigate(Route::home()))
-    .style(nav_item)
-    .width(Length::Fill);
-    let library = row![
-        icon(Icon::Library, 20.0, style::TEXT_SECONDARY),
-        text("Your Library").size(13).color(style::TEXT_SECONDARY),
-    ]
-    .spacing(12)
-    .padding([0, 12])
-    .align_y(Alignment::Center);
-    let body = column![text(DISPLAY_NAME).size(22), home, library].spacing(16);
-    container(body)
-        .padding(16)
-        .width(SIDEBAR_WIDTH)
-        .height(Length::Fill)
-        .style(sidebar_frame)
-        .into()
-}
-
-fn sidebar_frame(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(style::BG_SIDEBAR.into()),
-        ..container::Style::default()
-    }
-}
-
-fn nav_item(_theme: &Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Hovered | button::Status::Pressed => Some(style::HL_FAINT.into()),
-        button::Status::Active | button::Status::Disabled => None,
-    };
-    button::Style {
-        background,
-        text_color: style::TEXT_PRIMARY,
-        border: style::rounded(6.0),
-        ..button::Style::default()
     }
 }
 
@@ -466,6 +491,45 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
                 })
                 .boxed()
         }
+        Load::Library(shelf) => catalog
+            .library(&shelf)
+            .map(move |read| {
+                page::Message::Library(library::Message::Items {
+                    shelf: shelf.clone(),
+                    read,
+                })
+            })
+            .boxed(),
+        Load::MoreLibrary {
+            shelf,
+            offset,
+            cursor,
+        } => stream::once(catalog.more_library(&shelf, offset, cursor))
+            .map(move |result| {
+                page::Message::Library(library::Message::More {
+                    shelf: shelf.clone(),
+                    offset,
+                    result,
+                })
+            })
+            .boxed(),
+        Load::LovedTracks { user_id, sort } => catalog
+            .loved_tracks(user_id, sort)
+            .map(move |read| page::Message::Favorites(favorites::Message::Tracks { sort, read }))
+            .boxed(),
+        Load::MoreLovedTracks {
+            user_id,
+            sort,
+            offset,
+        } => stream::once(catalog.more_loved_tracks(user_id, sort, offset))
+            .map(move |result| {
+                page::Message::Favorites(favorites::Message::More {
+                    sort,
+                    offset,
+                    result,
+                })
+            })
+            .boxed(),
     }
 }
 
