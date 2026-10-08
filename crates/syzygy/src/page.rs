@@ -12,17 +12,19 @@ mod hero;
 pub mod home;
 pub mod mix;
 mod paged;
+pub mod playlist;
 mod track_list;
 mod unbuilt;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
 use iced::{Alignment, Element, Length, Task, Theme};
 use std::sync::Arc;
-use syzygy_catalog::Read;
 use syzygy_catalog::home_feed::Cover;
 use syzygy_catalog::track::ArtistRef;
+use syzygy_catalog::{Read, TrackSort};
 
 use crate::images::{self, Images};
+use crate::settings::Settings;
 use crate::style;
 
 /// How round a cover's corners are.
@@ -97,6 +99,13 @@ pub struct Viewport {
     pub height: f32,
 }
 
+/// What a Page reads from the rest of the app as it opens.
+pub struct Context<'a> {
+    /// Who's signed in, when TIDAL has said.
+    pub user_id: Option<u64>,
+    pub settings: &'a Settings,
+}
+
 /// What a Page asks the Shell to do.
 pub enum Action {
     None,
@@ -113,6 +122,8 @@ pub enum Action {
     Run(Task<Message>),
     /// Load these covers into the image cache.
     FetchImages(Vec<String>),
+    /// Remember a playlist's track sort in `Settings`; `None` forgets it.
+    SaveTrackSort(String, Option<TrackSort>),
     /// All of these.
     Batch(Vec<Action>),
 }
@@ -149,6 +160,21 @@ pub enum Load {
     },
     /// A mix's Page.
     Mix(String),
+    /// A playlist: what it is and who made it.
+    Playlist(String),
+    /// The first page of a playlist's tracks.
+    PlaylistTracks {
+        uuid: String,
+        sort: Option<TrackSort>,
+    },
+    /// A playlist's tracks after the first `offset`.
+    MorePlaylistTracks {
+        uuid: String,
+        sort: Option<TrackSort>,
+        offset: usize,
+    },
+    /// The tracks TIDAL recommends for a playlist, from `offset`.
+    PlaylistRecommendations { uuid: String, offset: usize },
 }
 
 pub enum Page {
@@ -158,6 +184,7 @@ pub enum Page {
     ArtistTracks(artist_tracks::State),
     ArtistViewAll(artist_view_all::State),
     Mix(mix::State),
+    Playlist(playlist::State),
     Unbuilt(unbuilt::State),
 }
 
@@ -169,6 +196,7 @@ pub enum Message {
     ArtistTracks(artist_tracks::Message),
     ArtistViewAll(artist_view_all::Message),
     Mix(mix::Message),
+    Playlist(playlist::Message),
     /// From a Page with no messages of its own.
     Link(Link),
 }
@@ -192,7 +220,7 @@ impl Link {
 
 impl Page {
     /// Build the Page for a route, and what it needs first.
-    pub fn open(route: &Route) -> (Self, Action) {
+    pub fn open(route: &Route, context: &Context) -> (Self, Action) {
         match route {
             Route::Home { tab } => {
                 let (state, action) = home::State::new(tab.clone());
@@ -218,10 +246,10 @@ impl Page {
                 let (state, action) = mix::State::new(id.clone(), preview.clone());
                 (Page::Mix(state), action)
             }
-            Route::Playlist { preview, .. } => (
-                Page::Unbuilt(unbuilt::State::new(preview.clone())),
-                Action::None,
-            ),
+            Route::Playlist { uuid, preview } => {
+                let (state, action) = playlist::State::new(uuid.clone(), preview.clone(), context);
+                (Page::Playlist(state), action)
+            }
             Route::Favorites => (
                 Page::Unbuilt(unbuilt::State::new(Some(Preview {
                     title: "Loved Tracks".to_string(),
@@ -241,6 +269,7 @@ impl Page {
             (Page::ArtistTracks(state), Message::ArtistTracks(message)) => state.update(message),
             (Page::ArtistViewAll(state), Message::ArtistViewAll(message)) => state.update(message),
             (Page::Mix(state), Message::Mix(message)) => state.update(message),
+            (Page::Playlist(state), Message::Playlist(message)) => state.update(message),
             (_, Message::Link(link)) => link.follow(),
             // A message for another kind of Page.
             _ => Action::None,
@@ -263,6 +292,7 @@ impl Page {
             Page::ArtistTracks(state) => state.view(images, viewport).map(Message::ArtistTracks),
             Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),
             Page::Mix(state) => state.view(images, viewport).map(Message::Mix),
+            Page::Playlist(state) => state.view(images, viewport).map(Message::Playlist),
             Page::Unbuilt(state) => state.view(images).map(Message::Link),
         }
     }

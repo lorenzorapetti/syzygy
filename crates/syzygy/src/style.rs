@@ -5,7 +5,7 @@
 //! such). Every widget syzygy styles gets a plain style fn that reads these
 //! tokens; the ones shared across modules live here.
 
-use iced::widget::{button, container};
+use iced::widget::{button, container, text_input};
 use iced::{Background, Border, Color, Theme, color};
 
 const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
@@ -96,6 +96,35 @@ pub fn unselected_tab(_theme: &Theme, status: button::Status) -> button::Style {
         _ => BG_BUTTON,
     };
     pill(background, TEXT_PRIMARY)
+}
+
+/// A pill button, as Refresh under a playlist's recommendations.
+pub fn pill_button(_theme: &Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Hovered | button::Status::Pressed => pill(BG_BUTTON_HOVER, TEXT_PRIMARY),
+        button::Status::Active => pill(BG_BUTTON, TEXT_PRIMARY),
+        button::Status::Disabled => pill(BG_BUTTON, TEXT_DISABLED),
+    }
+}
+
+/// A rounded field on an inset background, as a Page's filter.
+pub fn filter_input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let border = match status {
+        text_input::Status::Focused { .. } => BORDER_SUBTLE,
+        _ => Color::TRANSPARENT,
+    };
+    text_input::Style {
+        background: Background::Color(BG_INSET),
+        border: Border {
+            color: border,
+            width: 1.0,
+            radius: 18.0.into(),
+        },
+        icon: TEXT_MUTED,
+        placeholder: TEXT_MUTED,
+        value: TEXT_PRIMARY,
+        selection: ACCENT.scale_alpha(0.4),
+    }
 }
 
 fn pill(background: Color, text_color: Color) -> button::Style {

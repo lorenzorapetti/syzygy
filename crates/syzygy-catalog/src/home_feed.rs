@@ -2,6 +2,7 @@
 //! where they lead. Built from TIDAL's loosely typed section items with
 //! sone's rules (`itemHelpers.ts`).
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use syzygy_tidal::models::{HomePageResponse, HomePageSection};
@@ -46,7 +47,7 @@ pub struct Card {
 }
 
 /// A card's picture, by the id TIDAL serves it under.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Cover {
     /// Album, playlist, mix and video images: 160, 320, 640 or 1280 square.
     Image(String),

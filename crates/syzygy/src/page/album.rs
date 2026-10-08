@@ -20,6 +20,7 @@ const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING;
 const COLUMNS: Columns = Columns {
     cover: false,
     album: false,
+    date_added: false,
 };
 
 pub struct State {
@@ -95,7 +96,13 @@ impl State {
         };
         let body = self.album.view(Message::Retry, |album| {
             let row = |i| self.row(i, album, images);
-            let list = track_list::view(self.rows.len(), LIST_TOP, viewport, COLUMNS, row);
+            let list = track_list::view(
+                self.rows.len(),
+                LIST_TOP,
+                viewport,
+                track_list::header(COLUMNS),
+                row,
+            );
             let footer = |line| text(line).size(12).color(style::TEXT_DISABLED);
             let footer = column![]
                 .push(album.release_date.as_deref().map(footer))

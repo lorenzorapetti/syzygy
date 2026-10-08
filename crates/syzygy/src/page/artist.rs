@@ -19,6 +19,7 @@ const TRACKS_SHOWN: usize = 10;
 const COLUMNS: Columns = Columns {
     cover: true,
     album: true,
+    date_added: false,
 };
 
 pub struct State {

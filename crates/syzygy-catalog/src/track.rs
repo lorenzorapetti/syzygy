@@ -17,6 +17,8 @@ pub struct Track {
     pub explicit: bool,
     /// Which disc of its album the track is on, from 1.
     pub volume: u32,
+    /// When it was added to the playlist it's read from, as TIDAL sends it.
+    pub date_added: Option<String>,
 }
 
 /// An artist a track or album credits.
@@ -62,6 +64,7 @@ impl From<TidalTrack> for Track {
             duration: track.duration,
             explicit: track.explicit.unwrap_or(false),
             volume: track.volume_number.unwrap_or(1).max(1),
+            date_added: track.date_added,
         }
     }
 }

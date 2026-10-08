@@ -16,7 +16,8 @@ use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
 use crate::images::{self, Images};
 use crate::page::{
-    self, Action, Load, Page, PageId, Route, Viewport, album, artist_tracks, artist_view_all, mix,
+    self, Action, Context, Load, Page, PageId, Route, Viewport, album, artist_tracks,
+    artist_view_all, mix, playlist,
 };
 use crate::style;
 use back_stack::{BackStack, Entry};
@@ -60,13 +61,14 @@ pub enum Message {
 
 impl Shell {
     /// The Shell at Home, with an empty Back stack.
-    pub fn new(services: &Services) -> (Self, Task<app::Message>) {
+    pub fn new(services: &Services, context: &Context) -> (Self, Task<app::Message>) {
         let (current, action) = Current::open(
             PageId(0),
             Entry {
                 route: Route::home(),
                 offset: 0.0,
             },
+            context,
         );
         let mut shell = Self {
             back_stack: BackStack::default(),
@@ -75,27 +77,32 @@ impl Shell {
             toasts: Toasts::default(),
             viewport_height: UNKNOWN_HEIGHT,
         };
-        let task = shell.run_action(action, services);
+        let task = shell.run_action(action, services, context);
         (shell, task)
     }
 
     /// Go somewhere new. The current Page goes on the Back stack.
-    pub fn navigate(&mut self, route: Route, services: &Services) -> Task<app::Message> {
+    pub fn navigate(
+        &mut self,
+        route: Route,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
         if route == self.current.route {
             return scroll_to(0.0);
         }
         self.back_stack.push(self.current.entry());
-        self.open(Entry { route, offset: 0.0 }, services)
+        self.open(Entry { route, offset: 0.0 }, services, context)
     }
 
-    pub fn back(&mut self, services: &Services) -> Task<app::Message> {
+    pub fn back(&mut self, services: &Services, context: &Context) -> Task<app::Message> {
         let entry = self.back_stack.back(self.current.entry());
-        self.open_maybe(entry, services)
+        self.open_maybe(entry, services, context)
     }
 
-    pub fn forward(&mut self, services: &Services) -> Task<app::Message> {
+    pub fn forward(&mut self, services: &Services, context: &Context) -> Task<app::Message> {
         let entry = self.back_stack.forward(self.current.entry());
-        self.open_maybe(entry, services)
+        self.open_maybe(entry, services, context)
     }
 
     /// A message for a Page. Dropped unless that Page is still showing.
@@ -104,18 +111,19 @@ impl Shell {
         id: PageId,
         message: page::Message,
         services: &Services,
+        context: &Context,
     ) -> Task<app::Message> {
         if id != self.current.id {
             return Task::none();
         }
         let action = self.current.page.update(message);
-        self.run_action(action, services)
+        self.run_action(action, services, context)
     }
 
     /// The window came back into focus.
-    pub fn focused(&mut self, services: &Services) -> Task<app::Message> {
+    pub fn focused(&mut self, services: &Services, context: &Context) -> Task<app::Message> {
         let action = self.current.page.focused();
-        self.run_action(action, services)
+        self.run_action(action, services, context)
     }
 
     pub fn update(&mut self, message: Message) -> Task<app::Message> {
@@ -139,9 +147,14 @@ impl Shell {
             .map(|id| app::Message::Shell(Message::DismissToast(id)))
     }
 
-    fn open_maybe(&mut self, entry: Option<Entry>, services: &Services) -> Task<app::Message> {
+    fn open_maybe(
+        &mut self,
+        entry: Option<Entry>,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
         match entry {
-            Some(entry) => self.open(entry, services),
+            Some(entry) => self.open(entry, services, context),
             None => Task::none(),
         }
     }
@@ -149,28 +162,34 @@ impl Shell {
     /// Show the Page for `entry` under a new id, replacing the current one
     /// and aborting its reads. The scrollable keeps the offset and clamps it
     /// to the content, so it lands once the Page's data is tall enough.
-    fn open(&mut self, entry: Entry, services: &Services) -> Task<app::Message> {
+    fn open(&mut self, entry: Entry, services: &Services, context: &Context) -> Task<app::Message> {
         let offset = entry.offset;
-        let (current, action) = Current::open(PageId(self.next_id), entry);
+        let (current, action) = Current::open(PageId(self.next_id), entry, context);
         self.current = current;
         self.next_id += 1;
-        let task = self.run_action(action, services);
+        let task = self.run_action(action, services, context);
         Task::batch([task, scroll_to(offset)])
     }
 
-    fn run_action(&mut self, action: Action, services: &Services) -> Task<app::Message> {
+    fn run_action(
+        &mut self,
+        action: Action,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
         match action {
             Action::None => Task::none(),
             Action::Batch(actions) => Task::batch(
                 actions
                     .into_iter()
-                    .map(|action| self.run_action(action, services))
+                    .map(|action| self.run_action(action, services, context))
                     .collect::<Vec<_>>(),
             ),
             Action::FetchImages(urls) => {
                 Task::done(app::Message::Images(images::Message::Wanted(urls)))
             }
-            Action::Navigate(route) => self.navigate(route, services),
+            Action::SaveTrackSort(uuid, sort) => Task::done(app::Message::TrackSort(uuid, sort)),
+            Action::Navigate(route) => self.navigate(route, services, context),
             Action::Run(task) => {
                 let id = self.current.id;
                 task.map(move |message| app::Message::Page(id, message))
@@ -178,7 +197,7 @@ impl Shell {
             Action::Replace(route, load) => {
                 self.current.route = route;
                 self.current.offset = 0.0;
-                let load = self.run_action(Action::Load(load), services);
+                let load = self.run_action(Action::Load(load), services, context);
                 Task::batch([load, scroll_to(0.0)])
             }
             Action::Load(load) => {
@@ -277,8 +296,8 @@ impl Shell {
 }
 
 impl Current {
-    fn open(id: PageId, entry: Entry) -> (Self, Action) {
-        let (page, action) = Page::open(&entry.route);
+    fn open(id: PageId, entry: Entry, context: &Context) -> (Self, Action) {
+        let (page, action) = Page::open(&entry.route, context);
         let current = Self {
             id,
             route: entry.route,
@@ -421,6 +440,32 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
             .mix(&id)
             .map(|read| page::Message::Mix(mix::Message::Loaded(read)))
             .boxed(),
+        Load::Playlist(uuid) => catalog
+            .playlist(&uuid)
+            .map(|read| page::Message::Playlist(playlist::Message::Playlist(read)))
+            .boxed(),
+        Load::PlaylistTracks { uuid, sort } => catalog
+            .playlist_tracks(&uuid, sort)
+            .map(move |read| page::Message::Playlist(playlist::Message::Tracks { sort, read }))
+            .boxed(),
+        Load::MorePlaylistTracks { uuid, sort, offset } => {
+            stream::once(catalog.more_playlist_tracks(&uuid, sort, offset))
+                .map(move |result| {
+                    page::Message::Playlist(playlist::Message::More {
+                        sort,
+                        offset,
+                        result,
+                    })
+                })
+                .boxed()
+        }
+        Load::PlaylistRecommendations { uuid, offset } => {
+            stream::once(catalog.playlist_recommendations(&uuid, offset))
+                .map(move |result| {
+                    page::Message::Playlist(playlist::Message::Recommendations { offset, result })
+                })
+                .boxed()
+        }
     }
 }
 

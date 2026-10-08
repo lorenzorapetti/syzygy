@@ -8,20 +8,26 @@ use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Icon {
+    ChevronDown,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
     House,
     Library,
+    RefreshCw,
     Search,
     X,
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 6] = [
+const SOURCES: [&str; 9] = [
+    include_str!("../icons/chevron-down.svg"),
     include_str!("../icons/chevron-left.svg"),
     include_str!("../icons/chevron-right.svg"),
+    include_str!("../icons/chevron-up.svg"),
     include_str!("../icons/house.svg"),
     include_str!("../icons/library.svg"),
+    include_str!("../icons/refresh-cw.svg"),
     include_str!("../icons/search.svg"),
     include_str!("../icons/x.svg"),
 ];

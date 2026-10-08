@@ -14,7 +14,7 @@ use crate::events::EventSource;
 use crate::identity::{DISPLAY_NAME, Paths};
 use crate::images::{self, Images};
 use crate::login;
-use crate::page::{self, PageId, Route};
+use crate::page::{self, Context, PageId, Route};
 use crate::persist;
 use crate::session::Session;
 use crate::settings::Settings;
@@ -68,6 +68,8 @@ pub enum Message {
     WindowFocused,
     Shell(shell::Message),
     Images(images::Message),
+    /// Remember a playlist's track sort; `None` forgets it.
+    TrackSort(String, Option<syzygy_catalog::TrackSort>),
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
@@ -199,16 +201,20 @@ impl App {
                 let effects = login.update(message);
                 self.run_login(effects)
             }
-            Message::Page(id, message) => {
-                self.in_shell(|shell, services| shell.update_page(id, message, services))
-            }
+            Message::Page(id, message) => self.in_shell(|shell, services, context| {
+                shell.update_page(id, message, services, context)
+            }),
             Message::Navigate(route) => {
-                self.in_shell(|shell, services| shell.navigate(route, services))
+                self.in_shell(|shell, services, context| shell.navigate(route, services, context))
             }
             Message::Back => self.in_shell(Shell::back),
             Message::Forward => self.in_shell(Shell::forward),
             Message::WindowFocused => self.in_shell(Shell::focused),
-            Message::Shell(message) => self.in_shell(|shell, _| shell.update(message)),
+            Message::Shell(message) => self.in_shell(|shell, _, _| shell.update(message)),
+            Message::TrackSort(uuid, sort) => {
+                self.settings.set_track_sort(uuid, sort);
+                self.save_settings()
+            }
             Message::Images(message) => {
                 let effects = self.images.update(message);
                 Task::batch(effects.into_iter().map(|effect| self.run_images(effect)))
@@ -291,17 +297,19 @@ impl App {
     /// Hand a message to the Shell. Nothing when signed out.
     fn in_shell(
         &mut self,
-        f: impl FnOnce(&mut Shell, &Services) -> Task<Message>,
+        f: impl FnOnce(&mut Shell, &Services, &Context) -> Task<Message>,
     ) -> Task<Message> {
+        let context = context(self.session.as_ref(), &self.settings);
         match &mut self.phase {
-            Phase::Shell(shell) => f(shell, &self.services),
+            Phase::Shell(shell) => f(shell, &self.services, &context),
             Phase::Login(_) => Task::none(),
         }
     }
 
     /// Show the Shell at Home with an empty Back stack.
     fn open_shell(&mut self) -> Task<Message> {
-        let (shell, task) = Shell::new(&self.services);
+        let context = context(self.session.as_ref(), &self.settings);
+        let (shell, task) = Shell::new(&self.services, &context);
         self.phase = Phase::Shell(Box::new(shell));
         task
     }
@@ -401,6 +409,14 @@ impl App {
             }
             login::Effect::SignedIn(login_method, tokens) => self.sign_in(login_method, tokens),
         }
+    }
+}
+
+/// What Pages read as they open.
+fn context<'a>(session: Option<&Session>, settings: &'a Settings) -> Context<'a> {
+    Context {
+        user_id: session.and_then(|session| session.user_id),
+        settings,
     }
 }
 

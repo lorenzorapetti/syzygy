@@ -9,6 +9,7 @@ mod home;
 pub mod home_feed;
 pub mod mix;
 mod paged;
+pub mod playlist;
 mod swr;
 pub mod track;
 
@@ -27,6 +28,7 @@ pub use error::Error;
 pub use home_feed::{Card, Cover, HomeFeed};
 pub use mix::Mix;
 pub use paged::Paged;
+pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
 pub use swr::Read;
 pub use track::Track;
 
@@ -212,6 +214,85 @@ impl Catalog {
         .boxed()
     }
 
+    /// A playlist: what it is and who made it.
+    pub fn playlist(&self, uuid: &str) -> BoxStream<'static, Read<Playlist>> {
+        let tidal = self.tidal.clone();
+        let uuid = uuid.to_string();
+        let entry = Entry {
+            key: format!("playlist-details:{uuid}"),
+            tier: CacheTier::Dynamic,
+            tags: playlist_tags(&uuid),
+            encode: playlist::encode,
+            decode: playlist::decode,
+        };
+        swr::read(self.cache.clone(), entry, move || async move {
+            let details = tidal.get_playlist_details(&uuid).await?;
+            playlist::from_details(&details).ok_or_else(|| {
+                syzygy_tidal::Error::Parse(format!("Not a playlist: {details}")).into()
+            })
+        })
+        .boxed()
+    }
+
+    /// The first page of a playlist's tracks, in `sort`'s order or else the
+    /// playlist's own.
+    pub fn playlist_tracks(
+        &self,
+        uuid: &str,
+        sort: Option<TrackSort>,
+    ) -> BoxStream<'static, Read<Paged<Track>>> {
+        let tidal = self.tidal.clone();
+        let uuid = uuid.to_string();
+        let entry = Entry {
+            key: format!("playlist-page:{uuid}:{}", TrackSort::key(sort)),
+            tier: CacheTier::Dynamic,
+            tags: playlist_tags(&uuid),
+            encode: playlist::encode_page,
+            decode: playlist::decode_page,
+        };
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(playlist_page(&tidal, &uuid, sort, 0).await?)
+        })
+        .map(|read| read.map(playlist::tracks_page))
+        .boxed()
+    }
+
+    /// A playlist's tracks after the first `offset`. Not cached: they only
+    /// follow on from the pages on screen.
+    pub fn more_playlist_tracks(
+        &self,
+        uuid: &str,
+        sort: Option<TrackSort>,
+        offset: usize,
+    ) -> impl Future<Output = Result<Paged<Track>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let page = playlist_page(&tidal, &uuid, sort, offset as u32)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(playlist::tracks_page(page))
+        }
+    }
+
+    /// Tracks TIDAL recommends for a playlist, from `offset`. Not cached:
+    /// each batch is asked for once, when the last one has been seen.
+    pub fn playlist_recommendations(
+        &self,
+        uuid: &str,
+        offset: usize,
+    ) -> impl Future<Output = Result<Vec<Track>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let page = tidal
+                .get_playlist_recommendations(&uuid, offset as u32, PAGE_SIZE)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(page.items.into_iter().map(Track::from).collect())
+        }
+    }
+
     /// The bytes of a picture, from the disk cache when it's there (stale
     /// is good enough: a cover doesn't change under its URL).
     pub fn image(
@@ -260,11 +341,35 @@ fn is_more_content(section: &HomePageSection) -> bool {
 }
 
 /// How many items a paged read asks for at a time, as in sone.
-const PAGE_SIZE: u32 = 50;
+pub const PAGE_SIZE: u32 = 50;
 
 /// The tags of an artist's or album's reads, as `["artist", "artist:7"]`.
 fn artist_or_album_tags(kind: &str, id: u64) -> Vec<String> {
     vec![kind.to_string(), format!("{kind}:{id}")]
+}
+
+/// The tags of a playlist's reads.
+fn playlist_tags(uuid: &str) -> Vec<String> {
+    vec!["playlist".to_string(), format!("playlist:{uuid}")]
+}
+
+/// `PAGE_SIZE` of a playlist's tracks from `offset`, sorted by TIDAL.
+async fn playlist_page(
+    tidal: &TidalClient,
+    uuid: &str,
+    sort: Option<TrackSort>,
+    offset: u32,
+) -> Result<syzygy_tidal::models::PaginatedTracks, syzygy_tidal::Error> {
+    let params = sort.map(TrackSort::params);
+    tidal
+        .get_playlist_tracks_page(
+            uuid,
+            offset,
+            PAGE_SIZE,
+            params.map(|(order, _)| order),
+            params.map(|(_, direction)| direction),
+        )
+        .await
 }
 
 /// A raw JSON read, cached as it came, in the Dynamic tier.

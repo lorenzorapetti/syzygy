@@ -5,8 +5,10 @@
 //! file.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use syzygy_catalog::TrackSort;
 use syzygy_store::Store;
 use syzygy_tidal::Quality;
 
@@ -25,6 +27,9 @@ pub struct Settings {
     pub allow_explicit: bool,
     /// Report plays to TIDAL so they show in Recently Played.
     pub report_plays: bool,
+    /// Each playlist's track sort, by uuid. A playlist that isn't here is
+    /// in its own order.
+    pub track_sorts: BTreeMap<String, TrackSort>,
 }
 
 impl Default for Settings {
@@ -40,6 +45,7 @@ impl Default for Settings {
             autoplay: false,
             allow_explicit: true,
             report_plays: true,
+            track_sorts: BTreeMap::new(),
         }
     }
 }
@@ -69,6 +75,14 @@ impl Settings {
         }
     }
 
+    /// Remember `sort` for a playlist; `None` forgets it.
+    pub fn set_track_sort(&mut self, uuid: String, sort: Option<TrackSort>) {
+        match sort {
+            Some(sort) => self.track_sorts.insert(uuid, sort),
+            None => self.track_sorts.remove(&uuid),
+        };
+    }
+
     /// Encrypt and write the settings off the UI thread.
     pub fn save(
         self,
@@ -82,6 +96,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use syzygy_catalog::{Direction, TrackOrder};
     use syzygy_store::{KeySource, Store};
 
     fn store(dir: &std::path::Path) -> Store {
@@ -151,17 +166,37 @@ mod tests {
         );
     }
 
+    fn by_title() -> TrackSort {
+        TrackSort {
+            order: TrackOrder::Title,
+            direction: Direction::Descending,
+        }
+    }
+
+    #[test]
+    fn a_track_sort_is_kept_per_playlist_until_it_goes_back_to_the_own_order() {
+        let mut settings = Settings::default();
+
+        settings.set_track_sort("u-1".into(), Some(by_title()));
+        settings.set_track_sort("u-2".into(), Some(by_title()));
+        settings.set_track_sort("u-2".into(), None);
+
+        assert_eq!(settings.track_sorts.get("u-1"), Some(&by_title()));
+        assert_eq!(settings.track_sorts.get("u-2"), None);
+    }
+
     #[test]
     fn saved_settings_load_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         let path = dir.path().join("settings.json");
-        let settings = Settings {
+        let mut settings = Settings {
             volume: 0.4,
             gapless: false,
             exclusive_device: Some("hw:1,0".into()),
             ..Settings::default()
         };
+        settings.set_track_sort("u-1".into(), Some(by_title()));
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()

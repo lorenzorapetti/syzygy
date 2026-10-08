@@ -15,6 +15,7 @@ const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING;
 const COLUMNS: Columns = Columns {
     cover: true,
     album: true,
+    date_added: false,
 };
 
 pub struct State {
@@ -62,9 +63,13 @@ impl State {
             _ => None,
         };
         let body = self.mix.view(Message::Retry, |mix| {
-            track_list::view(mix.tracks.len(), LIST_TOP, viewport, COLUMNS, |i| {
-                track_list::track(images, i + 1, &mix.tracks[i], COLUMNS).map(Message::Link)
-            })
+            track_list::view(
+                mix.tracks.len(),
+                LIST_TOP,
+                viewport,
+                track_list::header(COLUMNS),
+                |i| track_list::track(images, i + 1, &mix.tracks[i], COLUMNS).map(Message::Link),
+            )
         });
         Column::new()
             .push(hero.map(|hero| hero.map(Message::Link)))

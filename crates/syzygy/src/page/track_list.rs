@@ -2,12 +2,14 @@
 //! spacers standing in for the rest, so a list of thousands scrolls as
 //! smoothly as a short one. Covers are asked for only by rows that are built.
 
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{Row, button, column, container, row, space, text};
 use iced::{Alignment, Element, Length, Theme};
 use std::ops::Range;
-use syzygy_catalog::Track;
+use std::time::{SystemTime, UNIX_EPOCH};
+use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 
 use super::{Link, Preview, Route, Viewport, artists, cover, duration, link};
+use crate::icons::{Icon, icon};
 use crate::images::Images;
 use crate::style;
 
@@ -19,6 +21,7 @@ pub const HEADER_HEIGHT: f32 = 36.0;
 const OVERSCAN: usize = 8;
 const COVER_SIZE: f32 = 40.0;
 const NUMBER_WIDTH: f32 = 36.0;
+const DATE_WIDTH: f32 = 110.0;
 const TIME_WIDTH: f32 = 56.0;
 
 /// What a list shows besides each track's title and artists.
@@ -26,22 +29,24 @@ const TIME_WIDTH: f32 = 56.0;
 pub struct Columns {
     pub cover: bool,
     pub album: bool,
+    /// When each track was added, for the user's Own playlists.
+    pub date_added: bool,
 }
 
-/// A list of `rows` rows whose column titles start `top` down the Page.
+/// A list of `rows` rows under `header`, which starts `top` down the Page.
 /// Only the rows `window` picks are built, by `row`.
 pub fn view<'a, Message: 'a>(
     rows: usize,
     top: f32,
     viewport: Viewport,
-    columns: Columns,
+    header: Element<'a, Message>,
     row: impl Fn(usize) -> Element<'a, Message>,
 ) -> Element<'a, Message> {
     let range = window(rows, top + HEADER_HEIGHT, viewport);
     let above = range.start as f32 * ROW_HEIGHT;
     let below = (rows - range.end) as f32 * ROW_HEIGHT;
     column![
-        header(columns),
+        header,
         space().height(above),
         column(range.map(row)),
         space().height(below),
@@ -49,27 +54,96 @@ pub fn view<'a, Message: 'a>(
     .into()
 }
 
-fn header<'a, Message: 'a>(columns: Columns) -> Element<'a, Message> {
-    let title = |label| text(label).size(12).color(style::TEXT_MUTED);
+/// The column titles.
+pub fn header<'a, Message: Clone + 'a>(columns: Columns) -> Element<'a, Message> {
+    titles(columns, false, |label, _| title(label))
+}
+
+/// The column titles, each of which sorts the list by its column through
+/// `on_sort` ("#" back to the own order), with an arrow by the one it's
+/// sorted by.
+pub fn sortable_header<'a, Message: Clone + 'a>(
+    columns: Columns,
+    sort: Option<TrackSort>,
+    on_sort: fn(Option<TrackOrder>) -> Message,
+) -> Element<'a, Message> {
+    titles(columns, true, move |label, order| {
+        let arrow = sort.filter(|s| Some(s.order) == order).map(|s| {
+            let glyph = match s.direction {
+                Direction::Ascending => Icon::ChevronUp,
+                Direction::Descending => Icon::ChevronDown,
+            };
+            icon(glyph, 14.0, style::TEXT_MUTED)
+        });
+        let label = row![title(label)]
+            .push(arrow)
+            .spacing(2)
+            .align_y(Alignment::Center);
+        button(label)
+            .padding(0)
+            .style(sort_style)
+            .on_press(on_sort(order))
+            .into()
+    })
+}
+
+/// The header row, with each title built by `title` from its label and
+/// the order it sorts by. Artists have no column, so a sortable header
+/// puts theirs by the title's.
+fn titles<'a, Message: 'a>(
+    columns: Columns,
+    sortable: bool,
+    title: impl Fn(&'static str, Option<TrackOrder>) -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    let cell = |content, width| container(content).width(width);
+    let title_and_artist: Row<'a, Message> = row![title("TITLE", Some(TrackOrder::Title))]
+        .push(sortable.then(|| text("·").size(12).color(style::TEXT_MUTED)))
+        .push(sortable.then(|| title("ARTIST", Some(TrackOrder::Artist))))
+        .spacing(6)
+        .align_y(Alignment::Center);
     let line = row![
-        title("#").width(NUMBER_WIDTH),
-        title("TITLE").width(Length::FillPortion(4)),
+        cell(title("#", None), Length::Fixed(NUMBER_WIDTH)),
+        cell(title_and_artist.into(), Length::FillPortion(4)),
     ]
+    .push(columns.album.then(|| {
+        cell(
+            title("ALBUM", Some(TrackOrder::Album)),
+            Length::FillPortion(2),
+        )
+    }))
+    .push(columns.date_added.then(|| {
+        cell(
+            title("DATE ADDED", Some(TrackOrder::DateAdded)),
+            Length::Fixed(DATE_WIDTH),
+        )
+    }))
     .push(
-        columns
-            .album
-            .then(|| title("ALBUM").width(Length::FillPortion(2))),
-    )
-    .push(
-        title("TIME")
+        container(title("TIME", Some(TrackOrder::Duration)))
             .width(TIME_WIDTH)
-            .align_x(iced::alignment::Horizontal::Right),
+            .align_right(TIME_WIDTH),
     )
-    .spacing(16);
+    .spacing(16)
+    .align_y(Alignment::Center);
     container(line)
         .padding([0, 16])
         .center_y(HEADER_HEIGHT)
         .into()
+}
+
+fn title<'a, Message: 'a>(label: &'static str) -> Element<'a, Message> {
+    text(label).size(12).color(style::TEXT_MUTED).into()
+}
+
+fn sort_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => style::TEXT_PRIMARY,
+        _ => style::TEXT_MUTED,
+    };
+    button::Style {
+        background: None,
+        text_color,
+        ..button::Style::default()
+    }
 }
 
 /// One track: its number, the cover if the list shows covers, the title
@@ -80,6 +154,17 @@ pub fn track<'a>(
     track: &'a Track,
     columns: Columns,
 ) -> Element<'a, Link> {
+    let date_added = columns.date_added.then(|| {
+        let date = track
+            .date_added
+            .as_deref()
+            .map_or_else(String::new, |date| added(date, today()));
+        text(date)
+            .size(13)
+            .color(style::TEXT_MUTED)
+            .wrapping(text::Wrapping::None)
+            .width(DATE_WIDTH)
+    });
     let byline = row![]
         .push(track.explicit.then(|| badge("E")))
         .push(artists(&track.artists, 13.0))
@@ -127,6 +212,7 @@ pub fn track<'a>(
         title,
     ]
     .push(album)
+    .push(date_added)
     .push(
         text(duration(track.duration))
             .size(14)
@@ -162,6 +248,61 @@ fn badge_style(_theme: &Theme) -> container::Style {
     }
 }
 
+/// When a track was added, as sone writes it: "This week", "Last week" or
+/// "Last month", else as "Mar 5, 2024". `today` is in days since 1970.
+fn added(date: &str, today: i64) -> String {
+    let Some((year, month, day)) = ymd(date) else {
+        return String::new();
+    };
+    match (today - days_from_civil(year, month, day)).abs() {
+        0..=7 => "This week".to_string(),
+        8..=14 => "Last week".to_string(),
+        15..=30 => "Last month".to_string(),
+        _ => {
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            format!("{} {day}, {year}", MONTHS[month as usize - 1])
+        }
+    }
+}
+
+/// Today, in days since 1970 (UTC).
+fn today() -> i64 {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    (seconds / 86_400) as i64
+}
+
+/// The year, month and day an ISO 8601 date starts with.
+fn ymd(date: &str) -> Option<(i64, u32, u32)> {
+    let year = date.get(0..4)?.parse().ok()?;
+    let month = date
+        .get(5..7)?
+        .parse()
+        .ok()
+        .filter(|m| (1..=12).contains(m))?;
+    let day = date
+        .get(8..10)?
+        .parse()
+        .ok()
+        .filter(|d| (1..=31).contains(d))?;
+    (date.get(4..5)? == "-" && date.get(7..8)? == "-").then_some((year, month, day))
+}
+
+/// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 /// The rows to build of a list of `rows` that starts `top` down the Page.
 pub fn window(rows: usize, top: f32, viewport: Viewport) -> Range<usize> {
     let row_at = |y: f32| ((y - top) / ROW_HEIGHT).max(0.0);
@@ -195,6 +336,36 @@ mod tests {
     fn the_window_stops_at_the_end_of_the_list() {
         assert_eq!(window(20, 300.0, viewport(900.0, 600.0)), 2..20);
         assert_eq!(window(20, 300.0, viewport(50_000.0, 600.0)), 20..20);
+    }
+
+    /// 2024-03-20, as days since 1970-01-01.
+    const MARCH_20: i64 = 19_802;
+
+    #[test]
+    fn a_date_in_the_last_month_says_how_long_ago() {
+        assert_eq!(added("2024-03-20T08:00:00.000+0000", MARCH_20), "This week");
+        assert_eq!(added("2024-03-13T08:00:00.000+0000", MARCH_20), "This week");
+        assert_eq!(added("2024-03-12T08:00:00.000+0000", MARCH_20), "Last week");
+        assert_eq!(added("2024-03-06T08:00:00.000+0000", MARCH_20), "Last week");
+        assert_eq!(
+            added("2024-02-19T08:00:00.000+0000", MARCH_20),
+            "Last month"
+        );
+    }
+
+    #[test]
+    fn an_older_date_is_written_out() {
+        assert_eq!(
+            added("2024-02-18T08:00:00.000+0000", MARCH_20),
+            "Feb 18, 2024"
+        );
+        assert_eq!(added("2019-12-01", MARCH_20), "Dec 1, 2019");
+    }
+
+    #[test]
+    fn a_date_that_doesnt_parse_shows_nothing() {
+        assert_eq!(added("yesterday", MARCH_20), "");
+        assert_eq!(added("2024-13-01", MARCH_20), "");
     }
 
     #[test]

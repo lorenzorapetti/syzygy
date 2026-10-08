@@ -19,6 +19,7 @@ const LIST_TOP: f32 = PADDING + TITLE_HEIGHT + SPACING;
 const COLUMNS: Columns = Columns {
     cover: true,
     album: true,
+    date_added: false,
 };
 
 pub struct State {
@@ -104,9 +105,13 @@ impl State {
         .align_bottom(TITLE_HEIGHT);
         let body = self.tracks.list.view(Message::Retry, |_| {
             let tracks = self.tracks.items();
-            let list = track_list::view(tracks.len(), LIST_TOP, viewport, COLUMNS, |i| {
-                track_list::track(images, i + 1, &tracks[i], COLUMNS).map(Message::Link)
-            });
+            let list = track_list::view(
+                tracks.len(),
+                LIST_TOP,
+                viewport,
+                track_list::header(COLUMNS),
+                |i| track_list::track(images, i + 1, &tracks[i], COLUMNS).map(Message::Link),
+            );
             Column::new()
                 .push(list)
                 .push(self.tracks.end(Message::EndInView, Message::RetryMore))
