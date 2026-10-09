@@ -212,14 +212,18 @@ impl SettingsModal {
         let card = container(
             column![
                 title,
-                scrollable(container(body).padding(iced::Padding::new(0.0).right(12)))
+                // Tall enough for every setting; only a short window
+                // scrolls it, with no bar.
+                scrollable(body)
+                    .direction(scrollable::Direction::Vertical(
+                        scrollable::Scrollbar::hidden(),
+                    ))
                     .height(Length::Shrink)
             ]
             .spacing(16),
         )
         .padding(24)
         .max_width(520)
-        .max_height(640)
         .style(style::modal);
         let backdrop = center(opaque(card)).style(style::backdrop);
         opaque(mouse_area(backdrop).on_press(Message::Close))
