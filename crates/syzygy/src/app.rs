@@ -53,6 +53,9 @@ pub struct App {
     /// The track being armed to follow with no gap. Replacing it, or a
     /// play or a stop, aborts it.
     arm_task: Option<task::Handle>,
+    /// The volume sliding to where bit-perfect output puts it. A volume
+    /// set meanwhile aborts it.
+    ramp_task: Option<task::Handle>,
     /// The fill reading the rest of the Playback source. It outlives the
     /// Page that started the play; replacing it aborts it.
     fill_task: Option<task::Handle>,
@@ -97,6 +100,8 @@ pub enum Message {
     Frame(Instant),
     /// Remember an order the user picked.
     Sort(settings::Sort),
+    /// A preference only `Settings` holds changed.
+    Preference(settings::Preference),
     /// The user searched for this: it goes to the front of the history.
     Searched(String),
     /// Take a search out of the history.
@@ -148,6 +153,13 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
             autoplay: settings.autoplay,
             gapless: settings.gapless,
             allow_explicit: settings.allow_explicit,
+            normalization: settings.volume_normalization,
+            output: playback::Output {
+                exclusive: settings.exclusive_mode,
+                device: settings.exclusive_device.clone(),
+                bit_perfect: settings.bit_perfect,
+            },
+            before_bit_perfect: settings.before_bit_perfect,
         },
         rand::make_rng(),
     );
@@ -169,6 +181,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         playback,
         play_task: None,
         arm_task: None,
+        ramp_task: None,
         fill_task: None,
         snapshot_due: false,
         epoch: Instant::now(),
@@ -223,7 +236,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             Phase::Login(login) => login.view().map(Message::Login),
             Phase::Shell(shell) => shell.view(
                 &app.images,
-                &app.settings.search_history,
+                &app.settings,
                 &app.playback,
                 app.frame.duration_since(app.epoch).as_secs_f32(),
                 app.frame,
@@ -304,6 +317,10 @@ impl App {
                 self.settings.save_sort(sort);
                 self.save_settings()
             }
+            Message::Preference(preference) => {
+                self.settings.set(preference);
+                self.save_settings()
+            }
             Message::Searched(query) => {
                 self.settings.remember_search(&query);
                 self.save_settings()
@@ -321,26 +338,29 @@ impl App {
                 Task::batch(effects.into_iter().map(|effect| self.run_images(effect)))
             }
             Message::Playback(message) => {
-                let mute = matches!(message, playback::Message::ToggleMute);
-                let modes = matches!(
+                // Dragging the volume saves once it's let go.
+                let saves = matches!(
                     message,
-                    playback::Message::ToggleShuffle
+                    playback::Message::ToggleMute
+                        | playback::Message::ToggleShuffle
                         | playback::Message::CycleRepeat
                         | playback::Message::AllowExplicit(_)
                         | playback::Message::Autoplay(_)
                         | playback::Message::Gapless(_)
+                        | playback::Message::Normalization(_)
+                        | playback::Message::Exclusive { .. }
+                        | playback::Message::BitPerfect { .. }
+                        | playback::Message::OutputDevice(_)
                 );
                 let task = self.update_playback(message);
-                let save = if mute {
-                    self.save_volume()
-                } else if modes {
-                    self.save_modes()
+                let save = if saves {
+                    self.save_preferences()
                 } else {
                     Task::none()
                 };
                 Task::batch([task, save])
             }
-            Message::SaveVolume => self.save_volume(),
+            Message::SaveVolume => self.save_preferences(),
             Message::Tick => {
                 let position = self.services.position.get();
                 self.update_playback(playback::Message::Position(position))
@@ -468,7 +488,7 @@ impl App {
                 let tidal = self.services.tidal.clone();
                 let player = player.clone();
                 let quality = self.settings.max_quality;
-                let normalize = self.settings.volume_normalization;
+                let normalize = self.playback.normalization();
                 // What was armed would follow the old track if it ended
                 // while this one is fetched: drop it now, not once the play
                 // task runs.
@@ -522,8 +542,35 @@ impl App {
             }
             playback::Effect::Seek(position) => engine(player.seek(position), "seek"),
             playback::Effect::SetVolume(volume) => {
+                self.ramp_task = None;
                 engine(player.set_volume(volume), "set the volume")
             }
+            playback::Effect::RampVolume { from, to, over } => {
+                let player = player.clone();
+                let ramp = async move {
+                    for step in 1..=RAMP_STEPS {
+                        let level = from + (to - from) * step as f32 / RAMP_STEPS as f32;
+                        if let Err(e) = player.set_volume(level).await {
+                            log::warn!("Could not set the volume: {e}");
+                            return;
+                        }
+                        if step < RAMP_STEPS {
+                            tokio::time::sleep(over / RAMP_STEPS).await;
+                        }
+                    }
+                };
+                let (task, handle) = Task::future(ramp).discard().abortable();
+                self.ramp_task = Some(handle.abort_on_drop());
+                task
+            }
+            // Each play sets the gain it levels its track by; turned off,
+            // the track playing goes back to unity now.
+            playback::Effect::SetNormalization(true) => Task::none(),
+            playback::Effect::SetNormalization(false) => {
+                engine(player.set_normalization_gain(1.0), "turn normalization off")
+            }
+            playback::Effect::SetOutput(output) => set_output(player, output),
+            playback::Effect::SetGapless(on) => engine(player.set_gapless(on), "set gapless"),
             playback::Effect::StartFill {
                 fill_id,
                 continuation,
@@ -552,7 +599,7 @@ impl App {
                 let tidal = self.services.tidal.clone();
                 let player = player.clone();
                 let quality = self.settings.max_quality;
-                let normalize = self.settings.volume_normalization;
+                let normalize = self.playback.normalization();
                 // What was armed before mustn't follow while this one is
                 // fetched.
                 let cleared = player.clear_next_track();
@@ -630,40 +677,44 @@ impl App {
             }
             syzygy_audio::Event::Resampled { from, to } => {
                 log::info!("Resampling from {from} Hz to {to} Hz");
-                Task::none()
+                self.in_shell(|shell, _, _| shell.resampled(from, to))
             }
             syzygy_audio::Event::BitDepthChanged { from, to } => {
                 log::info!("Bit depth changed from {from} to {to}");
-                Task::none()
+                self.in_shell(|shell, _, _| shell.bit_depth_changed(&from, &to))
             }
         }
     }
 
-    /// The engine starts at full volume with gapless on: give it the saved
-    /// volume and gapless setting. Exclusive mode and bit-perfect follow
-    /// with the Settings modal, which keeps them and the volume lock in
-    /// step.
+    /// The engine starts at full volume with gapless on, through the
+    /// system mixer: give it the saved volume, gapless setting and output.
+    /// The calls reach it in this order.
     fn configure_engine(&self) -> Task<Message> {
         let player = &self.services.player;
         Task::batch([
             engine(player.set_volume(self.playback.volume()), "set the volume"),
-            engine(player.set_gapless(self.settings.gapless), "set gapless"),
+            engine(player.set_gapless(self.playback.gapless()), "set gapless"),
+            set_output(player, self.playback.output().clone()),
         ])
     }
 
-    fn save_volume(&mut self) -> Task<Message> {
-        self.settings.volume = self.playback.volume();
-        self.save_settings()
-    }
-
-    /// Remember Shuffle, Repeat mode, Autoplay and whether explicit tracks
-    /// may play.
-    fn save_modes(&mut self) -> Task<Message> {
-        self.settings.shuffle = self.playback.shuffle();
-        self.settings.repeat = self.playback.repeat();
-        self.settings.autoplay = self.playback.autoplay();
-        self.settings.gapless = self.playback.gapless();
-        self.settings.allow_explicit = self.playback.allow_explicit();
+    /// Remember the preferences playback holds: the volume, Shuffle,
+    /// Repeat mode, Autoplay, gapless, whether explicit tracks may play,
+    /// normalization and the output.
+    fn save_preferences(&mut self) -> Task<Message> {
+        let playback = &self.playback;
+        let output = playback.output();
+        self.settings.volume = playback.volume();
+        self.settings.shuffle = playback.shuffle();
+        self.settings.repeat = playback.repeat();
+        self.settings.autoplay = playback.autoplay();
+        self.settings.gapless = playback.gapless();
+        self.settings.allow_explicit = playback.allow_explicit();
+        self.settings.volume_normalization = playback.normalization();
+        self.settings.exclusive_mode = output.exclusive;
+        self.settings.exclusive_device = output.device.clone();
+        self.settings.bit_perfect = output.bit_perfect;
+        self.settings.before_bit_perfect = playback.before_bit_perfect();
         self.save_settings()
     }
 
@@ -870,6 +921,8 @@ const TICK: Duration = Duration::from_millis(250);
 /// waits before each: 5 s in all, as sone.
 const DEVICE_TRIES: u32 = 10;
 const DEVICE_RETRY: Duration = Duration::from_millis(500);
+/// How many volume steps a ramp takes, as sone.
+const RAMP_STEPS: u32 = 12;
 
 /// The replay gain and peak to level a track by: its album's when it plays
 /// in album order and TIDAL has one, its own otherwise.
@@ -892,6 +945,21 @@ fn engine(
         }
     })
     .discard()
+}
+
+/// Send sound out `output`'s way. Both calls reach the engine in this
+/// order, as they're made.
+fn set_output(player: &AudioPlayer, output: playback::Output) -> Task<Message> {
+    Task::batch([
+        engine(
+            player.set_exclusive_mode(output.exclusive, output.device),
+            "set exclusive mode",
+        ),
+        engine(
+            player.set_bit_perfect(output.bit_perfect),
+            "set bit-perfect",
+        ),
+    ])
 }
 
 /// What Pages read as they open.

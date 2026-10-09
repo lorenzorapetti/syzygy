@@ -290,9 +290,10 @@ fn toggles<'a>(drawer: Option<Tab>) -> Element<'a, Message> {
 }
 
 /// Mute, and the volume. Its icon says how loud: crossed out at 0, one
-/// wave below half, two above.
+/// wave below half, two above. Bit-perfect output locks both at full.
 fn volume(playback: &Playback) -> Element<'_, Message> {
     let level = playback.volume();
+    let locked = playback.output().bit_perfect;
     let glyph = if level == 0.0 {
         Icon::VolumeX
     } else if level < 0.5 {
@@ -300,15 +301,33 @@ fn volume(playback: &Playback) -> Element<'_, Message> {
     } else {
         Icon::Volume2
     };
-    let mute = button(container(icon(glyph, 16.0, style::TEXT_SECONDARY)).center(30))
+    let color = if locked {
+        style::TEXT_DISABLED
+    } else {
+        style::TEXT_SECONDARY
+    };
+    let mute = button(container(icon(glyph, 16.0, color)).center(30))
         .padding(0)
         .style(style::icon_button)
-        .on_press(Message::ToggleMute);
-    let slider = slider(0.0..=1.0, level, Message::Volume)
-        .on_release(Message::VolumeSet)
-        .step(0.01_f32)
-        .width(VOLUME_WIDTH)
-        .style(scrubber);
+        .on_press_maybe((!locked).then_some(Message::ToggleMute));
+    // A slider can't be disabled: a full rail stands in for it.
+    let slider: Element<'_, Message> = if locked {
+        container(Space::new().width(Length::Fill).height(3))
+            .width(VOLUME_WIDTH)
+            .style(|_theme| container::Style {
+                background: Some(style::TEXT_DISABLED.into()),
+                border: style::rounded(999.0),
+                ..container::Style::default()
+            })
+            .into()
+    } else {
+        slider(0.0..=1.0, level, Message::Volume)
+            .on_release(Message::VolumeSet)
+            .step(0.01_f32)
+            .width(VOLUME_WIDTH)
+            .style(scrubber)
+            .into()
+    };
     row![mute, slider]
         .spacing(8)
         .align_y(Alignment::Center)

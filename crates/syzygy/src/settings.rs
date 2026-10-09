@@ -12,7 +12,7 @@ use syzygy_catalog::{Kind, LibrarySort, TrackSort};
 use syzygy_store::Store;
 use syzygy_tidal::Quality;
 
-use crate::playback::Repeat;
+use crate::playback::{Levels, Repeat};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,6 +24,9 @@ pub struct Settings {
     pub exclusive_mode: bool,
     pub exclusive_device: Option<String>,
     pub bit_perfect: bool,
+    /// The volume and normalization to go back to when bit-perfect output
+    /// is turned off.
+    pub before_bit_perfect: Option<Levels>,
     pub gapless: bool,
     pub shuffle: bool,
     pub repeat: Repeat,
@@ -56,6 +59,14 @@ pub enum Sort {
     Library(Kind, LibrarySort),
 }
 
+/// A preference only `Settings` holds. Those playback holds too change
+/// through `playback::Message`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Preference {
+    MaxQuality(Quality),
+    ReportPlays(bool),
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -65,6 +76,7 @@ impl Default for Settings {
             exclusive_mode: false,
             exclusive_device: None,
             bit_perfect: false,
+            before_bit_perfect: None,
             gapless: true,
             shuffle: false,
             repeat: Repeat::Off,
@@ -101,6 +113,13 @@ impl Settings {
                 }
                 Self::default()
             }
+        }
+    }
+
+    pub fn set(&mut self, preference: Preference) {
+        match preference {
+            Preference::MaxQuality(quality) => self.max_quality = quality,
+            Preference::ReportPlays(on) => self.report_plays = on,
         }
     }
 

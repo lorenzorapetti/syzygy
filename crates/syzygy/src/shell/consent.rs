@@ -1,8 +1,8 @@
 //! The explicit-consent modal: what the user chose would play explicit
 //! tracks, which the settings don't allow.
 
+use iced::Element;
 use iced::widget::{button, center, column, container, mouse_area, opaque, row, text};
-use iced::{Color, Element, Theme};
 
 use crate::style;
 
@@ -45,29 +45,7 @@ pub fn view<'a>() -> Element<'a, Answer> {
     )
     .padding(24)
     .max_width(440)
-    .style(card);
-    let backdrop = center(opaque(card)).style(|_theme| container::Style {
-        background: Some(
-            Color {
-                a: 0.8,
-                ..Color::BLACK
-            }
-            .into(),
-        ),
-        ..container::Style::default()
-    });
+    .style(style::modal);
+    let backdrop = center(opaque(card)).style(style::backdrop);
     opaque(mouse_area(backdrop).on_press(Answer::Dismiss))
-}
-
-fn card(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(style::BG_ELEVATED.into()),
-        text_color: Some(style::TEXT_PRIMARY),
-        border: iced::Border {
-            color: style::BORDER_SUBTLE,
-            width: 1.0,
-            radius: 12.0.into(),
-        },
-        ..container::Style::default()
-    }
 }

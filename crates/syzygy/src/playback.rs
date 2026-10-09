@@ -57,6 +57,9 @@ const RESTART_AFTER: f32 = 3.0;
 const MAX_FAILURES: u8 = 3;
 /// How long to wait out a rate limit that didn't say.
 const RATE_LIMIT_SECS: u64 = 5;
+/// How long the volume takes to slide to where bit-perfect output puts it,
+/// as sone's 12 steps over 300 ms.
+pub const RAMP: Duration = Duration::from_millis(300);
 
 pub struct Playback {
     listening: Listening,
@@ -87,6 +90,11 @@ pub struct Playback {
     volume: f32,
     /// What unmuting goes back to. 0 when nothing was muted.
     pre_mute: f32,
+    /// Whether tracks are levelled by their ReplayGain.
+    normalization: bool,
+    output: Output,
+    /// What bit-perfect output put aside, to have back when it's off.
+    before_bit_perfect: Option<Levels>,
     /// What to go back to if the play loading now fails.
     rollback: Option<Rollback>,
     next_token: u64,
@@ -459,6 +467,28 @@ pub struct Preferences {
     pub autoplay: bool,
     pub gapless: bool,
     pub allow_explicit: bool,
+    pub normalization: bool,
+    pub output: Output,
+    pub before_bit_perfect: Option<Levels>,
+}
+
+/// How sound leaves syzygy: through the system mixer, or straight to an
+/// ALSA device (exclusive mode), untouched (bit-perfect). Bit-perfect is
+/// always exclusive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Output {
+    pub exclusive: bool,
+    /// The ALSA device exclusive output goes to, such as `hw:1,0`.
+    pub device: Option<String>,
+    pub bit_perfect: bool,
+}
+
+/// The volume and normalization from before bit-perfect output, which
+/// fixes them at full and off.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Levels {
+    pub volume: f32,
+    pub normalization: bool,
 }
 
 /// Stamped on each play and echoed by its result, so a result for an older
@@ -518,17 +548,28 @@ pub enum Message {
     /// Whether explicit tracks may play.
     AllowExplicit(bool),
     /// Whether the last track's Track radio follows when nothing is left.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Settings modal's toggle (ticket 31) sends it")
-    )]
     Autoplay(bool),
     /// Whether what comes next is armed to follow with no gap.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Settings modal's toggle (ticket 31) sends it")
-    )]
     Gapless(bool),
+    /// Whether tracks are levelled by their ReplayGain. Not while
+    /// bit-perfect.
+    Normalization(bool),
+    /// Exclusive output on or off. On with no device chosen, it goes to
+    /// `first_device`, the first one listed. Off, it takes bit-perfect off
+    /// with it.
+    Exclusive {
+        on: bool,
+        first_device: Option<String>,
+    },
+    /// Bit-perfect output on or off. On, it turns exclusive output on (to
+    /// `first_device` if none is chosen), fixes the volume at full and
+    /// turns normalization off; off, it brings them back as they were.
+    BitPerfect {
+        on: bool,
+        first_device: Option<String>,
+    },
+    /// Exclusive output goes to this ALSA device.
+    OutputDevice(String),
     /// The Track radio fetch came back: None when there's no radio or the
     /// fetch failed.
     RadioArrived(RadioId, Option<Radio>),
@@ -621,7 +662,11 @@ fn changes_listening(message: &Message) -> bool {
         | Message::CycleRepeat
         | Message::AllowExplicit(_)
         | Message::Autoplay(_)
-        | Message::Gapless(_) => false,
+        | Message::Gapless(_)
+        | Message::Normalization(_)
+        | Message::Exclusive { .. }
+        | Message::BitPerfect { .. }
+        | Message::OutputDevice(_) => false,
     }
 }
 
@@ -661,6 +706,18 @@ pub enum Effect {
     Stop,
     Seek(f32),
     SetVolume(f32),
+    /// Slide the volume from `from` to `to` over `over`, rather than jump.
+    RampVolume {
+        from: f32,
+        to: f32,
+        over: Duration,
+    },
+    /// Level tracks by their ReplayGain, or stop.
+    SetNormalization(bool),
+    /// Send sound out this way from the next track on.
+    SetOutput(Output),
+    /// Let the engine advance to what's armed with no gap, or not.
+    SetGapless(bool),
     /// Read the rest of the source from `continuation` on, a page at a
     /// time, until it runs out. Replaces any fill running.
     StartFill {
@@ -728,6 +785,9 @@ impl Playback {
             position: 0.0,
             volume: preferences.volume.clamp(0.0, 1.0),
             pre_mute: 0.0,
+            normalization: preferences.normalization,
+            output: preferences.output,
+            before_bit_perfect: preferences.before_bit_perfect,
             rollback: None,
             next_token: 0,
             next_play: 0,
@@ -822,6 +882,12 @@ impl Playback {
                 }
                 Status::Stopped | Status::Loading(_) => vec![],
             },
+            // Bit-perfect output fixes the volume at full.
+            Message::SetVolume(_) | Message::ToggleMute | Message::Normalization(_)
+                if self.output.bit_perfect =>
+            {
+                vec![]
+            }
             Message::SetVolume(volume) => {
                 self.volume = volume.clamp(0.0, 1.0);
                 vec![Effect::SetVolume(self.volume)]
@@ -954,7 +1020,39 @@ impl Playback {
             }
             Message::Gapless(on) => {
                 self.gapless = on;
-                vec![]
+                vec![Effect::SetGapless(on)]
+            }
+            Message::Normalization(on) => {
+                self.normalization = on;
+                vec![Effect::SetNormalization(on)]
+            }
+            Message::Exclusive { on, first_device } => {
+                let mut effects = vec![];
+                if on {
+                    if self.output.device.is_none() {
+                        self.output.device = first_device;
+                    }
+                } else if self.output.bit_perfect {
+                    effects = self.bit_perfect_off();
+                }
+                self.output.exclusive = on;
+                effects.push(Effect::SetOutput(self.output.clone()));
+                effects
+            }
+            Message::OutputDevice(device) => {
+                self.output.device = Some(device);
+                vec![Effect::SetOutput(self.output.clone())]
+            }
+            Message::BitPerfect { on, first_device } => {
+                let mut effects = if on && !self.output.bit_perfect {
+                    self.bit_perfect_on(first_device)
+                } else if !on && self.output.bit_perfect {
+                    self.bit_perfect_off()
+                } else {
+                    vec![]
+                };
+                effects.push(Effect::SetOutput(self.output.clone()));
+                effects
             }
             Message::RadioArrived(id, radio) => self.radio_arrived(id, radio),
             Message::WithoutExplicit(pending) => match *pending.0 {
@@ -986,6 +1084,58 @@ impl Playback {
                 }
             }
         }
+    }
+
+    /// Whether what comes next is armed. The engine never advances with
+    /// no gap to exclusive output, so nothing is armed for it.
+    fn arms(&self) -> bool {
+        self.gapless && !self.output.exclusive
+    }
+
+    /// Put the volume and normalization aside, and fix them at full and
+    /// off. The output is the caller's to send.
+    fn bit_perfect_on(&mut self, first_device: Option<String>) -> Vec<Effect> {
+        self.before_bit_perfect = Some(Levels {
+            volume: self.volume,
+            normalization: self.normalization,
+        });
+        self.output.bit_perfect = true;
+        self.output.exclusive = true;
+        if self.output.device.is_none() {
+            self.output.device = first_device;
+        }
+        self.slide_to(Levels {
+            volume: 1.0,
+            normalization: false,
+        })
+    }
+
+    /// Bring back the volume and normalization from before bit-perfect.
+    /// The output is the caller's to send.
+    fn bit_perfect_off(&mut self) -> Vec<Effect> {
+        self.output.bit_perfect = false;
+        match self.before_bit_perfect.take() {
+            Some(levels) => self.slide_to(levels),
+            None => vec![],
+        }
+    }
+
+    /// Slide the volume to `levels`' and switch normalization to match.
+    fn slide_to(&mut self, levels: Levels) -> Vec<Effect> {
+        let mut effects = vec![];
+        if self.volume != levels.volume {
+            effects.push(Effect::RampVolume {
+                from: self.volume,
+                to: levels.volume,
+                over: RAMP,
+            });
+            self.volume = levels.volume;
+        }
+        if self.normalization != levels.normalization {
+            self.normalization = levels.normalization;
+            effects.push(Effect::SetNormalization(levels.normalization));
+        }
+        effects
     }
 
     /// Change what's upcoming, in what a play loading now would roll back
@@ -1194,6 +1344,19 @@ impl Playback {
 
     pub fn gapless(&self) -> bool {
         self.gapless
+    }
+
+    pub fn normalization(&self) -> bool {
+        self.normalization
+    }
+
+    pub fn output(&self) -> &Output {
+        &self.output
+    }
+
+    /// What bit-perfect output put aside.
+    pub fn before_bit_perfect(&self) -> Option<Levels> {
+        self.before_bit_perfect
     }
 
     fn start(&mut self, request: PlayRequest) -> Vec<Effect> {
@@ -1620,7 +1783,7 @@ impl Playback {
         }
         let next = self
             .what_follows()
-            .filter(|_| self.gapless)
+            .filter(|_| self.arms())
             .map(|(upcoming, track)| (upcoming, track.id));
         match (next, &self.armed) {
             (Some((upcoming, track_id)), Some(armed))

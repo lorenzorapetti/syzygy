@@ -9,6 +9,7 @@ mod maximized;
 mod play_card;
 pub mod player_bar;
 pub mod search;
+mod settings_modal;
 pub mod sidebar;
 pub mod toast;
 mod unseen;
@@ -31,12 +32,13 @@ use crate::page::{
 };
 use crate::playback::{self, Notice, PlayRequest, Playback, Status};
 use crate::radio;
-use crate::settings::Sort;
+use crate::settings::{Settings, Sort};
 use crate::style;
 use back_stack::{BackStack, Entry};
 use drawer::Drawer;
 use player_bar::PlayerBar;
 use search::Search;
+use settings_modal::{Hardware, SettingsModal};
 use sidebar::Sidebar;
 use toast::{Kind, ToastId, Toasts};
 use unseen::Unseen;
@@ -78,6 +80,8 @@ pub struct Shell {
     radio_read: Option<task::Handle>,
     /// What waits on the explicit-consent modal, while it's open.
     consent: Option<playback::Pending>,
+    /// The Settings modal, while it's open. Never on the Back stack.
+    settings: Option<SettingsModal>,
 }
 
 /// The Page on screen and the reads it started. Dropping it aborts them.
@@ -99,6 +103,9 @@ pub enum Message {
     Escape,
     /// The explicit-consent modal was answered.
     Consent(consent::Answer),
+    /// The header's settings button.
+    OpenSettings,
+    Settings(settings_modal::Message),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
@@ -144,6 +151,7 @@ impl Shell {
             card_play: None,
             radio_read: None,
             consent: None,
+            settings: None,
         };
         let task = shell.run_action(action, services, context);
         let read = shell.run_sidebar(read, services, context);
@@ -242,6 +250,7 @@ impl Shell {
             Message::DismissToast(id) => self.toasts.dismiss(id),
             Message::Escape => {
                 let closed = self.consent.take().is_some()
+                    || self.settings.take().is_some()
                     || std::mem::take(&mut self.maximized)
                     || self.drawer.close();
                 if !closed {
@@ -262,6 +271,29 @@ impl Shell {
                     }
                     consent::Answer::Dismiss => Task::none(),
                 };
+            }
+            Message::OpenSettings => {
+                self.settings = Some(SettingsModal::default());
+                // Listing waits on GStreamer, for up to two seconds.
+                return Task::perform(tokio::task::spawn_blocking(Hardware::list), |listed| {
+                    let hardware = listed.unwrap_or_else(|e| Hardware {
+                        devices: Err(e.to_string()),
+                        gapless_supported: true,
+                    });
+                    app::Message::Shell(Message::Settings(settings_modal::Message::Listed(
+                        hardware,
+                    )))
+                });
+            }
+            Message::Settings(settings_modal::Message::Close) => self.settings = None,
+            Message::Settings(message) => {
+                if let Some(message) = self
+                    .settings
+                    .as_mut()
+                    .and_then(|modal| modal.update(message))
+                {
+                    return Task::done(message);
+                }
             }
             Message::Sidebar(message) => {
                 let effect = self.sidebar.update(message);
@@ -374,6 +406,7 @@ impl Shell {
     fn close_overlays(&mut self) {
         self.drawer.close();
         self.maximized = false;
+        self.settings = None;
     }
 
     /// Playback chose explicit tracks while they aren't allowed: ask.
@@ -401,6 +434,22 @@ impl Shell {
             Notice::AudioError(error) => (Kind::Error, cut(&error, AUDIO_ERROR_LENGTH)),
         };
         self.toast(kind, text)
+    }
+
+    /// Exclusive output is resampling, so it isn't bit-perfect.
+    pub fn resampled(&mut self, from: u32, to: u32) -> Task<app::Message> {
+        self.toast(
+            Kind::Info,
+            format!("Resampling {} \u{2192} {} kHz", khz(from), khz(to)),
+        )
+    }
+
+    /// Bit-perfect output widened the samples for the DAC.
+    pub fn bit_depth_changed(&mut self, from: &str, to: &str) -> Task<app::Message> {
+        self.toast(
+            Kind::Info,
+            format!("Bit depth changed: {from} \u{2192} {to}"),
+        )
     }
 
     /// Show a toast that dismisses itself.
@@ -698,12 +747,12 @@ impl Shell {
         self.drawer.is_animating(now)
     }
 
-    /// `past_searches` are the user's, for the search dropdown. `clock` is
-    /// the seconds animations run on, and `now` the last frame.
+    /// `settings` has the user's past searches, for the search dropdown.
+    /// `clock` is the seconds animations run on, and `now` the last frame.
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
-        past_searches: &'a [String],
+        settings: &'a Settings,
         playback: &'a Playback,
         clock: f32,
         now: Instant,
@@ -748,11 +797,14 @@ impl Shell {
             .view(images, &self.current.route, self.unseen.any())
             .map(|message| app::Message::Shell(Message::Sidebar(message)));
         // The dropdown hangs over the Page, under the search field.
-        let dropdown = self.search.view(past_searches, images).map(|dropdown| {
-            let left = HEADER_PADDING + 2.0 * (STEP_SIZE + HEADER_SPACING);
-            container(dropdown.map(|message| app::Message::Shell(Message::Search(message))))
-                .padding(iced::Padding::new(0.0).left(left))
-        });
+        let dropdown = self
+            .search
+            .view(&settings.search_history, images)
+            .map(|dropdown| {
+                let left = HEADER_PADDING + 2.0 * (STEP_SIZE + HEADER_SPACING);
+                container(dropdown.map(|message| app::Message::Shell(Message::Search(message))))
+                    .padding(iced::Padding::new(0.0).left(left))
+            });
         // Only once there's something to play.
         let player_bar = playback.current().map(|_| {
             self.player_bar
@@ -778,10 +830,17 @@ impl Shell {
             .then(|| maximized::view(&self.player_bar, playback, images))
             .flatten()
             .map(|view| view.map(|message| app::Message::Shell(Message::Maximized(message))));
-        let modal = self
-            .consent
-            .as_ref()
-            .map(|_| consent::view().map(|answer| app::Message::Shell(Message::Consent(answer))));
+        let modal = match (&self.consent, &self.settings) {
+            (Some(_), _) => {
+                Some(consent::view().map(|answer| app::Message::Shell(Message::Consent(answer))))
+            }
+            (None, Some(modal)) => Some(
+                modal
+                    .view(settings, playback)
+                    .map(|message| app::Message::Shell(Message::Settings(message))),
+            ),
+            (None, None) => None,
+        };
         let toasts = self
             .toasts
             .view()
@@ -815,6 +874,11 @@ impl Shell {
             .search
             .field()
             .map(|message| app::Message::Shell(Message::Search(message)));
+        let settings =
+            button(container(icon(Icon::Settings, 20.0, style::TEXT_SECONDARY)).center(STEP_SIZE))
+                .padding(0)
+                .style(style::icon_button)
+                .on_press(app::Message::Shell(Message::OpenSettings));
         let avatar = button(page::no_picture(STEP_SIZE))
             .padding(0)
             .style(style::icon_button)
@@ -824,7 +888,7 @@ impl Shell {
             );
 
         container(
-            row![back, forward, search, space::horizontal(), avatar]
+            row![back, forward, search, space::horizontal(), settings, avatar]
                 .spacing(HEADER_SPACING)
                 .align_y(Alignment::Center),
         )
@@ -855,6 +919,11 @@ impl Current {
             offset: self.offset,
         }
     }
+}
+
+/// A sample rate in kHz, as 44.1 or 96.
+fn khz(hz: u32) -> String {
+    format!("{}", f64::from(hz) / 1000.0)
 }
 
 /// The most of an audio error a toast shows.

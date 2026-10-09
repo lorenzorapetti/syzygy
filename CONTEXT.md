@@ -108,3 +108,17 @@ Moving to the next track with no silence, because it was prepared before the cur
 
 **Explicit content**:
 Tracks TIDAL marks explicit. A setting decides whether they may play. Starting one while the setting is off asks the user to allow it. Explicit tracks reached any other way are skipped.
+
+### Output
+
+**Max quality**:
+The best stream tier syzygy asks TIDAL for: Hi-Res lossless, Lossless or High. TIDAL may serve less.
+_Avoid_: quality (alone), bitrate
+
+**Exclusive mode**:
+Sending sound straight to one ALSA output device, bypassing the system mixer. Gapless advance doesn't happen in it.
+_Avoid_: direct mode, DirectAlsa (except in code)
+
+**Bit-perfect**:
+Exclusive mode with the samples untouched: the volume is fixed at 100% and normalization is off. Turning it on turns Exclusive mode on; turning Exclusive mode off turns it off. Turning it off brings back the volume and normalization from before.
+_Avoid_: lossless output, passthrough

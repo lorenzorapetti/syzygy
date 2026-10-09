@@ -49,6 +49,9 @@ fn new(volume: f32) -> Playback {
             autoplay: false,
             gapless: true,
             allow_explicit: true,
+            normalization: false,
+            output: Output::default(),
+            before_bit_perfect: None,
         },
         SmallRng::seed_from_u64(7),
     )
@@ -1226,6 +1229,9 @@ fn shuffled_pages_never_go_ahead_of_what_plays_next() {
                 autoplay: false,
                 gapless: true,
                 allow_explicit: true,
+                normalization: false,
+                output: Output::default(),
+                before_bit_perfect: None,
             },
             SmallRng::seed_from_u64(seed),
         ));
@@ -2470,7 +2476,7 @@ fn turning_gapless_off_clears_what_was_armed() {
 
     assert_eq!(
         playback.send(Message::Gapless(false)),
-        vec![Effect::ClearNext]
+        vec![Effect::SetGapless(false), Effect::ClearNext]
     );
 }
 
@@ -3062,4 +3068,230 @@ fn a_clear_while_a_play_loads_leaves_the_loading_track_to_play() {
 
     assert_eq!(current(&playback), Some(102));
     assert_eq!(upcoming(&playback), Vec::<u64>::new());
+}
+
+// Bit-perfect and exclusive output.
+
+fn bit_perfect(on: bool) -> Message {
+    Message::BitPerfect {
+        on,
+        first_device: Some("hw:0,0".into()),
+    }
+}
+
+fn exclusive(on: bool) -> Message {
+    Message::Exclusive {
+        on,
+        first_device: Some("hw:0,0".into()),
+    }
+}
+
+fn output(exclusive: bool, device: Option<&str>, bit_perfect: bool) -> Output {
+    Output {
+        exclusive,
+        device: device.map(str::to_string),
+        bit_perfect,
+    }
+}
+
+#[test]
+fn bit_perfect_ramps_to_full_volume_turns_normalization_off_and_exclusive_on() {
+    let mut playback = new(0.4);
+    playback.send(Message::Normalization(true));
+
+    let effects = playback.send(bit_perfect(true));
+
+    assert_eq!(
+        effects,
+        vec![
+            Effect::RampVolume {
+                from: 0.4,
+                to: 1.0,
+                over: RAMP
+            },
+            Effect::SetNormalization(false),
+            Effect::SetOutput(output(true, Some("hw:0,0"), true)),
+        ]
+    );
+    assert_eq!(playback.volume(), 1.0);
+    assert!(!playback.normalization());
+    assert_eq!(*playback.output(), output(true, Some("hw:0,0"), true));
+}
+
+#[test]
+fn turning_bit_perfect_off_brings_back_the_volume_and_normalization_and_stays_exclusive() {
+    let mut playback = new(0.4);
+    playback.send(Message::Normalization(true));
+    playback.send(bit_perfect(true));
+
+    let effects = playback.send(bit_perfect(false));
+
+    assert_eq!(
+        effects,
+        vec![
+            Effect::RampVolume {
+                from: 1.0,
+                to: 0.4,
+                over: RAMP
+            },
+            Effect::SetNormalization(true),
+            Effect::SetOutput(output(true, Some("hw:0,0"), false)),
+        ]
+    );
+    assert_eq!(playback.volume(), 0.4);
+    assert!(playback.normalization());
+}
+
+#[test]
+fn turning_exclusive_mode_off_turns_bit_perfect_off_with_it() {
+    let mut playback = new(0.4);
+    playback.send(bit_perfect(true));
+
+    let effects = playback.send(exclusive(false));
+
+    assert_eq!(
+        effects,
+        vec![
+            Effect::RampVolume {
+                from: 1.0,
+                to: 0.4,
+                over: RAMP
+            },
+            Effect::SetOutput(output(false, Some("hw:0,0"), false)),
+        ]
+    );
+}
+
+#[test]
+fn turning_exclusive_mode_on_leaves_bit_perfect_off() {
+    let mut playback = new(0.4);
+
+    let effects = playback.send(exclusive(true));
+
+    assert_eq!(
+        effects,
+        vec![Effect::SetOutput(output(true, Some("hw:0,0"), false))]
+    );
+    assert_eq!(playback.volume(), 0.4);
+}
+
+#[test]
+fn a_chosen_device_is_kept_over_the_first_listed() {
+    let mut playback = new(1.0);
+    playback.send(Message::OutputDevice("hw:2,0".into()));
+
+    let effects = playback.send(bit_perfect(true));
+
+    assert_eq!(
+        effects,
+        vec![Effect::SetOutput(output(true, Some("hw:2,0"), true))]
+    );
+}
+
+#[test]
+fn choosing_a_device_sends_the_output() {
+    let mut playback = new(1.0);
+    playback.send(exclusive(true));
+
+    assert_eq!(
+        playback.send(Message::OutputDevice("hw:2,0".into())),
+        vec![Effect::SetOutput(output(true, Some("hw:2,0"), false))]
+    );
+}
+
+#[test]
+fn the_volume_mute_and_normalization_are_locked_while_bit_perfect() {
+    let mut playback = new(0.4);
+    playback.send(bit_perfect(true));
+
+    assert_eq!(playback.send(Message::SetVolume(0.2)), vec![]);
+    assert_eq!(playback.send(Message::ToggleMute), vec![]);
+    assert_eq!(playback.send(Message::Normalization(true)), vec![]);
+    assert_eq!(playback.volume(), 1.0);
+    assert!(!playback.normalization());
+}
+
+#[test]
+fn bit_perfect_from_muted_unmutes_back_to_the_volume_before_the_mute() {
+    let mut playback = new(0.6);
+    playback.send(Message::ToggleMute);
+    playback.send(bit_perfect(true));
+    playback.send(bit_perfect(false));
+
+    assert_eq!(playback.volume(), 0.0);
+    assert_eq!(
+        playback.send(Message::ToggleMute),
+        vec![Effect::SetVolume(0.6)]
+    );
+}
+
+#[test]
+fn exclusive_output_clears_what_was_armed_and_arms_nothing() {
+    let mut playback = playing(album(1, 3, 0));
+
+    let effects = playback.send(exclusive(true));
+    assert!(effects.contains(&Effect::ClearNext), "{effects:?}");
+
+    let effects = once_playing(&mut playback, Message::Next);
+    assert_eq!(armed(&effects), None);
+}
+
+#[test]
+fn leaving_exclusive_output_arms_what_comes_next_again() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(exclusive(true));
+
+    let effects = playback.send(exclusive(false));
+
+    assert_eq!(armed(&effects), Some((102, true)));
+}
+
+#[test]
+fn output_preferences_dont_save_the_snapshot() {
+    let mut playback = new(1.0);
+
+    assert!(!saves(&mut playback, bit_perfect(true)));
+    assert!(!saves(&mut playback, exclusive(false)));
+    assert!(!saves(&mut playback, Message::Normalization(true)));
+}
+
+#[test]
+fn bit_perfect_saved_from_a_last_launch_turns_off_to_the_levels_from_before() {
+    let mut playback = Playback::new(
+        Preferences {
+            volume: 1.0,
+            shuffle: false,
+            repeat: Repeat::Off,
+            autoplay: false,
+            gapless: true,
+            allow_explicit: true,
+            normalization: false,
+            output: output(true, Some("hw:1,0"), true),
+            before_bit_perfect: Some(Levels {
+                volume: 0.3,
+                normalization: true,
+            }),
+        },
+        SmallRng::seed_from_u64(7),
+    );
+
+    playback.send(bit_perfect(false));
+
+    assert_eq!(playback.volume(), 0.3);
+    assert!(playback.normalization());
+    assert_eq!(playback.before_bit_perfect(), None);
+}
+
+#[test]
+fn the_gapless_setting_goes_to_the_engine() {
+    let mut playback = new(1.0);
+
+    assert_eq!(
+        playback.send(Message::Gapless(false)),
+        vec![Effect::SetGapless(false)]
+    );
+    assert_eq!(
+        playback.send(Message::Gapless(true)),
+        vec![Effect::SetGapless(true)]
+    );
 }

@@ -92,6 +92,34 @@ pub fn loved(radius: f32) -> container::Style {
     }
 }
 
+/// A modal's card, raised over its backdrop.
+pub fn modal(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG_ELEVATED.into()),
+        text_color: Some(TEXT_PRIMARY),
+        border: Border {
+            color: BORDER_SUBTLE,
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// What darkens the Shell under a modal.
+pub fn backdrop(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(
+            Color {
+                a: 0.8,
+                ..Color::BLACK
+            }
+            .into(),
+        ),
+        ..container::Style::default()
+    }
+}
+
 /// A round ghost button around an icon: back and forward, closing a toast.
 pub fn icon_button(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
