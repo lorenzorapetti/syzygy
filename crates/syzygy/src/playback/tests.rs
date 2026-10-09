@@ -42,6 +42,8 @@ fn new(volume: f32) -> Playback {
             volume,
             shuffle: false,
             repeat: Repeat::Off,
+            autoplay: false,
+            gapless: true,
             allow_explicit: true,
         },
         SmallRng::seed_from_u64(7),
@@ -199,6 +201,15 @@ fn audio_failed(token: PlayToken) -> Message {
     Message::Played(token, Err(PlayError::Audio(Arc::new(error))))
 }
 
+/// `effects` but the arms: what follows a track is armed again whenever it
+/// changes.
+fn unarmed(effects: Vec<Effect>) -> Vec<Effect> {
+    effects
+        .into_iter()
+        .filter(|effect| !matches!(effect, Effect::ArmNext { .. }))
+        .collect()
+}
+
 /// Playing `request`, its first track started.
 fn playing(request: PlayRequest) -> Playback {
     playing_with(new(1.0), request)
@@ -290,7 +301,7 @@ fn a_track_that_cant_be_resolved_rolls_back_to_what_still_plays() {
     let effects = playback.send(Message::Start(album(2, 3, 1)));
     let effects = playback.send(resolve_failed(token(&effects)));
 
-    assert_eq!(effects, vec![]);
+    assert_eq!(unarmed(effects), vec![]);
     assert_eq!(current(&playback), Some(101));
     assert_eq!(ids(playback.upcoming()), vec![102, 103]);
     assert_eq!(playback.status(), Status::Playing);
@@ -609,7 +620,7 @@ fn turning_shuffle_on_shuffles_only_what_is_left() {
     and_play(&mut playback, Message::Next);
     and_play(&mut playback, Message::Next);
 
-    assert_eq!(playback.send(Message::ToggleShuffle), vec![]);
+    assert_eq!(unarmed(playback.send(Message::ToggleShuffle)), vec![]);
 
     assert!(playback.shuffle());
     assert_eq!(current(&playback), Some(103));
@@ -1196,7 +1207,7 @@ fn a_new_source_that_fails_to_play_cancels_its_own_fill() {
 
     let effects = playback.send(resolve_failed(loading));
 
-    assert_eq!(effects, vec![Effect::CancelFill]);
+    assert_eq!(unarmed(effects), vec![Effect::CancelFill]);
 }
 
 #[test]
@@ -1207,6 +1218,8 @@ fn shuffled_pages_never_go_ahead_of_what_plays_next() {
                 volume: 1.0,
                 shuffle: false,
                 repeat: Repeat::Off,
+                autoplay: false,
+                gapless: true,
                 allow_explicit: true,
             },
             SmallRng::seed_from_u64(seed),
@@ -1253,7 +1266,7 @@ fn queued(playback: &Playback) -> Vec<u64> {
 fn queued_tracks_play_before_the_rest_of_the_source() {
     let mut playback = playing(album(1, 3, 0));
 
-    assert_eq!(add(&mut playback, 901), vec![]);
+    assert_eq!(unarmed(add(&mut playback, 901)), vec![]);
     add(&mut playback, 902);
 
     assert_eq!(queued(&playback), vec![901, 902]);
@@ -1942,4 +1955,534 @@ fn repeat_one_moves_on_from_an_explicit_track_once_they_arent_allowed() {
     let effects = playback.send(Message::TrackFinished);
 
     assert_eq!(plays(&effects), 102);
+}
+
+// Autoplay.
+
+/// Send `message` and let the play it starts succeed: what the success
+/// asked for.
+fn once_playing(playback: &mut Playback, message: Message) -> Vec<Effect> {
+    let effects = playback.send(message);
+    playback.send(played(token(&effects)))
+}
+
+/// Playback with Autoplay on.
+fn autoplaying() -> Playback {
+    let mut playback = new(1.0);
+    playback.send(Message::Autoplay(true));
+    playback
+}
+
+/// Track radio `id` of `tracks`.
+fn radio_of(id: u64, tracks: Vec<Track>) -> Radio {
+    Radio {
+        source: Source {
+            kind: radio_ref(id),
+            name: format!("Radio {id}"),
+        },
+        tracks,
+    }
+}
+
+fn radio_ref(id: u64) -> SourceRef {
+    SourceRef::TrackRadio(format!("radio-{id}"))
+}
+
+/// Track radio `id` of `n` tracks numbered from `id * 100 + 1`.
+fn radio(id: u64, n: u64) -> Radio {
+    radio_of(id, (1..=n).map(|i| track(id * 100 + i)).collect())
+}
+
+/// The Track radio fetch among `effects`, and the track it's for.
+fn radio_fetch(effects: &[Effect]) -> Option<(RadioId, u64)> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::FetchTrackRadio { radio, track } => Some((*radio, track.id)),
+        _ => None,
+    })
+}
+
+/// Autoplay on, playing the last of album 1's 2 tracks, with its radio
+/// being fetched.
+fn on_the_last_track() -> (Playback, RadioId) {
+    let mut playback = autoplaying();
+    let effects = once_playing(&mut playback, Message::Start(album(1, 2, 1)));
+    let (id, _) = radio_fetch(&effects).expect("a radio fetch");
+    (playback, id)
+}
+
+#[test]
+fn autoplay_fetches_the_last_tracks_radio_once_it_plays() {
+    let mut playback = playing_with(autoplaying(), album(1, 2, 0));
+
+    let effects = playback.send(Message::TrackFinished);
+    assert_eq!(radio_fetch(&effects), None, "not while it loads");
+
+    let effects = playback.send(played(token(&effects)));
+    assert_eq!(radio_fetch(&effects).map(|(_, id)| id), Some(102));
+}
+
+#[test]
+fn autoplay_fetches_no_radio_while_there_is_more_to_play() {
+    let mut playback = autoplaying();
+
+    let effects = once_playing(&mut playback, Message::Start(album(1, 2, 0)));
+
+    assert_eq!(radio_fetch(&effects), None);
+}
+
+#[test]
+fn autoplay_continues_with_the_radio_when_the_source_runs_out() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    let effects = playback.send(Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 501);
+    assert_eq!(playing_from(&playback), Some(radio_ref(5)));
+    assert_eq!(ids(playback.upcoming()), vec![502, 503]);
+    assert_eq!(history(&playback), vec![102]);
+}
+
+#[test]
+fn a_radio_that_arrives_after_the_track_ended_plays_then() {
+    let (mut playback, id) = on_the_last_track();
+    assert_eq!(playback.send(Message::TrackFinished), vec![]);
+    assert_eq!(playback.status(), Status::Stopped);
+
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    assert_eq!(plays(&effects), 501);
+    assert_eq!(playing_from(&playback), Some(radio_ref(5)));
+}
+
+#[test]
+fn next_on_the_last_track_goes_on_to_the_radio() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    let effects = playback.send(Message::Next);
+
+    assert_eq!(plays(&effects), 501);
+}
+
+#[test]
+fn next_on_the_last_track_stops_until_the_radio_arrives() {
+    let (mut playback, id) = on_the_last_track();
+
+    assert_eq!(playback.send(Message::Next), vec![Effect::Stop]);
+    assert_eq!(playback.status(), Status::Stopped);
+
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    assert_eq!(plays(&effects), 501);
+}
+
+#[test]
+fn a_track_that_ends_before_its_radio_was_asked_for_asks_and_waits() {
+    let mut playback = autoplaying();
+    playback.send(Message::Start(album(1, 2, 1)));
+
+    let effects = playback.send(Message::Next);
+    let (id, track) = radio_fetch(&effects).expect("a radio fetch");
+    assert_eq!(track, 102);
+    assert_eq!(playback.status(), Status::Stopped);
+
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    assert_eq!(plays(&effects), 501);
+}
+
+#[test]
+fn without_a_radio_autoplay_stops_cleanly() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, None));
+
+    assert_eq!(playback.send(Message::TrackFinished), vec![]);
+
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(102));
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
+}
+
+#[test]
+fn a_radio_fetch_that_fails_after_the_track_ended_leaves_playback_stopped() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::TrackFinished);
+
+    assert_eq!(playback.send(Message::RadioArrived(id, None)), vec![]);
+
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(102));
+}
+
+#[test]
+fn the_radio_leaves_out_what_already_played() {
+    let mut playback = playing_with(autoplaying(), album(1, 2, 0));
+    let effects = once_playing(&mut playback, Message::TrackFinished);
+    let (id, _) = radio_fetch(&effects).expect("a radio fetch");
+    let tracks = vec![track(102), track(101), track(501)];
+    playback.send(Message::RadioArrived(id, Some(radio_of(5, tracks))));
+
+    let effects = playback.send(Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 501);
+    assert_eq!(ids(playback.upcoming()), Vec::<u64>::new());
+}
+
+#[test]
+fn a_radio_of_nothing_new_stops_cleanly() {
+    let (mut playback, id) = on_the_last_track();
+    let tracks = vec![track(102)];
+    playback.send(Message::RadioArrived(id, Some(radio_of(5, tracks))));
+
+    assert_eq!(playback.send(Message::TrackFinished), vec![]);
+    assert_eq!(playback.status(), Status::Stopped);
+}
+
+#[test]
+fn autoplay_off_fetches_no_radio_and_stops() {
+    let mut playback = new(1.0);
+
+    let effects = once_playing(&mut playback, Message::Start(album(1, 2, 1)));
+    assert_eq!(radio_fetch(&effects), None);
+
+    assert_eq!(playback.send(Message::TrackFinished), vec![]);
+    assert_eq!(playback.status(), Status::Stopped);
+}
+
+#[test]
+fn autoplay_leaves_the_end_to_repeat_while_it_is_on() {
+    for repeat in [Repeat::All, Repeat::One] {
+        let mut playback = repeating(repeat);
+        playback.send(Message::Autoplay(true));
+
+        let effects = once_playing(&mut playback, Message::Start(album(1, 2, 1)));
+
+        assert_eq!(radio_fetch(&effects), None, "under {repeat:?}");
+    }
+}
+
+#[test]
+fn a_radio_for_a_track_no_longer_playing_is_dropped() {
+    let (mut playback, id) = on_the_last_track();
+    and_play(&mut playback, Message::Start(album(2, 3, 0)));
+
+    assert_eq!(
+        playback.send(Message::RadioArrived(id, Some(radio(5, 3)))),
+        vec![]
+    );
+
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(2)));
+    assert_eq!(ids(playback.upcoming()), vec![202, 203]);
+}
+
+#[test]
+fn choosing_something_while_the_radio_loads_keeps_it_from_playing() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::TrackFinished);
+    let replay = playback.send(Message::TogglePlay);
+    assert_eq!(plays(&replay), 102);
+
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    assert!(plays_none(&effects));
+    assert_eq!(current(&playback), Some(102));
+}
+
+#[test]
+fn radio_tracks_are_not_chosen_by_the_user() {
+    let (mut playback, id) = on_the_last_track();
+    assert!(playback.chosen_by_user());
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    and_play(&mut playback, Message::TrackFinished);
+    assert!(!playback.chosen_by_user());
+
+    and_play(&mut playback, Message::TrackFinished);
+    assert!(!playback.chosen_by_user());
+}
+
+#[test]
+fn queued_entries_during_a_radio_are_chosen_by_the_user() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    and_play(&mut playback, Message::TrackFinished);
+    add(&mut playback, 901);
+
+    and_play(&mut playback, Message::TrackFinished);
+    assert!(playback.chosen_by_user());
+
+    and_play(&mut playback, Message::Start(album(2, 3, 0)));
+    assert!(playback.chosen_by_user());
+}
+
+// Gapless advance.
+
+/// The arm among `effects`: the track and whether it gets album gain.
+fn armed(effects: &[Effect]) -> Option<(u64, bool)> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::ArmNext {
+            track_id,
+            album_gain,
+            ..
+        } => Some((*track_id, *album_gain)),
+        _ => None,
+    })
+}
+
+/// The entry the arm among `effects` is for.
+fn armed_entry(effects: &[Effect]) -> EntryId {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::ArmNext { entry, .. } => Some(*entry),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected an ArmNext, got {effects:?}"))
+}
+
+#[test]
+fn a_track_that_plays_arms_the_next_in_the_play_order() {
+    let mut playback = new(1.0);
+
+    let effects = playback.send(Message::Start(album(1, 3, 0)));
+    assert_eq!(armed(&effects), None, "not while it loads");
+
+    let effects = playback.send(played(token(&effects)));
+    assert_eq!(armed(&effects), Some((102, true)));
+}
+
+#[test]
+fn the_manual_queue_head_is_armed_ahead_of_the_source() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(armed(&add(&mut playback, 901)), Some((901, false)));
+    assert_eq!(add(&mut playback, 902), vec![], "the head is the same");
+}
+
+#[test]
+fn repeat_one_arms_the_track_again() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::CycleRepeat);
+
+    let effects = playback.send(Message::CycleRepeat);
+
+    assert_eq!(armed(&effects), Some((101, true)));
+}
+
+#[test]
+fn repeat_all_arms_the_first_track_of_the_next_round() {
+    let playback = shuffled(repeating(Repeat::All));
+    let mut playback = playing_with(playback, playlist(1, 8, Start::All));
+    for _ in 0..6 {
+        and_play(&mut playback, Message::TrackFinished);
+    }
+    let effects = once_playing(&mut playback, Message::TrackFinished);
+    let (first, _) = armed(&effects).expect("an arm");
+
+    playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+
+    assert_eq!(current(&playback), Some(first));
+    assert_eq!(
+        sorted(play_order(&playback)),
+        (101..=108).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn autoplay_arms_the_radio_once_it_arrives() {
+    let (mut playback, id) = on_the_last_track();
+
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    assert_eq!(armed(&effects), Some((501, false)));
+}
+
+#[test]
+fn a_track_that_will_be_skipped_is_never_armed() {
+    let tracks = vec![track(101), unavailable(102), track(103)];
+    let mut playback = new(1.0);
+
+    let effects = once_playing(
+        &mut playback,
+        Message::Start(album_of(1, tracks, Start::All)),
+    );
+
+    assert_eq!(armed(&effects), None);
+}
+
+#[test]
+fn disallowing_explicit_tracks_clears_an_armed_explicit_one() {
+    let tracks = vec![track(101), explicit(102)];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+
+    assert_eq!(
+        playback.send(Message::AllowExplicit(false)),
+        vec![Effect::ClearNext]
+    );
+}
+
+#[test]
+fn nothing_is_armed_with_nothing_after() {
+    let mut playback = new(1.0);
+
+    let effects = once_playing(&mut playback, Message::Start(album(1, 2, 1)));
+
+    assert_eq!(armed(&effects), None);
+}
+
+#[test]
+fn turning_shuffle_on_arms_the_new_next_track() {
+    let mut playback = playing(playlist(1, 8, Start::All));
+
+    let effects = playback.send(Message::ToggleShuffle);
+
+    let next = ids(playback.upcoming())[0];
+    assert_ne!(next, 102);
+    assert_eq!(armed(&effects), Some((next, false)));
+}
+
+#[test]
+fn a_gapless_advance_moves_on_without_playing_anything() {
+    let mut playback = new(1.0);
+    let effects = once_playing(&mut playback, Message::Start(album(1, 3, 0)));
+
+    let effects = playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+
+    assert!(plays_none(&effects));
+    assert_eq!(armed(&effects), Some((103, true)), "and arms the one after");
+    assert_eq!(current(&playback), Some(102));
+    assert_eq!(history(&playback), vec![101]);
+    assert_eq!(playback.status(), Status::Playing);
+    assert_eq!(playback.position(), 0.0);
+}
+
+/// No Play among `effects`.
+fn plays_none(effects: &[Effect]) -> bool {
+    !effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Play { .. }))
+}
+
+#[test]
+fn a_gapless_advance_into_a_queued_entry_shows_its_tag_then_the_source_again() {
+    let mut playback = playing(album(1, 3, 0));
+    let effects = add(&mut playback, 901);
+
+    let effects = playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+    assert_eq!(current(&playback), Some(901));
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(9)));
+    assert_eq!(queued(&playback), Vec::<u64>::new());
+
+    playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+    assert_eq!(current(&playback), Some(102));
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
+}
+
+#[test]
+fn a_gapless_advance_into_the_radio_makes_it_the_source() {
+    let (mut playback, id) = on_the_last_track();
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    let effects = playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+
+    assert!(plays_none(&effects));
+    assert_eq!(current(&playback), Some(501));
+    assert_eq!(playing_from(&playback), Some(radio_ref(5)));
+    assert_eq!(history(&playback), vec![102]);
+    assert!(!playback.chosen_by_user());
+    assert_eq!(armed(&effects), Some((502, false)));
+}
+
+#[test]
+fn a_gapless_replay_under_repeat_one_leaves_history_alone() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::CycleRepeat);
+    let effects = playback.send(Message::CycleRepeat);
+
+    let effects = playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+
+    assert!(plays_none(&effects));
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(history(&playback), Vec::<u64>::new());
+    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+}
+
+#[test]
+fn an_advance_to_an_entry_no_longer_next_plays_what_is() {
+    let mut playback = new(1.0);
+    let effects = once_playing(&mut playback, Message::Start(album(1, 3, 0)));
+    let stale = armed_entry(&effects);
+    play_next(&mut playback, 901);
+
+    let effects = playback.send(Message::TrackAdvanced(stale));
+
+    assert_eq!(plays(&effects), 901);
+    assert_eq!(history(&playback), vec![101]);
+}
+
+#[test]
+fn an_advance_with_nothing_left_to_play_stops_the_engine() {
+    let tracks = vec![track(101), explicit(102)];
+    let mut playback = new(1.0);
+    let effects = once_playing(
+        &mut playback,
+        Message::Start(album_of(1, tracks, Start::All)),
+    );
+    let stale = armed_entry(&effects);
+    playback.send(Message::AllowExplicit(false));
+
+    let effects = playback.send(Message::TrackAdvanced(stale));
+
+    assert_eq!(effects, vec![Effect::Stop]);
+    assert_eq!(playback.status(), Status::Stopped);
+}
+
+#[test]
+fn an_advance_while_another_choice_loads_is_left_to_it() {
+    let mut playback = new(1.0);
+    let effects = once_playing(&mut playback, Message::Start(album(1, 3, 0)));
+    playback.send(Message::Start(album(2, 3, 0)));
+
+    assert_eq!(
+        playback.send(Message::TrackAdvanced(armed_entry(&effects))),
+        vec![]
+    );
+    assert_eq!(current(&playback), Some(201));
+}
+
+#[test]
+fn with_gapless_off_nothing_is_armed() {
+    let mut playback = new(1.0);
+    playback.send(Message::Gapless(false));
+
+    let effects = once_playing(&mut playback, Message::Start(album(1, 3, 0)));
+
+    assert_eq!(armed(&effects), None);
+}
+
+#[test]
+fn turning_gapless_off_clears_what_was_armed() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(
+        playback.send(Message::Gapless(false)),
+        vec![Effect::ClearNext]
+    );
+}
+
+#[test]
+fn autoplay_fetches_the_radio_early_when_the_rest_would_all_be_skipped() {
+    let tracks = vec![track(101), unavailable(102), explicit(103)];
+    let mut playback = autoplaying();
+    let effects = playback.send(Message::Start(album_of(1, tracks, Start::All)));
+    playback.send(Message::AllowExplicit(false));
+
+    let effects = playback.send(played(token(&effects)));
+    let (id, track) = radio_fetch(&effects).expect("a radio fetch");
+    assert_eq!(track, 101);
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+
+    let effects = playback.send(Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 501);
+    assert_eq!(history(&playback), vec![101]);
 }

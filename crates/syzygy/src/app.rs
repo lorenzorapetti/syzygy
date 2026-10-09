@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use syzygy_audio::{AudioPlayer, PositionCell};
 use syzygy_catalog::Catalog;
 use syzygy_store::{DiskCache, Store};
-use syzygy_tidal::models::{AuthTokens, SessionInfo};
+use syzygy_tidal::models::{AuthTokens, SessionInfo, StreamInfo};
 use syzygy_tidal::{LoginMethod, TidalClient};
 
 use crate::events::EventSource;
@@ -22,6 +22,7 @@ use crate::login;
 use crate::page::{self, Context, PageId};
 use crate::persist;
 use crate::playback::{self, PlayError, Playback, Status};
+use crate::radio;
 use crate::session::Session;
 use crate::settings::{self, Settings};
 use crate::shell::{self, Shell};
@@ -49,6 +50,9 @@ pub struct App {
     /// The play being fetched and started. Replacing it aborts it, so an
     /// older choice can't reach the engine after a newer one.
     play_task: Option<task::Handle>,
+    /// The track being armed to follow with no gap. Replacing it, or a
+    /// play or a stop, aborts it.
+    arm_task: Option<task::Handle>,
     /// The fill reading the rest of the Playback source. It outlives the
     /// Page that started the play; replacing it aborts it.
     fill_task: Option<task::Handle>,
@@ -134,6 +138,8 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
             volume: settings.volume,
             shuffle: settings.shuffle,
             repeat: settings.repeat,
+            autoplay: settings.autoplay,
+            gapless: settings.gapless,
             allow_explicit: settings.allow_explicit,
         },
         rand::make_rng(),
@@ -155,6 +161,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         images: Images::new(images::BYTE_CAP),
         playback,
         play_task: None,
+        arm_task: None,
         fill_task: None,
         epoch: Instant::now(),
         frame: Instant::now(),
@@ -305,6 +312,8 @@ impl App {
                     playback::Message::ToggleShuffle
                         | playback::Message::CycleRepeat
                         | playback::Message::AllowExplicit(_)
+                        | playback::Message::Autoplay(_)
+                        | playback::Message::Gapless(_)
                 );
                 let task = self.update_playback(message);
                 let save = if mute {
@@ -408,20 +417,22 @@ impl App {
                 let player = player.clone();
                 let quality = self.settings.max_quality;
                 let normalize = self.settings.volume_normalization;
+                // What was armed would follow the old track if it ended
+                // while this one is fetched: drop it now, not once the play
+                // task runs.
+                self.arm_task = None;
+                let cleared = player.clear_next_track();
                 let play = async move |busy: &mut mpsc::Sender<playback::Message>| {
+                    if let Err(e) = cleared.await {
+                        log::warn!("Could not clear the next track: {e}");
+                    }
                     let stream = tidal
                         .resolve_stream(track_id, quality)
                         .await
                         .map_err(|e| PlayError::Resolve(Arc::new(e)))?;
                     let audio = |e| PlayError::Audio(Arc::new(e));
                     if normalize {
-                        let info = &stream.info;
-                        // An album's gain when it plays in album order and
-                        // TIDAL has one, the track's otherwise.
-                        let (replay_gain, peak) = match info.album_replay_gain {
-                            Some(gain) if album_gain => (Some(gain), info.album_peak_amplitude),
-                            _ => (info.track_replay_gain, info.track_peak_amplitude),
-                        };
+                        let (replay_gain, peak) = replay_gain(&stream.info, album_gain);
                         let gain = syzygy_audio::compute_norm_gain(replay_gain, peak);
                         player.set_normalization_gain(gain).await.map_err(audio)?;
                     }
@@ -454,6 +465,7 @@ impl App {
             playback::Effect::Stop => {
                 // A play still loading would start after the stop.
                 self.play_task = None;
+                self.arm_task = None;
                 engine(player.stop(), "stop")
             }
             playback::Effect::Seek(position) => engine(player.seek(position), "seek"),
@@ -480,6 +492,60 @@ impl App {
                 self.fill_task = None;
                 Task::none()
             }
+            playback::Effect::ArmNext {
+                entry,
+                track_id,
+                album_gain,
+            } => {
+                let tidal = self.services.tidal.clone();
+                let player = player.clone();
+                let quality = self.settings.max_quality;
+                let normalize = self.settings.volume_normalization;
+                // What was armed before mustn't follow while this one is
+                // fetched.
+                let cleared = player.clear_next_track();
+                let arm = async move {
+                    if let Err(e) = cleared.await {
+                        log::warn!("Could not clear the next track: {e}");
+                    }
+                    let stream = match tidal.resolve_stream(track_id, quality).await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            log::warn!("Could not resolve track {track_id} to arm it: {e}");
+                            return;
+                        }
+                    };
+                    let (replay_gain, peak) = replay_gain(&stream.info, album_gain);
+                    let gain = if normalize {
+                        syzygy_audio::compute_norm_gain(replay_gain, peak)
+                    } else {
+                        1.0
+                    };
+                    let armed = player.set_next_track(
+                        stream.uri,
+                        gain,
+                        track_id,
+                        entry.0,
+                        replay_gain.unwrap_or(0.0),
+                        peak.unwrap_or(1.0),
+                        stream.is_dash,
+                    );
+                    if let Err(e) = armed.await {
+                        log::warn!("Could not arm track {track_id}: {e}");
+                    }
+                };
+                let (task, handle) = Task::future(arm).discard().abortable();
+                self.arm_task = Some(handle.abort_on_drop());
+                task
+            }
+            playback::Effect::ClearNext => {
+                self.arm_task = None;
+                engine(player.clear_next_track(), "clear the next track")
+            }
+            playback::Effect::FetchTrackRadio { radio, track } => Task::perform(
+                radio::read(self.services.catalog.clone(), track),
+                move |read| Message::Playback(playback::Message::RadioArrived(radio, read)),
+            ),
             playback::Effect::ResumeAfter { token, delay } => {
                 Task::perform(tokio::time::sleep(delay), move |()| {
                     Message::Playback(playback::Message::Resume(token))
@@ -499,10 +565,8 @@ impl App {
                 log::warn!("Audio failed ({kind:?}): {message}");
                 self.update_playback(playback::Message::EngineFailed(message))
             }
-            // Nothing is armed for a gapless advance yet.
-            syzygy_audio::Event::TrackAdvanced { track_id, .. } => {
-                log::warn!("Track {track_id} advanced without being armed");
-                Task::none()
+            syzygy_audio::Event::TrackAdvanced { entry, .. } => {
+                self.update_playback(playback::Message::TrackAdvanced(playback::EntryId(entry)))
             }
             syzygy_audio::Event::Resampled { from, to } => {
                 log::info!("Resampling from {from} Hz to {to} Hz");
@@ -515,12 +579,16 @@ impl App {
         }
     }
 
-    /// The engine starts at full volume: give it the saved one. Exclusive
-    /// mode and bit-perfect follow with the Settings modal, which keeps
-    /// them and the volume lock in step.
+    /// The engine starts at full volume with gapless on: give it the saved
+    /// volume and gapless setting. Exclusive mode and bit-perfect follow
+    /// with the Settings modal, which keeps them and the volume lock in
+    /// step.
     fn configure_engine(&self) -> Task<Message> {
         let player = &self.services.player;
-        engine(player.set_volume(self.playback.volume()), "set the volume")
+        Task::batch([
+            engine(player.set_volume(self.playback.volume()), "set the volume"),
+            engine(player.set_gapless(self.settings.gapless), "set gapless"),
+        ])
     }
 
     fn save_volume(&mut self) -> Task<Message> {
@@ -528,10 +596,13 @@ impl App {
         self.save_settings()
     }
 
-    /// Remember Shuffle, Repeat mode and whether explicit tracks may play.
+    /// Remember Shuffle, Repeat mode, Autoplay and whether explicit tracks
+    /// may play.
     fn save_modes(&mut self) -> Task<Message> {
         self.settings.shuffle = self.playback.shuffle();
         self.settings.repeat = self.playback.repeat();
+        self.settings.autoplay = self.playback.autoplay();
+        self.settings.gapless = self.playback.gapless();
         self.settings.allow_explicit = self.playback.allow_explicit();
         self.save_settings()
     }
@@ -694,6 +765,15 @@ const TICK: Duration = Duration::from_millis(250);
 /// waits before each: 5 s in all, as sone.
 const DEVICE_TRIES: u32 = 10;
 const DEVICE_RETRY: Duration = Duration::from_millis(500);
+
+/// The replay gain and peak to level a track by: its album's when it plays
+/// in album order and TIDAL has one, its own otherwise.
+fn replay_gain(info: &StreamInfo, album_gain: bool) -> (Option<f64>, Option<f64>) {
+    match info.album_replay_gain {
+        Some(gain) if album_gain => (Some(gain), info.album_peak_amplitude),
+        _ => (info.track_replay_gain, info.track_peak_amplitude),
+    }
+}
 
 /// A call on the engine whose only answer worth having is a failure, which
 /// is logged.

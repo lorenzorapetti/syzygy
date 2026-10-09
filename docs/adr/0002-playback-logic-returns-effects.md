@@ -1,6 +1,6 @@
 # Playback logic returns effects instead of calling the engines
 
-syzygy ports sone's TypeScript queue, shuffle, repeat, autoplay and history logic into the iced `update`, and wants it tested at that level. But the engines behind it are a real GStreamer player, a D-Bus MPRIS server and a TIDAL reporter. So the playback logic is pure: it changes state and returns a list of plain-data `Effect`s (`Play`, `Pause`, `Seek`, `PrefetchNext`, `MprisUpdate`, `Report…`). A thin runner turns those effects into `Task`s against the `Services` handles. Tests assert on the state and on the effects, with no fakes and no traits in the engine crates.
+syzygy ports sone's TypeScript queue, shuffle, repeat, autoplay and history logic into the iced `update`, and wants it tested at that level. But the engines behind it are a real GStreamer player, a D-Bus MPRIS server and a TIDAL reporter. So the playback logic is pure: it changes state and returns a list of plain-data `Effect`s (`Play`, `Pause`, `Seek`, `ArmNext`, `MprisUpdate`, `Report…`). A thin runner turns those effects into `Task`s against the `Services` handles. Tests assert on the state and on the effects, with no fakes and no traits in the engine crates.
 
 ## Considered Options
 

@@ -10,6 +10,7 @@ mod page;
 mod persist;
 mod playback;
 mod plugin_path;
+mod radio;
 mod session;
 mod settings;
 mod shell;

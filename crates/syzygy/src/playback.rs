@@ -21,12 +21,20 @@
 //! broken source stops after [`MAX_FAILURES`] in a row, and explicit ones
 //! while they aren't allowed, silently. Choosing explicit tracks while
 //! they aren't allowed asks first: [`Outcome::NeedsExplicitConsent`].
+//!
+//! With Autoplay on and Repeat off, the last track's Track radio is fetched
+//! as it starts, and becomes the Playback source when nothing is left.
+//!
+//! Whatever comes next, when playback already knows it and it won't be
+//! skipped, is armed in the engine so it follows with no gap. The engine
+//! says when it took over ([`Message::TrackAdvanced`]), and playback moves
+//! on to it without playing anything.
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
@@ -47,6 +55,9 @@ pub struct Playback {
     listening: Listening,
     shuffle: bool,
     repeat: Repeat,
+    autoplay: bool,
+    /// Whether what comes next is armed to follow with no gap.
+    gapless: bool,
     /// Every shuffle draws from it: seeded from entropy at boot, fixed in
     /// tests.
     rng: SmallRng,
@@ -59,6 +70,10 @@ pub struct Playback {
     /// The play a rate limit stopped, to try again once the wait is over
     /// unless the user did something first.
     rate_limited: Option<PlayToken>,
+    /// The Track radio Autoplay fetched, or is fetching, for the last track.
+    radio: Option<RadioFetch>,
+    /// What the engine has prepared to follow the current track.
+    armed: Option<Armed>,
     /// Seconds into the current track: from the engine while playing, the
     /// target while loading, where play starts again while stopped.
     position: f32,
@@ -75,6 +90,9 @@ pub struct Playback {
     next_fill: u64,
     /// Stamped on each Queue entry, so two copies of a track stay apart.
     next_entry: u64,
+    /// Stamped on each radio fetch, so one for a track that's no longer
+    /// last is dropped.
+    next_radio: u64,
 }
 
 /// Where listening is: the source, the Manual queue, the current track and
@@ -108,6 +126,11 @@ struct SourcePlay {
     /// The rest of the source, being read. Its id stays across Repeat all
     /// rounds.
     fill: Option<Fill>,
+    /// The order of the next Repeat all round, drawn once this one runs
+    /// out so its first track can be armed.
+    round: Option<Vec<usize>>,
+    /// A Track radio Autoplay started.
+    autoplay: bool,
 }
 
 /// The source's unread rest, and the fill reading it.
@@ -137,7 +160,30 @@ impl SourcePlay {
         if let Some(fill) = &mut self.fill {
             fill.continuation.offset += tracks.len();
         }
+        self.round = None;
     }
+
+    /// The play order has no steps left.
+    fn ran_out(&self) -> bool {
+        self.next == self.order.len()
+    }
+
+    /// The tracks of the steps left, in order.
+    fn rest(&self) -> impl Iterator<Item = &Track> {
+        self.order[self.next..]
+            .iter()
+            .map(|&index| &self.tracks[index])
+    }
+}
+
+/// Every index of `len` tracks: in random order with `shuffle` on, in
+/// source order without.
+fn round_order(len: usize, shuffle: bool, rng: &mut SmallRng) -> Vec<usize> {
+    let mut order: Vec<_> = (0..len).collect();
+    if shuffle {
+        order.shuffle(rng);
+    }
+    order
 }
 
 /// A Queue entry: a track that plays, played or is playing, and where it
@@ -149,11 +195,66 @@ struct Item {
     from: Arc<Source>,
     /// Its step in the play it came from. None for a Manual queue entry.
     step: Option<Step>,
+    /// False only for a track from a Track radio Autoplay started.
+    chosen: bool,
 }
 
 /// Each Queue entry's own, so the same track queued twice is two entries.
+/// The engine echoes it for an armed entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntryId(u64);
+pub struct EntryId(pub u64);
+
+/// A Track radio fetch, for the entry `after`, the last to play.
+struct RadioFetch {
+    id: RadioId,
+    after: EntryId,
+    state: RadioState,
+    /// Nothing was left when the last track ended: the radio plays as
+    /// soon as it arrives.
+    waiting: bool,
+}
+
+/// Where a Track radio fetch got to.
+enum RadioState {
+    Fetching,
+    /// What it has that hasn't played.
+    Ready(Radio),
+    /// There was none, the fetch failed, or it already started.
+    Spent,
+}
+
+/// Stamped on each Track radio fetch and echoed by its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadioId(u64);
+
+/// A Track radio, as Autoplay plays it.
+#[derive(Debug, Clone)]
+pub struct Radio {
+    pub source: Source,
+    pub tracks: Vec<Track>,
+}
+
+/// What moving on would make current, and a gapless advance moves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Upcoming {
+    /// The current track again, under Repeat one.
+    Again,
+    /// The head of the Manual queue.
+    Queued(EntryId),
+    /// The next step of the play order.
+    Step(Step),
+    /// The first step of a new Repeat all round of the play.
+    NewRound(u64),
+    /// The first track of the Track radio from this fetch.
+    Radio(RadioId),
+}
+
+/// What the engine was asked to prepare, as `entry`.
+struct Armed {
+    upcoming: Upcoming,
+    entry: EntryId,
+    track_id: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Step {
@@ -251,6 +352,8 @@ pub struct Preferences {
     pub volume: f32,
     pub shuffle: bool,
     pub repeat: Repeat,
+    pub autoplay: bool,
+    pub gapless: bool,
     pub allow_explicit: bool,
 }
 
@@ -297,8 +400,11 @@ pub enum Message {
     DeviceBusy(PlayToken),
     /// A rate limit's wait, after this play hit it, is over.
     Resume(PlayToken),
-    /// The playing track ended. The only way a track ends.
+    /// The playing track ended with nothing armed. The only way a track
+    /// ends without a gapless advance.
     TrackFinished,
+    /// The engine moved on, with no gap, to the entry armed as this.
+    TrackAdvanced(EntryId),
     /// The engine stopped on an error of its own, in its words.
     EngineFailed(String),
     /// A fill read these tracks, the next ones in the source.
@@ -307,6 +413,21 @@ pub enum Message {
     FillEnded(FillId),
     /// Whether explicit tracks may play.
     AllowExplicit(bool),
+    /// Whether the last track's Track radio follows when nothing is left.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Settings modal's toggle (ticket 31) sends it")
+    )]
+    Autoplay(bool),
+    /// Whether what comes next is armed to follow with no gap.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Settings modal's toggle (ticket 31) sends it")
+    )]
+    Gapless(bool),
+    /// The Track radio fetch came back: None when there's no radio or the
+    /// fetch failed.
+    RadioArrived(RadioId, Option<Radio>),
     /// What waited for consent, to go ahead with explicit tracks skipped.
     WithoutExplicit(Pending),
 }
@@ -374,7 +495,8 @@ impl std::fmt::Display for PlayError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Fetch the track's stream and play it, from `from` seconds in, with
-    /// the album's gain rather than the track's when normalizing.
+    /// the album's gain rather than the track's when normalizing. Whatever
+    /// was armed is dropped at once, so the old track can't advance to it.
     Play {
         token: PlayToken,
         track_id: u64,
@@ -395,6 +517,21 @@ pub enum Effect {
     },
     /// Stop reading the source.
     CancelFill,
+    /// Prepare the track to follow the current one with no gap, as
+    /// `entry`, which [`Message::TrackAdvanced`] echoes. What was armed is
+    /// dropped at once, before the new track is fetched.
+    ArmNext {
+        entry: EntryId,
+        track_id: u64,
+        album_gain: bool,
+    },
+    /// Drop what was armed.
+    ClearNext,
+    /// Fetch `track`'s Track radio, for [`Message::RadioArrived`].
+    FetchTrackRadio {
+        radio: RadioId,
+        track: Track,
+    },
     /// Send [`Message::Resume`] with `token` once `delay` has passed.
     ResumeAfter {
         token: PlayToken,
@@ -425,11 +562,15 @@ impl Playback {
             listening: Listening::default(),
             shuffle: preferences.shuffle,
             repeat: preferences.repeat,
+            autoplay: preferences.autoplay,
+            gapless: preferences.gapless,
             rng,
             status: Status::Stopped,
             allow_explicit: preferences.allow_explicit,
             failures: 0,
             rate_limited: None,
+            radio: None,
+            armed: None,
             position: 0.0,
             volume: preferences.volume.clamp(0.0, 1.0),
             pre_mute: 0.0,
@@ -438,6 +579,7 @@ impl Playback {
             next_play: 0,
             next_fill: 0,
             next_entry: 0,
+            next_radio: 0,
         }
     }
 
@@ -445,7 +587,9 @@ impl Playback {
         if !self.allow_explicit && chooses_explicit(&message) {
             return Outcome::NeedsExplicitConsent(Pending(Box::new(message)));
         }
-        Outcome::Effects(self.apply(message))
+        let mut effects = self.apply(message);
+        effects.extend(self.prepare());
+        Outcome::Effects(effects)
     }
 
     fn apply(&mut self, message: Message) -> Vec<Effect> {
@@ -458,6 +602,9 @@ impl Playback {
                 | Message::Seek(_)
         ) {
             self.rate_limited = None;
+            if let Some(fetch) = &mut self.radio {
+                fetch.waiting = false;
+            }
         }
         match message {
             Message::Start(request) => self.start(request),
@@ -493,6 +640,7 @@ impl Playback {
                         tail.sort_unstable();
                     }
                     play.shuffled = self.shuffle;
+                    play.round = None;
                 }
                 vec![]
             }
@@ -577,23 +725,42 @@ impl Playback {
                 if self.status != Status::Playing {
                     return vec![];
                 }
-                // The finished track is what a failed next one rolls back to.
-                self.status = Status::Stopped;
-                self.position = 0.0;
-                let blocked = self
-                    .current()
-                    .is_some_and(|track| track.explicit && !self.allow_explicit);
-                if self.repeat == Repeat::One && !blocked {
-                    self.snapshot();
-                    return self.play(None);
-                }
-                let before = self.listening.clone();
-                self.snapshot();
-                self.move_on(before).unwrap_or_else(|| {
-                    self.rollback = None;
-                    vec![]
-                })
+                self.finished()
             }
+            Message::TrackAdvanced(entry) => match self.status {
+                // The choice loading now replaces what the engine moved to.
+                Status::Loading(_) => {
+                    self.ended_while_loading(0.0);
+                    vec![]
+                }
+                Status::Stopped => {
+                    log::warn!("The engine moved on to entry {entry:?} while stopped");
+                    vec![Effect::Stop]
+                }
+                Status::Playing | Status::Paused => {
+                    let armed = self.armed.take().filter(|armed| {
+                        armed.entry == entry
+                            && self.what_follows().is_some_and(|(upcoming, track)| {
+                                upcoming == armed.upcoming && track.id == armed.track_id
+                            })
+                    });
+                    if let Some(armed) = armed {
+                        return self.advanced(armed);
+                    }
+                    // It took what was armed before the state moved on:
+                    // play what comes next now, over it.
+                    log::warn!("The engine moved on to entry {entry:?}, no longer next");
+                    self.status = Status::Playing;
+                    let mut effects = self.finished();
+                    if !effects
+                        .iter()
+                        .any(|effect| matches!(effect, Effect::Play { .. }))
+                    {
+                        effects.insert(0, Effect::Stop);
+                    }
+                    effects
+                }
+            },
             Message::EngineFailed(error) => {
                 match self.status {
                     Status::Playing | Status::Paused => self.status = Status::Stopped,
@@ -622,6 +789,15 @@ impl Playback {
                 self.allow_explicit = allow;
                 vec![]
             }
+            Message::Autoplay(on) => {
+                self.autoplay = on;
+                vec![]
+            }
+            Message::Gapless(on) => {
+                self.gapless = on;
+                vec![]
+            }
+            Message::RadioArrived(id, radio) => self.radio_arrived(id, radio),
             Message::WithoutExplicit(pending) => match *pending.0 {
                 // Moving on skips them.
                 message @ Message::Start(_) => self.apply(message),
@@ -702,6 +878,18 @@ impl Playback {
         self.listening.current.as_ref().map(|entry| &entry.track)
     }
 
+    /// False only while a track from a Track radio Autoplay started plays.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "play reporting (ticket 34) sends it")
+    )]
+    pub fn chosen_by_user(&self) -> bool {
+        self.listening
+            .current
+            .as_ref()
+            .is_none_or(|entry| entry.chosen)
+    }
+
     /// Where the current track comes from.
     pub fn playing_from(&self) -> Option<&Source> {
         self.listening
@@ -728,11 +916,7 @@ impl Playback {
         expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
     )]
     pub fn upcoming(&self) -> impl Iterator<Item = &Track> {
-        self.listening.source.iter().flat_map(|play| {
-            play.order[play.next..]
-                .iter()
-                .map(|&index| &play.tracks[index])
-        })
+        self.listening.source.iter().flat_map(SourcePlay::rest)
     }
 
     /// The tracks already played, oldest first.
@@ -766,6 +950,14 @@ impl Playback {
 
     pub fn allow_explicit(&self) -> bool {
         self.allow_explicit
+    }
+
+    pub fn autoplay(&self) -> bool {
+        self.autoplay
+    }
+
+    pub fn gapless(&self) -> bool {
+        self.gapless
     }
 
     fn start(&mut self, request: PlayRequest) -> Vec<Effect> {
@@ -808,6 +1000,8 @@ impl Playback {
             next: 0,
             shuffled,
             fill,
+            round: None,
+            autoplay: false,
         });
         let Some(mut effects) = self.move_on(before) else {
             self.nothing_moved();
@@ -831,13 +1025,15 @@ impl Playback {
         }
         self.rollback = None;
         self.position = 0.0;
-        match self.status {
+        let mut effects = match self.status {
             Status::Stopped => vec![],
             _ => {
                 self.status = Status::Stopped;
                 vec![Effect::Stop]
             }
-        }
+        };
+        effects.extend(self.await_radio());
+        effects
     }
 
     /// The track into the Manual queue: at the front for Play next, else
@@ -848,6 +1044,7 @@ impl Playback {
             track,
             from: Arc::new(tag),
             step: None,
+            chosen: true,
         };
         if self.listening.current.is_none() {
             let before = self.listening.clone();
@@ -912,23 +1109,23 @@ impl Playback {
     }
 
     /// Put the current track in History and make what comes next current:
-    /// the head of the Manual queue, the next step of the play order, or
-    /// under Repeat all the first step of a new round. False, with nothing
-    /// changed, when nothing comes next.
+    /// the head of the Manual queue, the next step of the play order, under
+    /// Repeat all the first step of a new round, or with Autoplay the first
+    /// track of the Track radio. False, with nothing changed, when nothing
+    /// comes next.
     fn advance(&mut self) -> bool {
         if let Some(entry) = self.listening.manual.pop_front() {
             self.retire_current();
             self.listening.current = Some(entry);
             return true;
         }
-        let Some(play) = &self.listening.source else {
-            return false;
-        };
-        if play.next == play.order.len() {
-            if self.repeat != Repeat::All || play.tracks.is_empty() {
+        let source = self.listening.source.as_ref();
+        if source.is_none_or(SourcePlay::ran_out) {
+            if self.repeat == Repeat::All && source.is_some_and(|play| !play.tracks.is_empty()) {
+                self.start_over();
+            } else if !self.start_radio() {
                 return false;
             }
-            self.start_over();
         }
         self.retire_current();
         let id = self.stamp_entry();
@@ -945,8 +1142,291 @@ impl Playback {
                 play: play.play,
                 index,
             }),
+            chosen: !play.autoplay,
         });
         true
+    }
+
+    /// The track playing ended: replay it under Repeat one, or move on.
+    /// With nothing to move on to, it stays current, stopped.
+    fn finished(&mut self) -> Vec<Effect> {
+        // The finished track is what a failed next one rolls back to.
+        self.status = Status::Stopped;
+        self.position = 0.0;
+        let blocked = self.current().is_some_and(|track| self.blocked(track));
+        if self.repeat == Repeat::One && !blocked {
+            self.snapshot();
+            return self.play(None);
+        }
+        let before = self.listening.clone();
+        self.snapshot();
+        self.move_on(before).unwrap_or_else(|| {
+            self.rollback = None;
+            self.await_radio()
+        })
+    }
+
+    /// The engine moved on to what was armed: it's current and playing.
+    fn advanced(&mut self, armed: Armed) -> Vec<Effect> {
+        if armed.upcoming != Upcoming::Again {
+            self.advance();
+            if let Some(entry) = &mut self.listening.current {
+                entry.id = armed.entry;
+            }
+        }
+        self.status = Status::Playing;
+        self.position = 0.0;
+        self.rollback = None;
+        self.failures = 0;
+        vec![]
+    }
+
+    /// Whether Autoplay may follow the end of the source: it's on, Repeat
+    /// is off, and no fill is still reading the source.
+    fn autoplays(&self) -> bool {
+        self.autoplay
+            && self.repeat == Repeat::Off
+            && self
+                .listening
+                .source
+                .as_ref()
+                .is_none_or(|play| play.fill.is_none())
+    }
+
+    /// Autoplay: the Track radio fetched for the last track to play becomes
+    /// the Playback source. False when there's none.
+    fn start_radio(&mut self) -> bool {
+        if !self.autoplays() {
+            return false;
+        }
+        let listening = &self.listening;
+        let Some(last) = listening.current.as_ref().or(listening.history.back()) else {
+            return false;
+        };
+        let last = last.id;
+        let Some(fetch) = self.radio.as_mut().filter(|fetch| fetch.after == last) else {
+            return false;
+        };
+        // Started once: a rollback past it doesn't bring it back, so moving
+        // on again stops.
+        let radio = match std::mem::replace(&mut fetch.state, RadioState::Spent) {
+            RadioState::Ready(radio) => radio,
+            state => {
+                fetch.state = state;
+                return false;
+            }
+        };
+        let play = self.stamp_play();
+        self.listening.source = Some(SourcePlay {
+            play,
+            source: Arc::new(radio.source),
+            order: (0..radio.tracks.len()).collect(),
+            tracks: Arc::new(radio.tracks),
+            next: 0,
+            shuffled: false,
+            fill: None,
+            round: None,
+            autoplay: true,
+        });
+        true
+    }
+
+    /// Nothing is left to play. With Autoplay, wait for the current track's
+    /// Track radio, asking for it if nothing has.
+    fn await_radio(&mut self) -> Vec<Effect> {
+        if !self.autoplays() {
+            return vec![];
+        }
+        let Some(current) = &self.listening.current else {
+            return vec![];
+        };
+        if let Some(fetch) = self
+            .radio
+            .as_mut()
+            .filter(|fetch| fetch.after == current.id)
+        {
+            // A radio that's ready but didn't start had nothing to play.
+            fetch.waiting = matches!(fetch.state, RadioState::Fetching);
+            return vec![];
+        }
+        let (after, track) = (current.id, current.track.clone());
+        vec![self.fetch_radio(after, track, true)]
+    }
+
+    /// Fetch `track`'s Track radio, for the entry `after`, replacing any
+    /// other fetch.
+    fn fetch_radio(&mut self, after: EntryId, track: Track, waiting: bool) -> Effect {
+        self.next_radio += 1;
+        let id = RadioId(self.next_radio);
+        self.radio = Some(RadioFetch {
+            id,
+            after,
+            state: RadioState::Fetching,
+            waiting,
+        });
+        Effect::FetchTrackRadio { radio: id, track }
+    }
+
+    /// Keep what the radio has that hasn't played, and play it if playback
+    /// was waiting for it.
+    fn radio_arrived(&mut self, id: RadioId, radio: Option<Radio>) -> Vec<Effect> {
+        let listening = &self.listening;
+        let played: HashSet<u64> = listening
+            .current
+            .iter()
+            .chain(&listening.history)
+            .map(|entry| entry.track.id)
+            .collect();
+        let Some(fetch) = self.radio.as_mut().filter(|fetch| fetch.id == id) else {
+            return vec![];
+        };
+        fetch.state = match radio {
+            Some(mut radio) => {
+                radio.tracks.retain(|track| !played.contains(&track.id));
+                if radio.tracks.is_empty() {
+                    RadioState::Spent
+                } else {
+                    RadioState::Ready(radio)
+                }
+            }
+            None => RadioState::Spent,
+        };
+        if !std::mem::take(&mut fetch.waiting) {
+            return vec![];
+        }
+        let before = self.listening.clone();
+        self.snapshot();
+        self.move_on(before).unwrap_or_else(|| {
+            self.rollback = None;
+            vec![]
+        })
+    }
+
+    /// What moving on would make current, unless it would be skipped: what
+    /// can be armed.
+    fn what_follows(&self) -> Option<(Upcoming, &Track)> {
+        let listening = &self.listening;
+        let current = listening.current.as_ref()?;
+        let source = listening.source.as_ref();
+        let (upcoming, track) = if self.repeat == Repeat::One && !self.blocked(&current.track) {
+            (Upcoming::Again, &current.track)
+        } else if let Some(entry) = listening.manual.front() {
+            (Upcoming::Queued(entry.id), &entry.track)
+        } else if let Some(play) = source.filter(|play| !play.ran_out()) {
+            let step = Step {
+                play: play.play,
+                index: play.next,
+            };
+            (Upcoming::Step(step), &play.tracks[play.order[play.next]])
+        } else if self.repeat == Repeat::All
+            && let Some(play) = source
+            && !play.tracks.is_empty()
+        {
+            let round = play.round.as_ref()?;
+            (Upcoming::NewRound(play.play), &play.tracks[round[0]])
+        } else if self.autoplays()
+            && let Some(fetch) = &self.radio
+            && fetch.after == current.id
+            && let RadioState::Ready(radio) = &fetch.state
+        {
+            (Upcoming::Radio(fetch.id), &radio.tracks[0])
+        } else {
+            return None;
+        };
+        (track.available && !self.blocked(track)).then_some((upcoming, track))
+    }
+
+    /// Ahead of what comes next: fetch the Track radio once the last track
+    /// plays, and arm what follows the current track, or clear what no
+    /// longer does. The engine holds an armed track only while it plays or
+    /// is paused: it lets go of it when it stops, ends a track or starts
+    /// another.
+    fn prepare(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if !matches!(self.status, Status::Playing | Status::Paused) {
+            self.armed = None;
+            return effects;
+        }
+        let listening = &self.listening;
+        // Nothing left that will play: the rest would all be skipped.
+        let last = listening
+            .manual
+            .iter()
+            .map(|entry| &entry.track)
+            .chain(listening.source.iter().flat_map(SourcePlay::rest))
+            .all(|track| !track.available || self.blocked(track));
+        if self.autoplays()
+            && last
+            && let Some(current) = &listening.current
+            && self
+                .radio
+                .as_ref()
+                .is_none_or(|fetch| fetch.after != current.id)
+        {
+            let (after, track) = (current.id, current.track.clone());
+            effects.push(self.fetch_radio(after, track, false));
+        }
+        if self.repeat == Repeat::All
+            && let Some(play) = &mut self.listening.source
+            && play.ran_out()
+            && play.round.is_none()
+        {
+            play.round = Some(round_order(play.tracks.len(), self.shuffle, &mut self.rng));
+        }
+        let next = self
+            .what_follows()
+            .filter(|_| self.gapless)
+            .map(|(upcoming, track)| (upcoming, track.id));
+        match (next, &self.armed) {
+            (Some((upcoming, track_id)), Some(armed))
+                if armed.upcoming == upcoming && armed.track_id == track_id => {}
+            (Some((upcoming, track_id)), _) => {
+                let entry = match upcoming {
+                    Upcoming::Queued(entry) => entry,
+                    _ => self.stamp_entry(),
+                };
+                let album_gain = self.album_gain_of(upcoming);
+                self.armed = Some(Armed {
+                    upcoming,
+                    entry,
+                    track_id,
+                });
+                effects.push(Effect::ArmNext {
+                    entry,
+                    track_id,
+                    album_gain,
+                });
+            }
+            (None, Some(_)) => {
+                self.armed = None;
+                effects.push(Effect::ClearNext);
+            }
+            (None, None) => {}
+        }
+        effects
+    }
+
+    /// Whether `upcoming` gets album gain once it plays, as
+    /// [`Self::album_gain`] will say then.
+    fn album_gain_of(&self, upcoming: Upcoming) -> bool {
+        let album = |shuffled: bool| {
+            self.listening
+                .source
+                .as_ref()
+                .is_some_and(|play| matches!(play.source.kind, SourceRef::Album(_)) && !shuffled)
+        };
+        let source = self.listening.source.as_ref();
+        match upcoming {
+            Upcoming::Again => self.album_gain(),
+            Upcoming::Queued(_) | Upcoming::Radio(_) => false,
+            Upcoming::Step(_) => album(source.is_some_and(|play| play.shuffled)),
+            Upcoming::NewRound(_) => album(self.shuffle),
+        }
+    }
+
+    /// An explicit track while they aren't allowed.
+    fn blocked(&self, track: &Track) -> bool {
+        track.explicit && !self.allow_explicit
     }
 
     /// Move on, and play what comes next that can. When nothing can, the
@@ -969,7 +1449,7 @@ impl Playback {
     fn play_or_skip(&mut self) -> Option<Vec<Effect>> {
         loop {
             let track = &self.listening.current.as_ref()?.track;
-            let blocked = track.explicit && !self.allow_explicit;
+            let blocked = self.blocked(track);
             if !blocked && track.available {
                 return Some(self.play(None));
             }
@@ -1020,10 +1500,10 @@ impl Playback {
             return;
         };
         play.play = round;
-        play.order = (0..play.tracks.len()).collect();
-        if self.shuffle {
-            play.order.shuffle(&mut self.rng);
-        }
+        play.order = match play.round.take() {
+            Some(order) if order.len() == play.tracks.len() => order,
+            _ => round_order(play.tracks.len(), self.shuffle, &mut self.rng),
+        };
         play.shuffled = self.shuffle;
         play.next = 0;
     }
