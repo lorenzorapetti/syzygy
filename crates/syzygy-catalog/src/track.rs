@@ -1,11 +1,12 @@
 //! A track as a list row draws it, with what it links to.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use syzygy_tidal::models::{TidalArtist, TidalTrack};
 
 use crate::home_feed::Cover;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
     pub id: u64,
     /// The title with its version, as "Song (Live)".
@@ -28,14 +29,14 @@ pub struct Track {
 }
 
 /// An artist a track or album credits.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtistRef {
     pub id: u64,
     pub name: String,
 }
 
 /// The album a track is on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlbumRef {
     pub id: u64,
     pub title: String,

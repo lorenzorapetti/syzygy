@@ -13,7 +13,8 @@ const KEYRING_ENTRY: &str = "master-key";
 /// Where syzygy keeps its files.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// `<config_dir>/syzygy`: settings, Session, the fallback key file.
+    /// `<config_dir>/syzygy`: settings, Session, the queue, the fallback key
+    /// file.
     pub config_dir: PathBuf,
     /// `<cache_dir>/syzygy/catalog`: the disk cache of Catalog reads.
     pub catalog_cache_dir: PathBuf,
@@ -45,6 +46,12 @@ impl Paths {
     /// The Session: tokens, Login method, user id, country.
     pub fn session_file(&self) -> PathBuf {
         self.config_dir.join("session.json")
+    }
+
+    /// Where listening is: the queue, History, the current track and the
+    /// position.
+    pub fn queue_file(&self) -> PathBuf {
+        self.config_dir.join("queue.json")
     }
 
     /// The master key: the OS keyring first, then a 0600 key file.

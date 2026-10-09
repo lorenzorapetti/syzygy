@@ -56,6 +56,9 @@ pub struct App {
     /// The fill reading the rest of the Playback source. It outlives the
     /// Page that started the play; replacing it aborts it.
     fill_task: Option<task::Handle>,
+    /// A snapshot save is waiting out [`SNAPSHOT_DELAY`], and will save
+    /// whatever playback is by then.
+    snapshot_due: bool,
     /// What animations count their seconds from, and the last frame.
     epoch: Instant,
     frame: Instant,
@@ -107,10 +110,14 @@ pub enum Message {
     Tidal(syzygy_tidal::Event),
     /// The background account refresh.
     SessionInfo(Result<SessionInfo, Arc<syzygy_tidal::Error>>),
+    /// Save where listening is, now that the delay after the first ask is
+    /// over.
+    SaveSnapshot,
     /// The window was asked to close.
     Quit,
     SettingsSaved(Result<(), Arc<syzygy_store::Error>>),
     SessionSaved(Result<(), Arc<syzygy_store::Error>>),
+    SnapshotSaved(Result<(), Arc<syzygy_store::Error>>),
 }
 
 pub fn boot(paths: Paths) -> (State, Task<Message>) {
@@ -163,6 +170,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         play_task: None,
         arm_task: None,
         fill_task: None,
+        snapshot_due: false,
         epoch: Instant::now(),
         frame: Instant::now(),
         phase: Phase::Login(Box::default()),
@@ -178,8 +186,9 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
                 session.country_code.clone(),
             );
             app.session = Some(session);
+            let restore = app.restore_snapshot();
             let shell = app.open_shell();
-            Task::batch([shell, app.refresh_session_info()])
+            Task::batch([restore, shell, app.refresh_session_info()])
         }
         None => Task::none(),
     };
@@ -268,7 +277,12 @@ pub fn theme(_state: &State) -> Theme {
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Quit => self.save_settings().chain(iced::exit()),
+            Message::Quit => {
+                // The position isn't saved as it moves: take it now.
+                let position = self.services.position.get();
+                let tick = self.update_playback(playback::Message::Position(position));
+                Task::batch([tick, self.save_settings(), self.save_snapshot()]).chain(iced::exit())
+            }
             Message::Login(message) => {
                 let Phase::Login(login) = &mut self.phase else {
                     return Task::none();
@@ -375,6 +389,16 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SaveSnapshot => {
+                self.snapshot_due = false;
+                self.save_snapshot()
+            }
+            Message::SnapshotSaved(result) => {
+                if let Err(e) = result {
+                    log::error!("Failed to save the queue: {e}");
+                }
+                Task::none()
+            }
         }
     }
 
@@ -391,16 +415,20 @@ impl App {
 
     fn update_playback(&mut self, message: playback::Message) -> Task<Message> {
         match self.playback.update(message) {
-            playback::Outcome::Effects(effects) => Task::batch(
-                effects
-                    .into_iter()
-                    .map(|effect| self.run_playback(effect))
-                    .collect::<Vec<_>>(),
-            ),
+            playback::Outcome::Effects(effects) => self.run_playback_all(effects),
             playback::Outcome::NeedsExplicitConsent(pending) => {
                 self.in_shell(|shell, _, _| shell.ask_explicit_consent(pending))
             }
         }
+    }
+
+    fn run_playback_all(&mut self, effects: Vec<playback::Effect>) -> Task<Message> {
+        Task::batch(
+            effects
+                .into_iter()
+                .map(|effect| self.run_playback(effect))
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// Turn what playback asks for into calls on the engine.
@@ -552,6 +580,14 @@ impl App {
                 })
             }
             playback::Effect::Notify(notice) => self.in_shell(|shell, _, _| shell.notify(notice)),
+            // One save for whatever changes while it waits.
+            playback::Effect::SaveSnapshot if self.snapshot_due => Task::none(),
+            playback::Effect::SaveSnapshot => {
+                self.snapshot_due = true;
+                Task::perform(tokio::time::sleep(SNAPSHOT_DELAY), |()| {
+                    Message::SaveSnapshot
+                })
+            }
         }
     }
 
@@ -630,6 +666,48 @@ impl App {
         )
     }
 
+    /// Write where listening is, encrypted, off the UI thread. Not while
+    /// signed out: nothing was restored then, and the saved queue waits
+    /// for the next sign-in.
+    fn save_snapshot(&self) -> Task<Message> {
+        if self.session.is_none() {
+            return Task::none();
+        }
+        let services = self.services.clone();
+        Task::perform(
+            persist::write_json(
+                services.store,
+                services.paths.queue_file(),
+                self.playback.to_snapshot(),
+            ),
+            Message::SnapshotSaved,
+        )
+    }
+
+    /// Pick up listening where the last launch left it, stopped. An
+    /// unreadable file starts afresh: the next save replaces it.
+    fn restore_snapshot(&mut self) -> Task<Message> {
+        // Signing in again within one run keeps what's there.
+        if self.playback.current().is_some() {
+            return Task::none();
+        }
+        let path = self.services.paths.queue_file();
+        let snapshot = match self.services.store.read_json(&path) {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                log::warn!("Could not read {}, starting afresh: {e}", path.display());
+                None
+            }
+        };
+        match snapshot {
+            Some(snapshot) => {
+                let effects = self.playback.restore(snapshot);
+                self.run_playback_all(effects)
+            }
+            None => Task::none(),
+        }
+    }
+
     fn save_session(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
@@ -679,6 +757,7 @@ impl App {
             country_code: None,
         });
         Task::batch([
+            self.restore_snapshot(),
             self.open_shell(),
             self.save_session(),
             self.refresh_session_info(),
@@ -759,6 +838,8 @@ impl App {
     }
 }
 
+/// How long a snapshot save waits, gathering whatever else changes.
+const SNAPSHOT_DELAY: Duration = Duration::from_secs(2);
 /// How often the position is read while playing.
 const TICK: Duration = Duration::from_millis(250);
 /// How many more times a play tries a busy audio device, and how long it

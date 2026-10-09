@@ -6,8 +6,8 @@
 
 **Status:** ready-for-agent
 
-- [ ] `queue.json` (in `syzygy-store`, encrypted, with no fallback store) holds the source (tracks, play order, cursor, unfinished fill), the Manual queue, History, the current track and the position
-- [ ] It is saved through `Effect::SaveSnapshot`, debounced about 2 s, and again on Quit
-- [ ] Restore comes back paused at the saved position, and an unfinished fill restarts. Play while Stopped with a current track plays from the stored position
-- [ ] Shuffle, Repeat mode, Autoplay, volume and allow-explicit come from `Settings`
-- [ ] A Seam 1 test round-trips save and restore
+- [x] `queue.json` (in `syzygy-store`, encrypted, with no fallback store) holds the source (tracks, play order, cursor, unfinished fill), the Manual queue, History, the current track and the position
+- [x] It is saved through `Effect::SaveSnapshot`, debounced about 2 s, and again on Quit
+- [x] Restore comes back paused at the saved position, and an unfinished fill restarts. Play while Stopped with a current track plays from the stored position
+- [x] Shuffle, Repeat mode, Autoplay, volume and allow-explicit come from `Settings`
+- [x] A Seam 1 test round-trips save and restore

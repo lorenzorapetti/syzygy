@@ -29,6 +29,9 @@
 //! skipped, is armed in the engine so it follows with no gap. The engine
 //! says when it took over ([`Message::TrackAdvanced`]), and playback moves
 //! on to it without playing anything.
+//!
+//! Whatever changes where listening is asks for it to be saved
+//! ([`Effect::SaveSnapshot`]), and the next launch restores it stopped.
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -39,6 +42,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
 
+mod snapshot;
 #[cfg(test)]
 mod tests;
 
@@ -256,7 +260,7 @@ struct Armed {
     track_id: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct Step {
     play: u64,
     index: usize,
@@ -270,14 +274,14 @@ struct Rollback {
 }
 
 /// The Playback source: what it is, and its name for "Playing from".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub kind: SourceRef,
     pub name: String,
 }
 
 /// What playback is working through.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceRef {
     Album(u64),
     /// In the order it was sorted in, or else its own.
@@ -314,7 +318,7 @@ pub struct PlayRequest {
 /// Where the unread rest of a source starts: plain data, so a fill can be
 /// started again from it. A sorted source's sort is part of `source`, so
 /// the rest comes in the same order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Continuation {
     pub source: SourceRef,
     /// How many of its tracks have been read.
@@ -473,6 +477,39 @@ fn chooses_explicit(message: &Message) -> bool {
     }
 }
 
+/// Whether `message` may change what a snapshot saves. Position ticks
+/// don't: the position is saved with whatever else changes, and on Quit.
+/// Preferences are `Settings`'.
+fn changes_listening(message: &Message) -> bool {
+    match message {
+        Message::Start(_)
+        | Message::TogglePlay
+        | Message::Next
+        | Message::Previous
+        | Message::PlayNext(..)
+        | Message::AddToQueue(..)
+        | Message::ToggleShuffle
+        | Message::Seek(_)
+        | Message::Played(..)
+        | Message::Resume(_)
+        | Message::TrackFinished
+        | Message::TrackAdvanced(_)
+        | Message::EngineFailed(_)
+        | Message::PageArrived(..)
+        | Message::FillEnded(_)
+        | Message::RadioArrived(..)
+        | Message::WithoutExplicit(_) => true,
+        Message::Position(_)
+        | Message::DeviceBusy(_)
+        | Message::SetVolume(_)
+        | Message::ToggleMute
+        | Message::CycleRepeat
+        | Message::AllowExplicit(_)
+        | Message::Autoplay(_)
+        | Message::Gapless(_) => false,
+    }
+}
+
 /// Why a play failed.
 #[derive(Debug, Clone)]
 pub enum PlayError {
@@ -539,6 +576,8 @@ pub enum Effect {
     },
     /// Tell the user.
     Notify(Notice),
+    /// Where listening is changed: save [`Playback::to_snapshot`] soon.
+    SaveSnapshot,
 }
 
 /// What playback tells the user.
@@ -587,8 +626,12 @@ impl Playback {
         if !self.allow_explicit && chooses_explicit(&message) {
             return Outcome::NeedsExplicitConsent(Pending(Box::new(message)));
         }
+        let saves = changes_listening(&message);
         let mut effects = self.apply(message);
         effects.extend(self.prepare());
+        if saves {
+            effects.push(Effect::SaveSnapshot);
+        }
         Outcome::Effects(effects)
     }
 

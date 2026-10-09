@@ -23,10 +23,14 @@ fn track(id: u64) -> Track {
 }
 
 impl Playback {
-    /// Send a message that mustn't need consent, for its effects.
+    /// Send a message that mustn't need consent, for its effects. Asks to
+    /// save the snapshot are left out: [`saves`] checks those.
     fn send(&mut self, message: Message) -> Vec<Effect> {
         match self.update(message) {
-            Outcome::Effects(effects) => effects,
+            Outcome::Effects(mut effects) => {
+                effects.retain(|effect| *effect != Effect::SaveSnapshot);
+                effects
+            }
             Outcome::NeedsExplicitConsent(pending) => {
                 panic!("expected effects, got a consent question for {pending:?}")
             }
@@ -2485,4 +2489,192 @@ fn autoplay_fetches_the_radio_early_when_the_rest_would_all_be_skipped() {
 
     assert_eq!(plays(&effects), 501);
     assert_eq!(history(&playback), vec![101]);
+}
+
+// Session restore.
+
+/// What `playback` saves, written out and read back into a new Playback, as
+/// at the next launch, and what restoring it asked for.
+fn relaunched(playback: &Playback) -> (Playback, Vec<Effect>) {
+    let json = serde_json::to_vec(&playback.to_snapshot()).unwrap();
+    let mut restored = new(1.0);
+    let effects = restored.restore(serde_json::from_slice(&json).unwrap());
+    (restored, effects)
+}
+
+/// Whether `message` asks for the snapshot to be saved.
+fn saves(playback: &mut Playback, message: Message) -> bool {
+    match playback.update(message) {
+        Outcome::Effects(effects) => effects.contains(&Effect::SaveSnapshot),
+        Outcome::NeedsExplicitConsent(_) => false,
+    }
+}
+
+#[test]
+fn a_restore_comes_back_paused_where_listening_left_off() {
+    let mut playback = playing(long_playlist(1, 5, Start::All));
+    and_play(&mut playback, Message::Next);
+    add(&mut playback, 901);
+    play_next(&mut playback, 902);
+    playback.send(Message::Position(42.0));
+
+    let (restored, _) = relaunched(&playback);
+
+    assert_eq!(restored.status(), Status::Stopped);
+    assert_eq!(current(&restored), Some(102));
+    assert_eq!(restored.position(), 42.0);
+    assert_eq!(ids(restored.upcoming()), vec![103, 104, 105]);
+    assert_eq!(queued(&restored), vec![902, 901]);
+    assert_eq!(history(&restored), vec![101]);
+    assert_eq!(playing_from(&restored), Some(playlist_ref(1)));
+}
+
+#[test]
+fn play_after_a_restore_starts_where_listening_left_off() {
+    let mut playback = playing(album(1, 3, 1));
+    playback.send(Message::Position(42.0));
+    let (mut restored, _) = relaunched(&playback);
+
+    let effects = restored.send(Message::TogglePlay);
+
+    assert_eq!(
+        effects,
+        vec![Effect::Play {
+            token: token(&effects),
+            track_id: 102,
+            from: Some(42.0),
+            album_gain: true,
+        }]
+    );
+}
+
+#[test]
+fn a_fill_that_hadnt_finished_starts_again_from_where_it_got_to() {
+    let mut playback = new(1.0);
+    let effects = and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::All)),
+    );
+    let (fill_id, _) = fill(&effects);
+    playback.send(Message::PageArrived(fill_id, page(1, 4, 5)));
+
+    let (mut restored, effects) = relaunched(&playback);
+
+    let (fill_id, continuation) = fill(&effects);
+    assert_eq!(
+        continuation,
+        Continuation {
+            source: playlist_ref(1),
+            offset: 5,
+        }
+    );
+    restored.send(Message::PageArrived(fill_id, page(1, 6, 6)));
+    assert_eq!(ids(restored.upcoming()), vec![102, 103, 104, 105, 106]);
+}
+
+#[test]
+fn a_finished_fill_isnt_started_again() {
+    let mut playback = new(1.0);
+    let effects = and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::All)),
+    );
+    playback.send(Message::FillEnded(fill(&effects).0));
+
+    let (_, effects) = relaunched(&playback);
+
+    assert_eq!(effects, vec![]);
+}
+
+#[test]
+fn a_shuffled_order_comes_back_as_it_was() {
+    let request = request(SourceRef::Album(1), 1, 8, Start::All);
+    let mut playback = playing_with(shuffled(new(1.0)), request);
+    and_play(&mut playback, Message::Next);
+
+    let (mut restored, _) = relaunched(&playback);
+
+    assert_eq!(play_order(&restored), play_order(&playback));
+    // Still shuffled, so the album plays with track gain.
+    let effects = restored.send(Message::TogglePlay);
+    assert!(!album_gain(&effects));
+}
+
+#[test]
+fn previous_after_a_restore_steps_back_through_the_play_order() {
+    let mut playback = playing(album(1, 3, 0));
+    and_play(&mut playback, Message::Next);
+    let (mut restored, _) = relaunched(&playback);
+
+    let effects = restored.send(Message::Previous);
+
+    assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
+    assert_eq!(ids(restored.upcoming()), vec![102, 103]);
+    assert_eq!(queued(&restored), Vec::<u64>::new());
+}
+
+#[test]
+fn a_queued_entry_comes_back_under_its_tag() {
+    let mut playback = playing(album(1, 3, 0));
+    add(&mut playback, 901);
+    and_play(&mut playback, Message::Next);
+
+    let (restored, _) = relaunched(&playback);
+
+    assert_eq!(playing_from(&restored), Some(SourceRef::Album(9)));
+    assert_eq!(ids(restored.upcoming()), vec![102, 103]);
+}
+
+#[test]
+fn nothing_played_restores_nothing() {
+    let (restored, effects) = relaunched(&new(1.0));
+
+    assert_eq!(effects, vec![]);
+    assert_eq!(current(&restored), None);
+    assert_eq!(playing_from(&restored), None);
+}
+
+#[test]
+fn a_snapshot_whose_play_order_doesnt_fit_its_tracks_restores_no_source() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::Position(10.0));
+    let mut snapshot = playback.to_snapshot();
+    snapshot.source.as_mut().unwrap().order.push(7);
+
+    let mut restored = new(1.0);
+    restored.restore(snapshot);
+
+    assert_eq!(playing_from(&restored), Some(SourceRef::Album(1)));
+    assert_eq!(ids(restored.upcoming()), Vec::<u64>::new());
+    assert_eq!(current(&restored), Some(101), "the current track stays");
+}
+
+#[test]
+fn what_changes_listening_asks_for_a_save() {
+    let mut playback = new(1.0);
+    assert!(saves(&mut playback, Message::Start(album(1, 3, 0))));
+    let Status::Loading(loading) = playback.status() else {
+        unreachable!("the start is loading")
+    };
+    assert!(saves(&mut playback, played(loading)));
+    assert!(saves(&mut playback, Message::Next));
+    assert!(saves(
+        &mut playback,
+        Message::AddToQueue(track(901), tag(9))
+    ));
+    assert!(saves(&mut playback, Message::Seek(20.0)));
+    assert!(saves(&mut playback, Message::TogglePlay));
+}
+
+#[test]
+fn ticks_and_preferences_ask_for_no_save() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert!(!saves(&mut playback, Message::Position(5.0)));
+    assert!(!saves(&mut playback, Message::SetVolume(0.5)));
+    assert!(!saves(&mut playback, Message::ToggleMute));
+    assert!(!saves(&mut playback, Message::CycleRepeat));
+    assert!(!saves(&mut playback, Message::AllowExplicit(false)));
+    assert!(!saves(&mut playback, Message::Autoplay(true)));
+    assert!(!saves(&mut playback, Message::Gapless(false)));
 }
