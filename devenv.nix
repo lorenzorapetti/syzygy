@@ -4,15 +4,12 @@
   ...
 }: let
   # Loaded at runtime via dlopen by winit/wgpu, so they must be on LD_LIBRARY_PATH.
+  # Wayland only: iced is built without X11 (see the spec).
   runtimeLibs = with pkgs; [
     wayland
     libxkbcommon
     vulkan-loader
     libGL
-    xorg.libX11
-    xorg.libXcursor
-    xorg.libXi
-    xorg.libXrandr
   ];
 
   # The audio engine (syzygy-audio), as in sone's flake.

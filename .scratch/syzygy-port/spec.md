@@ -203,6 +203,7 @@ From the user's side, syzygy lets them:
 - `sone/` (upstream at `0488f97`) is a gitignored, read-only reference. Only the modules syzygy needs are copied. This is not a fork and has no upstream sync.
 - GPL-3.0, crediting sone (lullabyX).
 - Engine crates hardcode no app identity. The binary owns the identity constants (app name `syzygy`, app ID `com.lorenzorapetti.syzygy`, config and cache dirs under `syzygy`, MPRIS bus name `org.mpris.MediaPlayer2.syzygy` and identity `Syzygy`, keyring service `syzygy` / `master-key`) and passes them in.
+- Linux on Wayland only: iced is built without its `x11` feature, so there's no X11 or XWayland backend. The Wayland `application_id` (`com.lorenzorapetti.syzygy`) is what ties the window to its desktop file and icon.
 - iced 0.14.0 with features `tokio, image, svg, lazy, advanced`. iced owns the tokio runtime, so no `#[tokio::main]`. Context menus come from `iced_aw` 0.14.1.
 
 ### Crate responsibilities
