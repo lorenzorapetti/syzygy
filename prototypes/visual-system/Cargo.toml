@@ -1,0 +1,11 @@
+# PROTOTYPE — throwaway. Answers issue 09 (visual system). Not part of syzygy.
+[package]
+name = "prototype-visual-system"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio", "image", "svg", "lazy", "advanced"] }
+tokio = { version = "1", features = ["time", "rt"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

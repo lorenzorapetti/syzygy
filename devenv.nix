@@ -2,9 +2,7 @@
   pkgs,
   lib,
   ...
-}:
-
-let
+}: let
   # Loaded at runtime via dlopen by winit/wgpu, so they must be on LD_LIBRARY_PATH.
   runtimeLibs = with pkgs; [
     wayland
@@ -25,8 +23,7 @@ let
     gst-plugins-bad
     gst-libav
   ];
-in
-{
+in {
   # https://devenv.sh/languages/
   languages.rust = {
     enable = true;
@@ -40,8 +37,7 @@ in
   };
 
   # https://devenv.sh/packages/
-  packages =
-    with pkgs;
+  packages = with pkgs;
     [
       git
       pkg-config
@@ -50,6 +46,7 @@ in
       openssl
       fontconfig
       freetype
+      python3
       gst_all_1.gstreamer.dev
       gst_all_1.gst-plugins-base.dev
     ]
