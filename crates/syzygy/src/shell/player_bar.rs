@@ -204,7 +204,7 @@ fn now_playing<'a>(
     let (Some(track), Some(source)) = (playback.current(), playback.playing_from()) else {
         return space().into();
     };
-    let route = page::source_route(source, track);
+    let route = page::source_route(playback, source, track);
     let from = row![
         text("Playing from").size(10).color(style::TEXT_DISABLED),
         match route.clone() {

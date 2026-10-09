@@ -11,7 +11,7 @@ use super::paged::List;
 use super::track_list::{self, Columns};
 use super::{
     Action, Context, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, Viewport, count,
-    duration, header_actions, hero, play_buttons,
+    duration, header_actions, hero, menu, play_buttons,
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
@@ -225,6 +225,15 @@ impl State {
         }
     }
 
+    /// An edit of the playlist landed: what it is is read again. Its
+    /// tracks stay as they are.
+    pub fn refresh(&mut self, tags: &[String]) -> Action {
+        if !tags.contains(&syzygy_catalog::playlist_tag(&self.uuid)) {
+            return Action::None;
+        }
+        Action::Load(Load::Playlist(self.uuid.clone()))
+    }
+
     fn is_own(&self) -> bool {
         self.playlist
             .loaded()
@@ -240,7 +249,7 @@ impl State {
         allow_explicit: bool,
     ) -> Element<'a, Message> {
         let hero = match (&self.playlist, &self.preview) {
-            (Remote::Loaded(playlist), _) => Some(self.hero(playlist, images)),
+            (Remote::Loaded(playlist), _) => Some(self.hero(library.playlist(playlist), images)),
             (Remote::Loading, Some(preview)) => {
                 Some(hero::preview(images, "PLAYLIST", preview, false))
             }
@@ -261,16 +270,22 @@ impl State {
             Message::Play,
             Message::TogglePlay,
         );
-        // An Own playlist isn't a Favorite: it has no heart.
+        // An Own playlist isn't a Favorite: it has no heart, and its menu
+        // edits and deletes it.
         let actions = self.playlist.loaded().map(|playlist| {
+            let playlist = library.playlist(playlist);
             let card = Card {
                 title: playlist.title.clone(),
                 subtitle: String::new(),
                 cover: playlist.cover.clone(),
                 target: Target::Playlist(self.uuid.clone()),
             };
-            let favorite = (!self.is_own()).then(|| Favorite::playlist(playlist));
-            header_actions(card, favorite, library).map(Message::Link)
+            if self.is_own() {
+                let playlist = playlist.clone();
+                return menu::more(move || menu::own_playlist(&card, &playlist)).map(Message::Link);
+            }
+            let favorite = Favorite::playlist(playlist);
+            header_actions(card, Some(favorite), library).map(Message::Link)
         });
         let filter = row![buttons]
             .push(actions)

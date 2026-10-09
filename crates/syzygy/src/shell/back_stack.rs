@@ -42,6 +42,13 @@ impl BackStack {
         Some(entry)
     }
 
+    /// Take the entries for the routes `gone` says are gone out of both
+    /// stacks.
+    pub fn remove(&mut self, gone: impl Fn(&Route) -> bool) {
+        self.back.retain(|entry| !gone(&entry.route));
+        self.forward.retain(|entry| !gone(&entry.route));
+    }
+
     pub fn can_go_back(&self) -> bool {
         !self.back.is_empty()
     }

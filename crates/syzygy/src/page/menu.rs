@@ -10,12 +10,12 @@ use iced::{
     Alignment, Border, Color, Element, Event, Length, Rectangle, Shadow, Size, Theme, Vector,
 };
 use iced_aw::ContextMenu;
-use syzygy_catalog::Track;
 use syzygy_catalog::home_feed::{Card, Target};
+use syzygy_catalog::{Playlist, Track};
 
 use super::{Link, Preview, Route, cards};
 use crate::icons::{Icon, filled, icon};
-use crate::library::Favorite;
+use crate::library::{Ask, Favorite};
 use crate::style;
 
 const WIDTH: f32 = 240.0;
@@ -141,6 +141,27 @@ pub fn card(card: &Card, liked: Option<bool>) -> Vec<Vec<Item>> {
     // its rows.
     let like = like.filter(|_| !matches!(card.target, Target::Track(_)));
     std::iter::once(playing(card)).chain(like).collect()
+}
+
+/// An Own playlist's menu: playing it, editing it and deleting it. It
+/// isn't a Favorite, so it has no like.
+pub fn own_playlist(card: &Card, playlist: &Playlist) -> Vec<Vec<Item>> {
+    let ask = |ask| Some(Link::Ask(Box::new(ask)));
+    vec![
+        playing(card),
+        vec![
+            Item::new(
+                Icon::Pencil,
+                "Edit playlist",
+                ask(Ask::EditPlaylist(playlist.clone())),
+            ),
+            Item::new(
+                Icon::Trash2,
+                "Delete playlist",
+                ask(Ask::DeletePlaylist(playlist.clone())),
+            ),
+        ],
+    ]
 }
 
 /// Play now, Play next and Add to queue, for all of what a card leads to.

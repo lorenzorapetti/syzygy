@@ -819,7 +819,7 @@ impl Drawer {
                 let source = playback.source();
                 let route = source
                     .zip(playback.current())
-                    .and_then(|(source, track)| page::source_route(source, track));
+                    .and_then(|(source, track)| page::source_route(playback, source, track));
                 let label: Element<'a, Message> = match (source, route) {
                     (Some(source), Some(route)) => row![
                         title("NEXT UP FROM".to_string()),

@@ -9,7 +9,7 @@ use crate::home_feed::Cover;
 use crate::paged::Paged;
 use crate::track::Track;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Playlist {
     pub uuid: String,
     pub title: String,
@@ -20,6 +20,10 @@ pub struct Playlist {
     pub videos: u32,
     /// In seconds.
     pub duration: u32,
+    /// Anyone can find it. Otherwise it's unlisted: only its link leads
+    /// to it.
+    #[serde(default)]
+    pub public: bool,
 }
 
 /// Who made a playlist. TIDAL's own playlists have no id, or id 0.
@@ -71,7 +75,97 @@ pub(crate) fn from_details(details: &Value) -> Option<Playlist> {
         tracks: playlist.number_of_tracks.unwrap_or(0),
         videos: playlist.number_of_videos.unwrap_or(0),
         duration: playlist.duration.unwrap_or(0),
+        public: playlist.access_type.as_deref() == Some("PUBLIC"),
     })
+}
+
+/// What the user sets on an Own playlist: its title, its description
+/// (at most [`DESCRIPTION_LIMIT`] characters) and who can find it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaylistFields {
+    pub title: String,
+    pub description: String,
+    pub public: bool,
+}
+
+/// The most characters a playlist's description has.
+pub const DESCRIPTION_LIMIT: usize = 500;
+
+impl PlaylistFields {
+    /// A new playlist's: unlisted until the user says otherwise.
+    pub fn new() -> Self {
+        Self {
+            title: String::new(),
+            description: String::new(),
+            public: false,
+        }
+    }
+
+    /// What `playlist` has now.
+    pub fn of(playlist: &Playlist) -> Self {
+        Self {
+            title: playlist.title.clone(),
+            description: playlist.description.clone().unwrap_or_default(),
+            public: playlist.public,
+        }
+    }
+
+    /// TIDAL's `accessType`.
+    pub(crate) fn access(&self) -> &'static str {
+        if self.public { "PUBLIC" } else { "UNLISTED" }
+    }
+
+    /// The title and description trimmed, the description cut to its
+    /// limit.
+    pub fn trimmed(&self) -> Self {
+        Self {
+            title: self.title.trim().to_string(),
+            description: self
+                .description
+                .trim()
+                .chars()
+                .take(DESCRIPTION_LIMIT)
+                .collect(),
+            public: self.public,
+        }
+    }
+
+    /// `playlist` with these set on it.
+    pub fn applied(&self, playlist: &Playlist) -> Playlist {
+        let fields = self.trimmed();
+        Playlist {
+            title: fields.title,
+            description: Some(fields.description).filter(|d| !d.is_empty()),
+            public: fields.public,
+            ..playlist.clone()
+        }
+    }
+
+    /// The Own playlist of `user_id` these make, empty, under `uuid`.
+    pub fn playlist(&self, uuid: String, user_id: u64) -> Playlist {
+        let empty = Playlist {
+            uuid,
+            title: String::new(),
+            description: None,
+            cover: None,
+            creator: Some(Creator {
+                id: Some(user_id),
+                name: None,
+                user: true,
+            }),
+            tracks: 0,
+            videos: 0,
+            duration: 0,
+            public: false,
+        };
+        self.applied(&empty)
+    }
+}
+
+impl Default for PlaylistFields {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The order a playlist's tracks are read in, applied by TIDAL. No sort is
@@ -234,6 +328,57 @@ mod tests {
             (playlist.tracks, playlist.videos, playlist.duration),
             (12, 1, 3000)
         );
+    }
+
+    #[test]
+    fn a_playlist_is_public_only_when_tidal_says_so() {
+        let public = |flag: Value| {
+            from_details(&json!({ "uuid": "u", "title": "T", "publicPlaylist": flag }))
+                .unwrap()
+                .public
+        };
+
+        assert!(public(json!(true)));
+        assert!(!public(json!(false)));
+        assert!(!public(Value::Null));
+    }
+
+    #[test]
+    fn a_new_playlist_is_unlisted() {
+        let fields = PlaylistFields::new();
+
+        assert!(!fields.public);
+        assert!(!fields.playlist("u-1".to_string(), 7).public);
+    }
+
+    #[test]
+    fn a_description_is_cut_to_500_characters() {
+        let fields = PlaylistFields {
+            title: "  Mine ".to_string(),
+            description: "é".repeat(600),
+            public: true,
+        };
+
+        let trimmed = fields.trimmed();
+
+        assert_eq!(trimmed.title, "Mine");
+        assert_eq!(trimmed.description.chars().count(), DESCRIPTION_LIMIT);
+        assert!(trimmed.public);
+    }
+
+    #[test]
+    fn a_made_playlist_is_the_users_own_and_empty() {
+        let fields = PlaylistFields {
+            title: "Mine".to_string(),
+            description: " ".to_string(),
+            public: false,
+        };
+
+        let playlist = fields.playlist("u-1".to_string(), 7);
+
+        assert!(playlist.is_own(Some(7)));
+        assert_eq!((playlist.title.as_str(), playlist.tracks), ("Mine", 0));
+        assert_eq!(playlist.description, None);
     }
 
     #[test]

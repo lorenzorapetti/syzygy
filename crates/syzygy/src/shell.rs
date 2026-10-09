@@ -4,6 +4,7 @@
 
 mod back_stack;
 mod consent;
+mod dialog;
 pub mod drawer;
 mod maximized;
 mod play_card;
@@ -37,6 +38,7 @@ use crate::radio;
 use crate::settings::{Settings, Sort};
 use crate::style;
 use back_stack::{BackStack, Entry};
+use dialog::Dialog;
 use drawer::Drawer;
 use player_bar::PlayerBar;
 use search::Search;
@@ -84,6 +86,8 @@ pub struct Shell {
     consent: Option<playback::Pending>,
     /// The Settings modal, while it's open. Never on the Back stack.
     settings: Option<SettingsModal>,
+    /// The Library's dialog, while one is open.
+    dialog: Option<Dialog>,
     /// The user's Library: their Favorites, their root playlists and
     /// Folders, and their pending edits.
     library: Library,
@@ -111,6 +115,7 @@ pub enum Message {
     /// The header's settings button.
     OpenSettings,
     Settings(settings_modal::Message),
+    Dialog(dialog::Message),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
@@ -164,6 +169,7 @@ impl Shell {
             radio_read: None,
             consent: None,
             settings: None,
+            dialog: None,
             library,
         };
         let task = shell.run_action(action, services, context);
@@ -272,6 +278,7 @@ impl Shell {
             Message::Escape => {
                 let closed = self.consent.take().is_some()
                     || self.settings.take().is_some()
+                    || self.dialog.take().is_some()
                     || std::mem::take(&mut self.maximized)
                     || self.drawer.close();
                 if !closed {
@@ -314,6 +321,19 @@ impl Shell {
                     .and_then(|modal| modal.update(message))
                 {
                     return Task::done(message);
+                }
+            }
+            Message::Dialog(message) => {
+                let Some(dialog) = &mut self.dialog else {
+                    return Task::none();
+                };
+                match dialog.update(message) {
+                    dialog::Outcome::None => {}
+                    dialog::Outcome::Close => self.dialog = None,
+                    dialog::Outcome::Library(message) => {
+                        self.dialog = None;
+                        return self.update_library(*message, services, context);
+                    }
                 }
             }
             Message::Sidebar(message) => {
@@ -444,6 +464,7 @@ impl Shell {
         self.drawer.close();
         self.maximized = false;
         self.settings = None;
+        self.dialog = None;
     }
 
     /// Playback chose explicit tracks while they aren't allowed: ask.
@@ -685,11 +706,28 @@ impl Shell {
         let mut tasks = Vec::new();
         for effect in effects {
             let task = match effect {
-                library::Effect::Mutate(edit, library::Mutation::Favorite { user_id, id, on }) => {
-                    Task::perform(
-                        services.catalog.set_favorite(user_id, id, on),
-                        move |result| to_library(library::Message::Done(edit, result)),
-                    )
+                library::Effect::Mutate(edit, mutation) => {
+                    let done = move |result| to_library(library::Message::Done(edit, result));
+                    match mutation {
+                        library::Mutation::Favorite { user_id, id, on } => {
+                            Task::perform(services.catalog.set_favorite(user_id, id, on), done)
+                        }
+                        library::Mutation::CreatePlaylist { user_id, fields } => Task::perform(
+                            services.catalog.create_playlist(user_id, fields),
+                            move |result| to_library(library::Message::Created(edit, result)),
+                        ),
+                        library::Mutation::UpdatePlaylist {
+                            user_id,
+                            uuid,
+                            fields,
+                        } => Task::perform(
+                            services.catalog.update_playlist(user_id, &uuid, fields),
+                            done,
+                        ),
+                        library::Mutation::DeletePlaylist { user_id, uuid } => {
+                            Task::perform(services.catalog.delete_playlist(user_id, &uuid), done)
+                        }
+                    }
                 }
                 library::Effect::ReadFavorites { user_id, stamp } => {
                     Task::run(services.catalog.favorite_ids(user_id), move |read| {
@@ -706,10 +744,39 @@ impl Shell {
                     Task::batch(reads)
                 }
                 library::Effect::Toast(text) => self.toast(Kind::Error, text),
+                library::Effect::Ask(ask) => {
+                    self.dialog = Some(Dialog::new(ask, &self.library));
+                    Task::none()
+                }
+                library::Effect::Deleted(uuid) => self.playlist_deleted(&uuid, services, context),
+                library::Effect::SourceDeleted(source) => Task::done(app::Message::Playback(
+                    playback::Message::SourceDeleted(source),
+                )),
             };
             tasks.push(task);
         }
         Task::batch(tasks)
+    }
+
+    /// A playlist is gone: its Pages leave back and forward, and if it's
+    /// on screen, Home takes its place.
+    fn playlist_deleted(
+        &mut self,
+        uuid: &str,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let shows =
+            |route: &Route| matches!(route, Route::Playlist { uuid: shown, .. } if shown == uuid);
+        self.back_stack.remove(shows);
+        if !shows(&self.current.route) {
+            return Task::none();
+        }
+        let home = Entry {
+            route: Route::home(),
+            offset: 0.0,
+        };
+        self.open(home, services, context)
     }
 
     fn run_drawer(
@@ -949,16 +1016,21 @@ impl Shell {
             .then(|| maximized::view(&self.player_bar, playback, images))
             .flatten()
             .map(|view| view.map(|message| app::Message::Shell(Message::Maximized(message))));
-        let modal = match (&self.consent, &self.settings) {
-            (Some(_), _) => {
+        let modal = match (&self.consent, &self.settings, &self.dialog) {
+            (Some(_), _, _) => {
                 Some(consent::view().map(|answer| app::Message::Shell(Message::Consent(answer))))
             }
-            (None, Some(modal)) => Some(
+            (None, Some(modal), _) => Some(
                 modal
                     .view(settings, playback)
                     .map(|message| app::Message::Shell(Message::Settings(message))),
             ),
-            (None, None) => None,
+            (None, None, Some(dialog)) => Some(
+                dialog
+                    .view()
+                    .map(|message| app::Message::Shell(Message::Dialog(message))),
+            ),
+            (None, None, None) => None,
         };
         let toasts = self
             .toasts

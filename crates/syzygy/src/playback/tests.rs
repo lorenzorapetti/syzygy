@@ -3,6 +3,7 @@
 use super::*;
 use rand::SeedableRng;
 use syzygy_catalog::track::ArtistRef;
+use syzygy_catalog::{Direction, TrackOrder};
 
 fn track(id: u64) -> Track {
     Track {
@@ -3967,4 +3968,92 @@ fn a_play_that_fails_reports_the_track_before_it_again() {
         reports(&mut playback, resolve_failed(token(&effects))),
         vec![started(101, report::Source::Album(1), true)]
     );
+}
+
+#[test]
+fn a_deleted_source_stops_its_fill_and_plays_on_with_what_has_loaded() {
+    let mut playback = new(1.0);
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::Track(0))),
+    ));
+    playback.send(Message::PageArrived(fill_id, page(1, 4, 5)));
+
+    let effects = playback.send(Message::SourceDeleted(playlist_ref(1)));
+
+    assert_eq!(unarmed(effects), vec![Effect::CancelFill]);
+    assert_eq!(play_order(&playback), (101..=105).collect::<Vec<_>>());
+    assert_eq!(playback.status(), Status::Playing);
+    // A page the fill read before it was cancelled is dropped.
+    playback.send(Message::PageArrived(fill_id, page(1, 6, 7)));
+    assert_eq!(play_order(&playback), (101..=105).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_sorted_playlist_is_deleted_whatever_its_sort() {
+    let sorted = SourceRef::Playlist {
+        uuid: "playlist-1".to_string(),
+        sort: Some(TrackSort {
+            order: TrackOrder::Title,
+            direction: Direction::Descending,
+        }),
+    };
+    let mut playback = playing(PlayRequest {
+        continuation: Some(Continuation {
+            source: sorted.clone(),
+            offset: 3,
+        }),
+        ..request(sorted, 1, 3, Start::All)
+    });
+
+    let effects = playback.send(Message::SourceDeleted(playlist_ref(1)));
+
+    assert_eq!(unarmed(effects), vec![Effect::CancelFill]);
+}
+
+#[test]
+fn another_playlists_deletion_leaves_playback_alone() {
+    let mut playback = playing(long_playlist(1, 3, Start::All));
+
+    let effects = playback.send(Message::SourceDeleted(playlist_ref(2)));
+
+    assert_eq!(effects, vec![]);
+    assert!(!playback.is_deleted(&playlist_ref(1)));
+}
+
+#[test]
+fn repeat_all_starts_a_deleted_source_over_with_what_had_loaded() {
+    let mut playback = repeating(Repeat::All);
+    and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 2, Start::Track(0))),
+    );
+    playback.send(Message::SourceDeleted(playlist_ref(1)));
+    and_play(&mut playback, Message::TrackFinished);
+
+    let effects = playback.send(Message::TrackFinished);
+
+    assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
+    assert_eq!(play_order(&playback), vec![101, 102]);
+}
+
+#[test]
+fn playing_from_a_deleted_source_keeps_its_name_but_leads_nowhere() {
+    let mut playback = playing(playlist(1, 3, Start::All));
+
+    playback.send(Message::SourceDeleted(playlist_ref(1)));
+
+    let from = playback.playing_from().unwrap();
+    assert_eq!(from.name, format!("{:?}", playlist_ref(1)));
+    assert!(playback.is_deleted(&from.kind));
+}
+
+#[test]
+fn a_reset_forgets_the_deleted_playlists() {
+    let mut playback = playing(playlist(1, 3, Start::All));
+    playback.send(Message::SourceDeleted(playlist_ref(1)));
+
+    playback.send(Message::Reset);
+
+    assert!(!playback.is_deleted(&playlist_ref(1)));
 }

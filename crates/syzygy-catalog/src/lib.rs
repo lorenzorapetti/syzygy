@@ -45,7 +45,7 @@ pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
 pub use lyrics::Lyrics;
 pub use mix::Mix;
 pub use paged::Paged;
-pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
+pub use playlist::{Direction, Playlist, PlaylistFields, TrackOrder, TrackSort};
 pub use profile::Profile;
 pub use search::{Hit, SearchResults, Suggestion, Suggestions};
 pub use swr::Read;
@@ -479,6 +479,68 @@ impl Catalog {
         }
     }
 
+    /// Make an Own playlist for `user_id`, empty. The user's lists are
+    /// stale after.
+    pub fn create_playlist(
+        &self,
+        user_id: u64,
+        fields: PlaylistFields,
+    ) -> impl Future<Output = Result<Playlist, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        async move {
+            let fields = fields.trimmed();
+            let made = tidal
+                .create_playlist(&fields.title, &fields.description, fields.access())
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            cache.invalidate_tag(&favorites::user_tag(user_id)).await;
+            Ok(fields.playlist(made.uuid, user_id))
+        }
+    }
+
+    /// Set an Own playlist's title, description and access. Its reads and
+    /// the user's lists are stale after.
+    pub fn update_playlist(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        fields: PlaylistFields,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let fields = fields.trimmed();
+            tidal
+                .update_playlist(&uuid, &fields.title, &fields.description, fields.access())
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Delete an Own playlist. Its reads and the user's lists are stale
+    /// after.
+    pub fn delete_playlist(
+        &self,
+        user_id: u64,
+        uuid: &str,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .delete_playlist(&uuid)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
     /// One track, to play on its own. Not cached: it's read once per play.
     pub fn track(
         &self,
@@ -678,7 +740,18 @@ fn artist_or_album_tags(kind: &str, id: u64) -> Vec<String> {
 
 /// The tags of a playlist's reads.
 fn playlist_tags(uuid: &str) -> Vec<String> {
-    vec!["playlist".to_string(), format!("playlist:{uuid}")]
+    vec!["playlist".to_string(), playlist_tag(uuid)]
+}
+
+/// The tag of one playlist's own reads: what an edit of it invalidates.
+pub fn playlist_tag(uuid: &str) -> String {
+    format!("playlist:{uuid}")
+}
+
+/// A playlist changed: its own reads, and every list of the user's.
+async fn invalidate_playlist(cache: &DiskCache, user_id: u64, uuid: &str) {
+    cache.invalidate_tag(&playlist_tag(uuid)).await;
+    cache.invalidate_tag(&favorites::user_tag(user_id)).await;
 }
 
 /// `PAGE_SIZE` of a playlist's tracks from `offset`, sorted by TIDAL.

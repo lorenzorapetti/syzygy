@@ -34,7 +34,7 @@ use syzygy_catalog::{Album, Artist, Kind, Mix, Read, Shelf, Track, TrackSort};
 use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
 use crate::library::{Favorite, Library};
-use crate::playback::{Continuation, PlayRequest, Source, SourceRef, Start};
+use crate::playback::{Continuation, PlayRequest, Playback, Source, SourceRef, Start};
 use crate::settings::{Settings, Sort};
 use crate::style;
 
@@ -356,6 +356,8 @@ pub enum Link {
     },
     /// A heart, or a menu's like: like (`true`) or unlike.
     Favorite(Box<Favorite>, bool),
+    /// Open one of the Library's dialogs.
+    Ask(Box<crate::library::Ask>),
 }
 
 impl Link {
@@ -372,6 +374,7 @@ impl Link {
             Link::Favorite(favorite, on) => {
                 Action::Library(crate::library::Message::Favorite(*favorite, on))
             }
+            Link::Ask(ask) => Action::Library(crate::library::Message::Ask(*ask)),
         }
     }
 }
@@ -488,6 +491,7 @@ impl Page {
         match self {
             Page::Library(state) => state.refresh(tags),
             Page::Favorites(state) => state.refresh(tags),
+            Page::Playlist(state) => state.refresh(tags),
             _ => Action::None,
         }
     }
@@ -916,8 +920,11 @@ pub fn with_rest(mut request: PlayRequest, more: bool) -> PlayRequest {
 }
 
 /// Where "Playing from" leads: the source's Page, or for a track played on
-/// its own, its album's.
-pub fn source_route(source: &Source, track: &Track) -> Option<Route> {
+/// its own, its album's. Nowhere once the user has deleted the source.
+pub fn source_route(playback: &Playback, source: &Source, track: &Track) -> Option<Route> {
+    if playback.is_deleted(&source.kind) {
+        return None;
+    }
     let preview = || {
         Some(Preview {
             title: source.name.clone(),

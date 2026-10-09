@@ -6,10 +6,12 @@ use std::sync::Arc;
 use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::library::Item;
 use syzygy_catalog::{
-    Direction, FavoriteId, FavoriteIds, Kind, LibraryOrder, LibrarySort, Read, Shelf, Track,
+    Direction, FavoriteId, FavoriteIds, Kind, LibraryOrder, LibrarySort, Playlist, PlaylistFields,
+    Read, Shelf, Track,
 };
 
 use super::*;
+use crate::playback::SourceRef;
 use crate::settings::Settings;
 
 const USER: u64 = 7;
@@ -444,4 +446,305 @@ fn a_like_goes_only_into_lists_of_its_kind_at_the_top_level() {
     };
     assert_eq!(shelf_titles(&library, &[], &root), vec!["p-1"]);
     assert_eq!(shelf_titles(&library, &[], &folder), Vec::<String>::new());
+}
+
+// Own playlists: create, edit and delete.
+
+fn own(uuid: &str, title: &str) -> Playlist {
+    PlaylistFields {
+        title: title.to_string(),
+        description: String::new(),
+        public: false,
+    }
+    .playlist(uuid.to_string(), USER)
+}
+
+fn fields(title: &str) -> PlaylistFields {
+    PlaylistFields {
+        title: title.to_string(),
+        ..PlaylistFields::new()
+    }
+}
+
+fn root_shelf() -> Shelf {
+    Shelf {
+        kind: Kind::Playlists,
+        ..albums_shelf()
+    }
+}
+
+/// The root playlists as the user sees them, by title.
+fn root_titles(library: &Library, server: &[Item]) -> Vec<String> {
+    shelf_titles(library, server, &root_shelf())
+}
+
+fn playlists(server: &[Playlist]) -> Vec<Item> {
+    server.iter().cloned().map(Item::Playlist).collect()
+}
+
+fn source_deleted(effects: &[Effect]) -> Vec<SourceRef> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::SourceDeleted(source) => Some(source.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_new_playlist_shows_first_straight_away_and_cant_be_opened_yet() {
+    let mut library = library(&[], &[]);
+    let server = playlists(&[own("p-1", "Old")]);
+
+    let effects = library.update(Message::CreatePlaylist(fields("New")));
+
+    assert_eq!(root_titles(&library, &server), vec!["New", "Old"]);
+    let shown = library.apply(&server, Listing::Shelf(&root_shelf()));
+    let Item::Playlist(placeholder) = shown[0] else {
+        panic!("a playlist");
+    };
+    assert!(is_placeholder(placeholder));
+    let (_, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::CreatePlaylist {
+            user_id: USER,
+            fields: fields("New"),
+        }
+    );
+}
+
+#[test]
+fn a_made_playlist_is_the_one_tidal_made_until_a_later_read_lists_it() {
+    let mut library = library(&[], &[]);
+    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"))));
+
+    let effects = library.update(Message::Created(id, Ok(own("p-9", "New"))));
+
+    assert!(effects.contains(&Effect::Refresh(vec!["folders".to_string()])));
+    let shown = library.apply::<Item>(&[], Listing::Shelf(&root_shelf()));
+    let [Item::Playlist(made)] = shown.as_slice() else {
+        panic!("one playlist, not {shown:?}");
+    };
+    assert_eq!(made.uuid, "p-9");
+    assert!(!is_placeholder(made));
+
+    let after = library.start_read();
+    library.update(Message::Fresh(after, root_shelf().tags()));
+    assert_eq!(root_titles(&library, &[]), Vec::<String>::new());
+}
+
+#[test]
+fn a_new_playlist_goes_only_to_the_top_level_of_the_playlists() {
+    let mut library = library(&[], &[]);
+    library.update(Message::CreatePlaylist(fields("New")));
+
+    let folder = Shelf {
+        folder: Some("f-1".to_string()),
+        ..root_shelf()
+    };
+    assert_eq!(shelf_titles(&library, &[], &folder), Vec::<String>::new());
+    assert_eq!(
+        shelf_titles(&library, &[], &albums_shelf()),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_playlist_tidal_wont_make_goes_away_with_a_toast() {
+    let mut library = library(&[], &[]);
+    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"))));
+
+    let effects = library.update(Message::Created(id, Err(failure())));
+
+    assert_eq!(root_titles(&library, &[]), Vec::<String>::new());
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't create \u{201c}New\u{201d}"]
+    );
+}
+
+#[test]
+fn an_edit_shows_straight_away_where_the_playlist_is() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Old");
+    let server = playlists(&[own("p-0", "Other"), playlist.clone()]);
+
+    let effects = library.update(Message::EditPlaylist(playlist.clone(), fields("New")));
+
+    assert_eq!(root_titles(&library, &server), vec!["Other", "New"]);
+    assert_eq!(library.playlist(&playlist).title, "New");
+    let (_, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::UpdatePlaylist {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            fields: fields("New"),
+        }
+    );
+}
+
+#[test]
+fn a_refused_edit_puts_the_playlist_back_as_it_was() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Old");
+    let effects = library.update(Message::EditPlaylist(playlist.clone(), fields("New")));
+    let (id, _) = mutation(&effects);
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(root_titles(&library, &playlists(&[playlist])), vec!["Old"]);
+    assert_eq!(toasts(&effects), vec!["Couldn't save \u{201c}New\u{201d}"]);
+}
+
+#[test]
+fn a_landed_edit_reads_the_playlist_and_the_lists_again() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Old");
+    let (id, _) = mutation(&library.update(Message::EditPlaylist(playlist, fields("New"))));
+
+    let effects = library.update(Message::Done(id, Ok(())));
+
+    assert!(effects.contains(&Effect::Refresh(vec![
+        "folders".to_string(),
+        "playlist:p-1".to_string(),
+    ])));
+}
+
+#[test]
+fn only_own_playlists_are_edited_or_deleted() {
+    let mut library = library(&[], &[]);
+    let theirs = PlaylistFields::new().playlist("p-1".to_string(), USER + 1);
+
+    assert!(
+        library
+            .update(Message::Ask(Ask::EditPlaylist(theirs.clone())))
+            .is_empty()
+    );
+    assert!(
+        library
+            .update(Message::EditPlaylist(theirs.clone(), fields("New")))
+            .is_empty()
+    );
+    assert!(
+        library
+            .update(Message::DeletePlaylist(theirs.clone()))
+            .is_empty()
+    );
+    assert!(
+        library
+            .update(Message::Ask(Ask::DeletePlaylist(theirs)))
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_dialogs_open_for_own_playlists() {
+    let mut library = library(&[], &[]);
+    let mine = own("p-1", "Mine");
+
+    assert_eq!(
+        library.update(Message::Ask(Ask::NewPlaylist)),
+        vec![Effect::Ask(Ask::NewPlaylist)]
+    );
+    assert_eq!(
+        library.update(Message::Ask(Ask::DeletePlaylist(mine.clone()))),
+        vec![Effect::Ask(Ask::DeletePlaylist(mine))]
+    );
+}
+
+#[test]
+fn a_placeholder_cant_be_edited_or_deleted() {
+    let mut library = library(&[], &[]);
+    library.update(Message::CreatePlaylist(fields("New")));
+    let shown = library.apply::<Item>(&[], Listing::Shelf(&root_shelf()));
+    let Item::Playlist(placeholder) = shown[0].clone() else {
+        panic!("a playlist");
+    };
+
+    assert!(
+        library
+            .update(Message::DeletePlaylist(placeholder.clone()))
+            .is_empty()
+    );
+    assert!(
+        library
+            .update(Message::EditPlaylist(placeholder, fields("Other")))
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_deleted_playlist_is_gone_at_once_and_its_pages_with_it() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Mine");
+    let server = playlists(&[own("p-0", "Other"), playlist.clone()]);
+
+    let effects = library.update(Message::DeletePlaylist(playlist));
+
+    assert_eq!(root_titles(&library, &server), vec!["Other"]);
+    assert!(effects.contains(&Effect::Deleted("p-1".to_string())));
+    let (_, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::DeletePlaylist {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+        }
+    );
+    // Playback hears of it once TIDAL has deleted it.
+    assert!(source_deleted(&effects).is_empty());
+}
+
+#[test]
+fn source_deleted_goes_out_once_the_playlist_is_deleted() {
+    let mut library = library(&[], &[]);
+    let (id, _) = mutation(&library.update(Message::DeletePlaylist(own("p-1", "Mine"))));
+
+    let effects = library.update(Message::Done(id, Ok(())));
+
+    assert_eq!(
+        source_deleted(&effects),
+        vec![SourceRef::Playlist {
+            uuid: "p-1".to_string(),
+            sort: None,
+        }]
+    );
+    assert!(effects.contains(&Effect::Refresh(vec![
+        "folders".to_string(),
+        "playlist:p-1".to_string(),
+    ])));
+}
+
+#[test]
+fn a_refused_deletion_brings_the_playlist_back_and_leaves_playback_alone() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Mine");
+    let (id, _) = mutation(&library.update(Message::DeletePlaylist(playlist.clone())));
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(root_titles(&library, &playlists(&[playlist])), vec!["Mine"]);
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't delete \u{201c}Mine\u{201d}"]
+    );
+    assert!(source_deleted(&effects).is_empty());
+}
+
+#[test]
+fn a_deletion_waits_for_an_edit_of_the_same_playlist() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Mine");
+    let (edit, _) =
+        mutation(&library.update(Message::EditPlaylist(playlist.clone(), fields("New"))));
+
+    let effects = library.update(Message::DeletePlaylist(playlist));
+    assert_eq!(mutations(&effects), 0);
+
+    let effects = library.update(Message::Done(edit, Ok(())));
+    let (_, next) = mutation(&effects);
+    assert!(matches!(next, Mutation::DeletePlaylist { .. }));
 }

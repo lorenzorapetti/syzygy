@@ -124,6 +124,8 @@ pub struct Playback {
     mpris: mpris::View,
     /// The track last reported playing or paused.
     reported: Option<reporting::Reported>,
+    /// Playlists the user deleted: "Playing from" no longer leads to them.
+    deleted: Vec<SourceRef>,
 }
 
 /// Where listening is: the source, the Manual queue, the current track and
@@ -426,6 +428,20 @@ pub enum SourceRef {
     Track(u64),
 }
 
+impl SourceRef {
+    /// Whether both are the same album, playlist and so on, whatever
+    /// order they're in.
+    pub fn same_place(&self, other: &SourceRef) -> bool {
+        match (self, other) {
+            (SourceRef::Playlist { uuid, .. }, SourceRef::Playlist { uuid: other, .. }) => {
+                uuid == other
+            }
+            (SourceRef::LovedTracks(_), SourceRef::LovedTracks(_)) => true,
+            _ => self == other,
+        }
+    }
+}
+
 /// How every play starts: the source, its tracks (all of them, or the first
 /// page of them) and where to start. Playback goes from there to the end
 /// of the source, never around to its start.
@@ -606,6 +622,9 @@ pub enum Message {
     Move(Entry, usize),
     /// Empty the Manual queue and what's left of the source.
     Clear,
+    /// The user deleted this playlist. Should it be the Playback source,
+    /// what has loaded plays on, Repeat all included, but no more is read.
+    SourceDeleted(SourceRef),
     /// Stop, and forget the source, the Manual queue, the current track
     /// and History, as the account they belong to leaves. Preferences
     /// stay.
@@ -682,7 +701,8 @@ fn changes_listening(message: &Message) -> bool {
         | Message::Pick(_)
         | Message::Remove(_)
         | Message::Move(..)
-        | Message::Clear => true,
+        | Message::Clear
+        | Message::SourceDeleted(_) => true,
         // What's on disk is the app's to keep or delete.
         Message::Reset
         | Message::Position(_)
@@ -830,6 +850,7 @@ impl Playback {
             next_radio: 0,
             mpris: mpris::View::default(),
             reported: None,
+            deleted: Vec::new(),
         };
         playback.mpris = playback.mpris_now();
         playback
@@ -1145,6 +1166,29 @@ impl Playback {
                 }
             }
             Message::Reset => self.reset(),
+            Message::SourceDeleted(deleted) => self.source_deleted(deleted),
+        }
+    }
+
+    /// A playlist is gone: stop reading the rest of it, should it be the
+    /// source, and keep "Playing from" from leading to it.
+    fn source_deleted(&mut self, deleted: SourceRef) -> Vec<Effect> {
+        let filling = self.fill_id();
+        let rollback = self.rollback.as_mut().map(|r| &mut r.listening);
+        let plays = std::iter::once(&mut self.listening)
+            .chain(rollback)
+            .filter_map(|listening| listening.source.as_mut())
+            .filter(|play| play.source.kind.same_place(&deleted));
+        for play in plays {
+            play.fill = None;
+        }
+        if !self.is_deleted(&deleted) {
+            self.deleted.push(deleted);
+        }
+        if filling.is_some() && self.fill_id().is_none() {
+            vec![Effect::CancelFill]
+        } else {
+            vec![]
         }
     }
 
@@ -1164,6 +1208,7 @@ impl Playback {
         self.rate_limited = None;
         self.radio = None;
         self.rollback = None;
+        self.deleted.clear();
         effects
     }
 
@@ -1375,6 +1420,14 @@ impl Playback {
             .history
             .iter()
             .map(|entry| (entry.id, &entry.track))
+    }
+
+    /// Whether the user deleted this playlist, so "Playing from" leads
+    /// nowhere.
+    pub fn is_deleted(&self, source: &SourceRef) -> bool {
+        self.deleted
+            .iter()
+            .any(|deleted| deleted.same_place(source))
     }
 
     /// The Playback source, which stays while a queued entry plays.

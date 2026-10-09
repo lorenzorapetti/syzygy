@@ -4,7 +4,7 @@
 //! switching replaces this Back stack entry rather than adding a step. Each
 //! type's order is applied by TIDAL and kept in `Settings`.
 
-use iced::widget::{Column, button, column, row, text};
+use iced::widget::{Column, button, column, row, space, text};
 use iced::{Alignment, Element};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use super::paged::List;
 use super::{Action, Context, Link, Load, PADDING, Preview, Route, cover, folder_art, menu};
 use crate::icons::{Icon, icon};
 use crate::images::Images;
-use crate::library::{Library, Listing};
+use crate::library::{Ask, Library, Listing, is_placeholder};
 use crate::settings::Sort;
 use crate::style;
 
@@ -188,8 +188,23 @@ impl State {
             .total()
             .map(|total| noun(self.kind, total))
             .unwrap_or_default();
+        let new_playlist = (self.kind == Kind::Playlists && self.folder.is_none()).then(|| {
+            button(
+                row![
+                    icon(Icon::Plus, 16.0, style::TEXT_PRIMARY),
+                    text("New playlist").size(14)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding([8, 16])
+            .style(style::pill_button)
+            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist))))
+        });
         let header = column![
-            text(title).size(32),
+            row![text(title).size(32), space::horizontal()]
+                .push(new_playlist)
+                .align_y(Alignment::Center),
             row![
                 text(total).size(14).color(style::TEXT_MUTED),
                 self.sort_picker()
@@ -287,12 +302,16 @@ pub fn tile<'a>(
             Some(Link::Open(folder_route(folder))),
         ),
         Item::Playlist(playlist) => {
+            let placeholder = is_placeholder(playlist);
             let tile = cards::tile(
                 cover(images, playlist.cover.as_ref(), CARD_WIDTH),
                 &playlist.title,
                 library::playlist_subtitle(playlist, user_id),
-                Some(Link::Open(playlist_route(playlist))),
+                (!placeholder).then(|| Link::Open(playlist_route(playlist))),
             );
+            if placeholder {
+                return tile;
+            }
             playlist_menu(tile, playlist, user_id, library)
         }
         Item::Card(card) => cards::card(card, images, library),
@@ -300,7 +319,8 @@ pub fn tile<'a>(
 }
 
 /// `underlay`, opening a playlist's card menu when right-clicked. An Own
-/// playlist isn't a Favorite: its menu has no like.
+/// playlist isn't a Favorite: its menu has no like, but edits and deletes
+/// it.
 pub fn playlist_menu<'a>(
     underlay: Element<'a, Link>,
     playlist: &Playlist,
@@ -309,7 +329,8 @@ pub fn playlist_menu<'a>(
 ) -> Element<'a, Link> {
     let card = playlist_card(playlist);
     if playlist.is_own(user_id) {
-        menu::with_menu(underlay, move || vec![menu::playing(&card)])
+        let playlist = playlist.clone();
+        menu::with_menu(underlay, move || menu::own_playlist(&card, &playlist))
     } else {
         let liked = cards::liked(&card, library);
         menu::with_menu(underlay, move || menu::card(&card, liked))

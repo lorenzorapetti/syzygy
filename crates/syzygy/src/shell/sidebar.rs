@@ -16,7 +16,7 @@ use syzygy_catalog::{Kind, LibrarySort, Paged, Read, Shelf};
 use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
 use crate::images::Images;
-use crate::library::{Library, Listing, Shelved};
+use crate::library::{Ask, Library, Listing, Shelved, is_placeholder};
 use crate::page::library::{folder_route, label, playlist_menu, playlist_route};
 use crate::page::paged::List;
 use crate::page::{Link, Remote, Route, cards, folder_art, loved_art, menu, rounded_cover};
@@ -271,10 +271,15 @@ impl Sidebar {
             .on_press(Message::Link(Link::Open(Route::Library {
                 kind: self.kind,
             })));
+        let new_playlist = button(icon(Icon::Plus, 16.0, style::TEXT_SECONDARY))
+            .padding(4)
+            .style(style::icon_button)
+            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist))));
         let header = row![
             icon(Icon::Library, 20.0, style::TEXT_SECONDARY),
             text("Your Library").size(13).color(style::TEXT_SECONDARY),
             space::horizontal(),
+            new_playlist,
             show_all,
         ]
         .spacing(12)
@@ -328,7 +333,7 @@ impl Sidebar {
                 loved_art(ART_SIZE, ART_RADIUS),
                 "Loved Tracks",
                 "Collection".to_string(),
-                Route::Favorites,
+                Some(Route::Favorites),
                 current,
             )
             .map(Message::Link)
@@ -374,7 +379,15 @@ impl Sidebar {
                 folder_art(ART_SIZE, ART_RADIUS),
                 &folder.name,
                 folder.subtitle(),
-                folder_route(folder),
+                Some(folder_route(folder)),
+                current,
+            ),
+            // A new playlist TIDAL hasn't made yet leads nowhere.
+            Item::Playlist(playlist) if is_placeholder(playlist) => entry(
+                art(None, ART_RADIUS),
+                &playlist.title,
+                library::playlist_subtitle(playlist, self.user_id),
+                None,
                 current,
             ),
             Item::Playlist(playlist) => {
@@ -382,7 +395,7 @@ impl Sidebar {
                     art(playlist.cover.as_ref(), ART_RADIUS),
                     &playlist.title,
                     library::playlist_subtitle(playlist, self.user_id),
-                    playlist_route(playlist),
+                    Some(playlist_route(playlist)),
                     current,
                 );
                 playlist_menu(row, playlist, self.user_id, library)
@@ -399,7 +412,7 @@ impl Sidebar {
                     art(card.cover.as_ref(), radius),
                     &card.title,
                     card.subtitle.clone(),
-                    route,
+                    Some(route),
                     current,
                 );
                 let liked = cards::liked(card, library);
@@ -447,7 +460,7 @@ fn entry<'a>(
     art: Element<'a, Link>,
     title: &'a str,
     subtitle: String,
-    route: Route,
+    route: Option<Route>,
     current: &Route,
 ) -> Element<'a, Link> {
     let line = |line: text::Text<'a>| {
@@ -460,12 +473,14 @@ fn entry<'a>(
         line(text(subtitle).size(12).color(style::TEXT_MUTED)),
     ]
     .spacing(2);
-    let here = same_place(&route, current);
+    let here = route
+        .as_ref()
+        .is_some_and(|route| same_place(route, current));
     button(row![art, words].spacing(10).align_y(Alignment::Center))
         .padding([6, 6])
         .width(Length::Fill)
         .style(item_style(here))
-        .on_press(Link::Open(route))
+        .on_press_maybe(route.map(Link::Open))
         .into()
 }
 
