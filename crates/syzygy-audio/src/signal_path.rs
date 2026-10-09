@@ -1,3 +1,6 @@
+// Copied from sone (https://github.com/lullabyX/sone) by lullabyX,
+// src-tauri/src/signal_path.rs at 0488f97. GPL-3.0-only.
+
 //! Signal path transparency tracker.
 //!
 //! Collects what is known at runtime about how audio flows from TIDAL to the

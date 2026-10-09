@@ -1,3 +1,6 @@
+// Copied from sone (https://github.com/lullabyX/sone) by lullabyX,
+// src-tauri/src/rate_gate.rs at 0488f97. GPL-3.0-only.
+
 //! Global cooldown after an upstream 429. Lock-free, and it never sleeps:
 //! waiting is always the caller's job.
 

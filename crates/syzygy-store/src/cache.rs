@@ -1,3 +1,6 @@
+// Copied from sone (https://github.com/lullabyX/sone) by lullabyX,
+// src-tauri/src/cache.rs at 0488f97. GPL-3.0-only.
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};

@@ -1,3 +1,6 @@
+// Copied from sone (https://github.com/lullabyX/sone) by lullabyX,
+// src-tauri/src/tidal_api.rs at 0488f97. GPL-3.0-only.
+
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

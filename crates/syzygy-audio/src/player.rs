@@ -1,3 +1,6 @@
+// Copied from sone (https://github.com/lullabyX/sone) by lullabyX,
+// src-tauri/src/audio.rs at 0488f97. GPL-3.0-only.
+
 //! sone's audio engine: a GStreamer pipeline (`Normal`) or GStreamer decoding
 //! into a direct ALSA writer (`DirectAlsa`, for exclusive and bit-perfect
 //! output), driven from one worker thread. Commands reply over a `oneshot`,

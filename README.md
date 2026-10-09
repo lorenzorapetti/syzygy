@@ -3,6 +3,11 @@
 A desktop TIDAL client written in Rust with [iced](https://iced.rs): explore
 TIDAL's Catalog, edit your Library, and play it with bit-perfect output.
 
+## 🚨 WARNING! Vibe coded slop ahead! 🚨
+
+This is only a vibe coded experiment. It is not a finished product, so expect bugs.
+Maybe in the future I can manually check the code and change stuff, but for now, I just don't have the time.
+
 ## Credits
 
 syzygy is a port of [sone](https://github.com/lullabyX/sone) by lullabyX. Its

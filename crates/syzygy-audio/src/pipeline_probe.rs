@@ -1,3 +1,6 @@
+// Copied from sone (https://github.com/lullabyX/sone) by lullabyX,
+// src-tauri/src/pipeline_probe.rs at 0488f97. GPL-3.0-only.
+
 //! Pipeline probe: gathers ground-truth info about the audio pipeline
 //! from /proc/asound (kernel hw_params) and pactl (OS mixer state).
 //! [`PipelineProbe::refresh`] does file reads and a `pactl` call, so it runs
