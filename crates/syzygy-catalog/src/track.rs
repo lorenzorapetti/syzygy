@@ -19,6 +19,9 @@ pub struct Track {
     pub volume: u32,
     /// When it was added to the playlist it's read from, as TIDAL sends it.
     pub date_added: Option<String>,
+    /// The id of its Track radio, when the list it came in says. Many
+    /// don't; reading the track on its own does.
+    pub track_radio: Option<String>,
 }
 
 /// An artist a track or album credits.
@@ -65,6 +68,12 @@ impl From<TidalTrack> for Track {
             explicit: track.explicit.unwrap_or(false),
             volume: track.volume_number.unwrap_or(1).max(1),
             date_added: track.date_added,
+            track_radio: track
+                .mixes
+                .as_ref()
+                .and_then(|mixes| mixes.get("TRACK_MIX"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
         }
     }
 }
@@ -90,5 +99,32 @@ pub(crate) fn with_version(title: String, version: Option<&str>) -> String {
     match version.map(str::trim).filter(|v| !v.is_empty()) {
         Some(version) if !title.contains(version) => format!("{title} ({version})"),
         _ => title,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_track_knows_its_track_radio_when_tidal_sends_it() {
+        let track = Track::from_value(&json!({
+            "id": 11,
+            "title": "Hunter",
+            "duration": 255,
+            "mixes": { "TRACK_MIX": "0123abc", "MASTER_TRACK_MIX": "0456def" },
+        }))
+        .expect("a track");
+
+        assert_eq!(track.track_radio.as_deref(), Some("0123abc"));
+    }
+
+    #[test]
+    fn a_track_without_mixes_has_no_track_radio_yet() {
+        let track = Track::from_value(&json!({ "id": 11, "title": "Hunter", "duration": 255 }))
+            .expect("a track");
+
+        assert_eq!(track.track_radio, None);
     }
 }

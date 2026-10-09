@@ -16,6 +16,7 @@ dirs.workspace = true
 flexi_logger.workspace = true
 futures.workspace = true
 iced.workspace = true
+iced_aw.workspace = true
 image.workspace = true
 log.workspace = true
 serde.workspace = true

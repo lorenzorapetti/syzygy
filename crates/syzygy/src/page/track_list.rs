@@ -8,7 +8,9 @@ use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 
-use super::{Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link};
+use super::{
+    Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link, track_menu,
+};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::style;
@@ -163,7 +165,8 @@ pub enum Mark {
 }
 
 /// One track: its number, the cover if the list shows covers, the title
-/// over its artists, the album if shown, and how long it is.
+/// over its artists, the album if shown, and how long it is. Right-clicked,
+/// it opens the track's menu.
 pub fn track<'a>(
     images: &'a Images,
     number: usize,
@@ -265,7 +268,8 @@ pub fn marked<'a>(
         )
         .spacing(16)
         .align_y(Alignment::Center);
-    container(line).padding([0, 16]).center_y(ROW_HEIGHT).into()
+    let row = container(line).padding([0, 16]).center_y(ROW_HEIGHT);
+    track_menu::with_menu(row.into(), track)
 }
 
 /// sone's playing indicator: three accent bars bouncing between 40% and
@@ -458,6 +462,7 @@ mod tests {
             explicit: false,
             volume: 1,
             date_added: None,
+            track_radio: None,
         }
     }
 

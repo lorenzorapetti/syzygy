@@ -502,6 +502,7 @@ mod tests {
             explicit: false,
             volume: 1,
             date_added: None,
+            track_radio: None,
         }
     }
 

@@ -21,6 +21,7 @@ pub mod profile;
 pub mod profile_playlists;
 pub mod search;
 mod track_list;
+mod track_menu;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
 use iced::{Alignment, Color, Element, Length, Task};
@@ -170,6 +171,14 @@ pub enum Action {
     Play(PlayRequest),
     /// Read what a card leads to, then play all of it.
     PlayCard(Card),
+    /// Put a track in the Manual queue: next, or at the end.
+    Queue {
+        track: Track,
+        next: bool,
+    },
+    /// Open the track's Track radio, reading the track first if the list
+    /// it came in didn't say which mix that is.
+    TrackRadio(Track),
     /// Pause or resume what's playing.
     TogglePlay,
     /// This Page now shows `route`, as after a tab switch: its Back stack
@@ -311,6 +320,10 @@ pub enum Link {
     Play(PlayRequest),
     /// A card's play button.
     PlayCard(Card),
+    /// A track's menu.
+    PlayNext(Track),
+    AddToQueue(Track),
+    TrackRadio(Track),
 }
 
 impl Link {
@@ -320,6 +333,9 @@ impl Link {
             Link::Open(route) => Action::Navigate(route),
             Link::Play(request) => Action::Play(request),
             Link::PlayCard(card) => Action::PlayCard(card),
+            Link::PlayNext(track) => Action::Queue { track, next: true },
+            Link::AddToQueue(track) => Action::Queue { track, next: false },
+            Link::TrackRadio(track) => Action::TrackRadio(track),
         }
     }
 }
@@ -692,6 +708,30 @@ pub fn single(track: &Track) -> PlayRequest {
         first_page: vec![track.clone()],
         start: Start::Track(0),
         continuation: None,
+    }
+}
+
+/// The Source tag of a track put in the Manual queue: its album, as in
+/// sone, or the track itself when it has none.
+pub fn queue_tag(track: &Track) -> Source {
+    match &track.album {
+        Some(album) => Source {
+            kind: SourceRef::Album(album.id),
+            name: album.title.clone(),
+        },
+        None => single(track).source,
+    }
+}
+
+/// Where a track's Track radio is, by its mix's id.
+pub fn track_radio_route(track: &Track, mix_id: String) -> Route {
+    Route::Mix {
+        id: mix_id,
+        preview: Some(Preview {
+            title: format!("{} Radio", track.title),
+            cover: track.album.as_ref().and_then(|album| album.cover.clone()),
+            artist: track.artists.first().map(|artist| artist.name.clone()),
+        }),
     }
 }
 

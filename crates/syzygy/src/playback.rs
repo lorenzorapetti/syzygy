@@ -9,6 +9,10 @@
 //! play order (indices into those tracks) and a cursor: the upcoming tracks
 //! are the play order after the cursor.
 //!
+//! The Manual queue is separate: Queue entries the user added, each with
+//! the Source tag "Playing from" shows while it plays. It plays before
+//! what's left of the source, and Shuffle never reorders it.
+//!
 //! A long source starts with the tracks a Page or card had and reads the
 //! rest in the background: a fill. Its pages join the play order as they
 //! arrive.
@@ -51,13 +55,17 @@ pub struct Playback {
     next_play: u64,
     /// Stamped on each fill, so pages for one that stopped are dropped.
     next_fill: u64,
+    /// Stamped on each Queue entry, so two copies of a track stay apart.
+    next_entry: u64,
 }
 
-/// Where listening is: the source, the current track and History.
-/// Snapshotted whole for a rollback.
+/// Where listening is: the source, the Manual queue, the current track and
+/// History. Snapshotted whole for a rollback.
 #[derive(Clone, Default)]
 struct Listening {
     source: Option<SourcePlay>,
+    /// Plays first to last, before what's left of the source.
+    manual: VecDeque<Item>,
     current: Option<Item>,
     /// Oldest first.
     history: VecDeque<Item>,
@@ -114,14 +122,20 @@ impl SourcePlay {
     }
 }
 
-/// A track that plays, played or is playing, and where it came from.
+/// A Queue entry: a track that plays, played or is playing, and where it
+/// came from, its Source tag for a Manual queue entry.
 #[derive(Clone)]
 struct Item {
+    id: EntryId,
     track: Track,
     from: Arc<Source>,
-    /// Its step in the play it came from.
+    /// Its step in the play it came from. None for a Manual queue entry.
     step: Option<Step>,
 }
+
+/// Each Queue entry's own, so the same track queued twice is two entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntryId(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Step {
@@ -244,6 +258,10 @@ pub enum Message {
     Next,
     /// Restart the track, or go back through History.
     Previous,
+    /// Put the track at the front of the Manual queue, under its Source tag.
+    PlayNext(Track, Source),
+    /// Put the track at the end of the Manual queue, under its Source tag.
+    AddToQueue(Track, Source),
     ToggleShuffle,
     /// Off, all, one, off.
     CycleRepeat,
@@ -326,6 +344,7 @@ impl Playback {
             next_token: 0,
             next_play: 0,
             next_fill: 0,
+            next_entry: 0,
         }
     }
 
@@ -350,6 +369,8 @@ impl Playback {
             },
             Message::Next => self.next(),
             Message::Previous => self.previous(),
+            Message::PlayNext(track, tag) => self.enqueue(track, tag, true),
+            Message::AddToQueue(track, tag) => self.enqueue(track, tag, false),
             Message::ToggleShuffle => {
                 self.shuffle = !self.shuffle;
                 if let Some(play) = &mut self.listening.source {
@@ -498,7 +519,19 @@ impl Playback {
             .map(|entry| entry.from.as_ref())
     }
 
-    /// What plays after the current track, in order.
+    /// The Manual queue, in the order it plays.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
+    )]
+    pub fn queued(&self) -> impl Iterator<Item = (EntryId, &Track)> {
+        self.listening
+            .manual
+            .iter()
+            .map(|entry| (entry.id, &entry.track))
+    }
+
+    /// What's left of the source after the Manual queue, in order.
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
@@ -558,6 +591,8 @@ impl Playback {
         }
         self.snapshot();
         self.retire_current();
+        // A new source starts afresh, as in sone.
+        self.listening.manual.clear();
         let filling = self.fill_id();
         let fill = request.continuation.map(|continuation| Fill {
             id: self.stamp_fill(),
@@ -599,10 +634,38 @@ impl Playback {
         }
     }
 
+    /// The track into the Manual queue: at the front for Play next, else
+    /// at the end. With nothing playing, it plays.
+    fn enqueue(&mut self, track: Track, tag: Source, next: bool) -> Vec<Effect> {
+        let entry = Item {
+            id: self.stamp_entry(),
+            track,
+            from: Arc::new(tag),
+            step: None,
+        };
+        if self.listening.current.is_none() {
+            self.snapshot();
+            self.listening.current = Some(entry);
+            return self.play(None);
+        }
+        // A play loading now may fail: what it rolls back to keeps the
+        // entry too.
+        let rollback = self.rollback.as_mut().map(|r| &mut r.listening.manual);
+        for manual in std::iter::once(&mut self.listening.manual).chain(rollback) {
+            if next {
+                manual.push_front(entry.clone());
+            } else {
+                manual.push_back(entry.clone());
+            }
+        }
+        vec![]
+    }
+
     /// Past 3 s in, or with nothing in History, restart the track.
-    /// Otherwise play the last track in History: a step back in the play
-    /// order when it's the step before, or else under its own source, with
-    /// the current track back at the head of what's upcoming.
+    /// Otherwise play the last track in History under its own tag. The
+    /// current track goes back to being upcoming: a step back in the play
+    /// order when it's the source's latest step, or else to the front of
+    /// the Manual queue.
     fn previous(&mut self) -> Vec<Effect> {
         if self.listening.current.is_none() {
             return vec![];
@@ -613,16 +676,18 @@ impl Playback {
         self.snapshot();
         let listening = &mut self.listening;
         let entry = listening.history.pop_back().expect("History isn't empty");
-        let current = listening.current.as_ref().and_then(|entry| entry.step);
-        if let Some(play) = &mut listening.source
-            && let Some(step) = current
-            && step.play == play.play
-            && step.index + 1 == play.next
-        {
-            // The current track goes back to being upcoming.
-            play.next = step.index;
+        let current = listening.current.replace(entry);
+        match (&mut listening.source, current) {
+            (Some(play), Some(current))
+                if current
+                    .step
+                    .is_some_and(|step| step.play == play.play && step.index + 1 == play.next) =>
+            {
+                play.next -= 1;
+            }
+            (_, Some(current)) => listening.manual.push_front(current),
+            (_, None) => {}
         }
-        listening.current = Some(entry);
         self.play(None)
     }
 
@@ -635,9 +700,15 @@ impl Playback {
     }
 
     /// Put the current track in History and make what comes next current:
-    /// the next step of the play order, or under Repeat all the first step
-    /// of a new round. False, with nothing changed, when nothing comes next.
+    /// the head of the Manual queue, the next step of the play order, or
+    /// under Repeat all the first step of a new round. False, with nothing
+    /// changed, when nothing comes next.
     fn advance(&mut self) -> bool {
+        if let Some(entry) = self.listening.manual.pop_front() {
+            self.retire_current();
+            self.listening.current = Some(entry);
+            return true;
+        }
         let Some(play) = &self.listening.source else {
             return false;
         };
@@ -648,12 +719,14 @@ impl Playback {
             self.start_over();
         }
         self.retire_current();
+        let id = self.stamp_entry();
         let Some(play) = &mut self.listening.source else {
             return false;
         };
         let index = play.next;
         play.next += 1;
         self.listening.current = Some(Item {
+            id,
             track: play.tracks[play.order[index]].clone(),
             from: play.source.clone(),
             step: Some(Step {
@@ -733,6 +806,11 @@ impl Playback {
     fn stamp_fill(&mut self) -> FillId {
         self.next_fill += 1;
         FillId(self.next_fill)
+    }
+
+    fn stamp_entry(&mut self) -> EntryId {
+        self.next_entry += 1;
+        EntryId(self.next_entry)
     }
 
     fn stamp_play(&mut self) -> u64 {

@@ -15,7 +15,7 @@ use iced::task;
 use iced::widget::{button, column, container, operation, row, scrollable, space, stack};
 use iced::{Alignment, Element, Length, Task};
 use std::sync::Arc;
-use syzygy_catalog::{Catalog, Feed, HomeFeed, Read};
+use syzygy_catalog::{Catalog, Feed, HomeFeed, Read, Track};
 
 use crate::app::{self, Services};
 use crate::icons::{Icon, icon};
@@ -64,6 +64,8 @@ pub struct Shell {
     viewport_height: f32,
     /// A card's source being read to play. A newer play aborts it.
     card_play: Option<task::Handle>,
+    /// A track being read for its Track radio. Going anywhere aborts it.
+    radio_read: Option<task::Handle>,
 }
 
 /// The Page on screen and the reads it started. Dropping it aborts them.
@@ -91,6 +93,8 @@ pub enum Message {
     FeedSeen(Result<(), Arc<syzygy_catalog::Error>>),
     /// A card's source was read, to play.
     CardRead(Result<Option<PlayRequest>, Arc<syzygy_catalog::Error>>),
+    /// A track was read for its Track radio.
+    TrackRead(Track, Result<Track, Arc<syzygy_catalog::Error>>),
 }
 
 impl Shell {
@@ -117,6 +121,7 @@ impl Shell {
             unseen: Unseen::default(),
             viewport_height: UNKNOWN_HEIGHT,
             card_play: None,
+            radio_read: None,
         };
         let task = shell.run_action(action, services, context);
         let read = shell.run_sidebar(read, services, context);
@@ -159,6 +164,7 @@ impl Shell {
         services: &Services,
         context: &Context,
     ) -> Task<app::Message> {
+        self.radio_read = None;
         if route == self.current.route {
             return scroll_to(0.0);
         }
@@ -242,6 +248,22 @@ impl Shell {
                 if let Err(e) = result {
                     log::warn!("Could not mark the Feed seen: {e}");
                 }
+            }
+            Message::TrackRead(track, result) => {
+                self.radio_read = None;
+                let mix_id = match result {
+                    Ok(read) => read.track_radio,
+                    Err(e) => {
+                        log::warn!("Could not read track {} for its radio: {e}", track.id);
+                        None
+                    }
+                };
+                return match mix_id {
+                    Some(mix_id) => {
+                        self.navigate(page::track_radio_route(&track, mix_id), services, context)
+                    }
+                    None => self.toast(Kind::Info, "Track radio unavailable"),
+                };
             }
             Message::CardRead(result) => {
                 self.card_play = None;
@@ -348,6 +370,38 @@ impl Shell {
                 self.card_play = Some(handle.abort_on_drop());
                 task
             }
+            Action::Queue { track, next } => {
+                let title = short(&track.title);
+                let tag = page::queue_tag(&track);
+                let (message, toast) = if next {
+                    (
+                        playback::Message::PlayNext(track, tag),
+                        format!("\u{201c}{title}\u{201d} will play next"),
+                    )
+                } else {
+                    (
+                        playback::Message::AddToQueue(track, tag),
+                        format!("Added \u{201c}{title}\u{201d} to the queue"),
+                    )
+                };
+                let toast = self.toast(Kind::Info, toast);
+                Task::batch([Task::done(app::Message::Playback(message)), toast])
+            }
+            Action::TrackRadio(track) => match track.track_radio.clone() {
+                Some(mix_id) => {
+                    self.navigate(page::track_radio_route(&track, mix_id), services, context)
+                }
+                // Many lists don't say; the track read on its own does.
+                None => {
+                    let (task, handle) =
+                        Task::perform(services.catalog.track(track.id), move |result| {
+                            app::Message::Shell(Message::TrackRead(track.clone(), result))
+                        })
+                        .abortable();
+                    self.radio_read = Some(handle.abort_on_drop());
+                    task
+                }
+            },
             Action::TogglePlay => Task::done(app::Message::Playback(playback::Message::TogglePlay)),
             Action::Run(task) => {
                 let id = self.current.id;
@@ -591,6 +645,16 @@ impl Current {
             route: self.route.clone(),
             offset: self.offset,
         }
+    }
+}
+
+/// A title short enough for a toast, as sone cuts it.
+fn short(title: &str) -> String {
+    if title.chars().count() > 30 {
+        let cut: String = title.chars().take(28).collect();
+        format!("{cut}\u{2026}")
+    } else {
+        title.to_string()
     }
 }
 

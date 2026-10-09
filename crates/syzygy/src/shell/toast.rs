@@ -13,7 +13,6 @@ const DURATION: Duration = Duration::from_secs(3);
 /// The most toasts on screen; a new one pushes the oldest out.
 const MAX_SHOWN: usize = 4;
 
-#[expect(dead_code, reason = "Library edits and playback show the first toasts")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Info,
