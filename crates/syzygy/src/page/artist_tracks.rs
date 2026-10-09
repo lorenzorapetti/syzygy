@@ -88,7 +88,8 @@ impl State {
                         .loaded()
                         .map_or("", |artist| artist.name.as_str());
                     let source = SourceRef::Artist(self.id);
-                    Action::Play(super::request(source, name, tracks, start))
+                    let request = super::request(source, name, tracks, start);
+                    Action::Play(super::with_rest(request, self.tracks.has_more()))
                 }
             },
             Message::TogglePlay => Action::TogglePlay,

@@ -13,6 +13,7 @@ use syzygy_tidal::models::{AuthTokens, SessionInfo};
 use syzygy_tidal::{LoginMethod, TidalClient};
 
 use crate::events::EventSource;
+use crate::fill;
 use crate::identity::{DISPLAY_NAME, Paths};
 use crate::images::{self, Images};
 use crate::login;
@@ -46,6 +47,9 @@ pub struct App {
     /// The play being fetched and started. Replacing it aborts it, so an
     /// older choice can't reach the engine after a newer one.
     play_task: Option<task::Handle>,
+    /// The fill reading the rest of the Playback source. It outlives the
+    /// Page that started the play; replacing it aborts it.
+    fill_task: Option<task::Handle>,
     /// What animations count their seconds from, and the last frame.
     epoch: Instant,
     frame: Instant,
@@ -148,6 +152,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         images: Images::new(images::BYTE_CAP),
         playback,
         play_task: None,
+        fill_task: None,
         epoch: Instant::now(),
         frame: Instant::now(),
         phase: Phase::Login(Box::default()),
@@ -430,6 +435,26 @@ impl App {
             playback::Effect::Seek(position) => engine(player.seek(position), "seek"),
             playback::Effect::SetVolume(volume) => {
                 engine(player.set_volume(volume), "set the volume")
+            }
+            playback::Effect::StartFill {
+                fill_id,
+                continuation,
+            } => {
+                let user_id = self.session.as_ref().and_then(|session| session.user_id);
+                let pages = fill::pages(self.services.catalog.clone(), user_id, continuation);
+                let (task, handle) = Task::run(pages, move |tracks| {
+                    Message::Playback(playback::Message::PageArrived(fill_id, tracks))
+                })
+                .chain(Task::done(Message::Playback(playback::Message::FillEnded(
+                    fill_id,
+                ))))
+                .abortable();
+                self.fill_task = Some(handle.abort_on_drop());
+                task
+            }
+            playback::Effect::CancelFill => {
+                self.fill_task = None;
+                Task::none()
             }
         }
     }

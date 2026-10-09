@@ -39,6 +39,11 @@ impl<T> List<T> {
         self.list.loaded().map_or(&[], |page| &page.items)
     }
 
+    /// There's more of the list than has been read.
+    pub fn has_more(&self) -> bool {
+        self.list.loaded().is_some_and(|page| page.has_more)
+    }
+
     /// Where TIDAL's next page starts, for a list it pages by cursor.
     pub fn cursor(&self) -> Option<String> {
         self.list.loaded()?.cursor.clone()

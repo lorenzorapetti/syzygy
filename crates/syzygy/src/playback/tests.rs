@@ -46,6 +46,7 @@ fn request(kind: SourceRef, id: u64, n: u64, start: Start) -> PlayRequest {
         source: source(kind),
         first_page: (1..=n).map(|i| track(id * 100 + i)).collect(),
         start,
+        continuation: None,
     }
 }
 
@@ -55,7 +56,45 @@ fn album(id: u64, n: u64, start: usize) -> PlayRequest {
 }
 
 fn playlist(id: u64, n: u64, start: Start) -> PlayRequest {
-    request(SourceRef::Playlist(format!("playlist-{id}")), id, n, start)
+    request(playlist_ref(id), id, n, start)
+}
+
+fn playlist_ref(id: u64) -> SourceRef {
+    SourceRef::Playlist {
+        uuid: format!("playlist-{id}"),
+        sort: None,
+    }
+}
+
+/// The first `n` tracks of a playlist with more after them, to be read in
+/// the background.
+fn long_playlist(id: u64, n: u64, start: Start) -> PlayRequest {
+    PlayRequest {
+        continuation: Some(Continuation {
+            source: playlist_ref(id),
+            offset: n as usize,
+        }),
+        ..playlist(id, n, start)
+    }
+}
+
+/// Tracks `from..=to` of playlist `id`'s, as a page of them.
+fn page(id: u64, from: u64, to: u64) -> Vec<Track> {
+    (from..=to).map(|i| track(id * 100 + i)).collect()
+}
+
+/// The fill among `effects`, which must have started one.
+fn fill(effects: &[Effect]) -> (FillId, Continuation) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::StartFill {
+                fill_id,
+                continuation,
+            } => Some((*fill_id, continuation.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a StartFill, got {effects:?}"))
 }
 
 /// What plays now and after, in order.
@@ -79,10 +118,21 @@ fn playing_from(playback: &Playback) -> Option<SourceRef> {
     playback.playing_from().map(|source| source.kind.clone())
 }
 
-/// Whether the one Play among `effects` asks for album gain.
+/// Whether the Play among `effects` asks for album gain.
 fn album_gain(effects: &[Effect]) -> bool {
-    match effects {
-        [Effect::Play { album_gain, .. }] => *album_gain,
+    match the_play(effects) {
+        Effect::Play { album_gain, .. } => *album_gain,
+        _ => unreachable!(),
+    }
+}
+
+/// The one Play among `effects`, whatever else went out with it.
+fn the_play(effects: &[Effect]) -> &Effect {
+    let mut plays = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Play { .. }));
+    match (plays.next(), plays.next()) {
+        (Some(play), None) => play,
         _ => panic!("expected one Play, got {effects:?}"),
     }
 }
@@ -95,7 +145,10 @@ fn shuffled(mut playback: Playback) -> Playback {
 /// Send `message` and let the play it starts succeed.
 fn and_play(playback: &mut Playback, message: Message) -> Vec<Effect> {
     let effects = playback.update(message);
-    if let [Effect::Play { token, .. }] = effects[..] {
+    if let Some(&Effect::Play { token, .. }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::Play { .. }))
+    {
         playback.update(played(token));
     }
     effects
@@ -111,9 +164,9 @@ fn current(playback: &Playback) -> Option<u64> {
 
 /// The token of the one Play among `effects`.
 fn token(effects: &[Effect]) -> PlayToken {
-    match effects {
-        [Effect::Play { token, .. }] => *token,
-        _ => panic!("expected one Play, got {effects:?}"),
+    match the_play(effects) {
+        Effect::Play { token, .. } => *token,
+        _ => unreachable!(),
     }
 }
 
@@ -878,4 +931,287 @@ fn other_sources_get_track_gain() {
         3,
         Start::All
     )))));
+}
+
+// Background fills.
+
+#[test]
+fn a_long_source_plays_at_once_and_reads_the_rest_from_where_its_first_page_ends() {
+    let mut playback = new(1.0);
+
+    let effects = playback.update(Message::Start(long_playlist(1, 3, Start::All)));
+
+    assert!(matches!(
+        the_play(&effects),
+        Effect::Play { track_id: 101, .. }
+    ));
+    assert_eq!(
+        fill(&effects).1,
+        Continuation {
+            source: playlist_ref(1),
+            offset: 3,
+        }
+    );
+}
+
+#[test]
+fn a_sorted_playlist_reads_the_rest_in_its_sort() {
+    let sort = TrackSort {
+        order: syzygy_catalog::TrackOrder::Title,
+        direction: syzygy_catalog::Direction::Descending,
+    };
+    let kind = SourceRef::Playlist {
+        uuid: "playlist-1".to_string(),
+        sort: Some(sort),
+    };
+    let request = PlayRequest {
+        source: source(kind.clone()),
+        continuation: Some(Continuation {
+            source: kind.clone(),
+            offset: 3,
+        }),
+        ..playlist(1, 3, Start::All)
+    };
+
+    let effects = new(1.0).update(Message::Start(request));
+
+    assert_eq!(fill(&effects).1.source, kind);
+}
+
+#[test]
+fn a_source_with_nothing_more_to_read_starts_no_fill() {
+    let effects = new(1.0).update(Message::Start(playlist(1, 3, Start::All)));
+
+    assert_eq!(effects.len(), 1, "only the Play: {effects:?}");
+}
+
+#[test]
+fn pages_that_arrive_go_on_the_end_of_the_play_order() {
+    let mut playback = new(1.0);
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::Track(1))),
+    ));
+
+    assert_eq!(
+        playback.update(Message::PageArrived(fill_id, page(1, 4, 5))),
+        vec![]
+    );
+    playback.update(Message::PageArrived(fill_id, page(1, 6, 6)));
+
+    assert_eq!(play_order(&playback), vec![102, 103, 104, 105, 106]);
+}
+
+#[test]
+fn a_page_for_a_fill_from_before_is_dropped() {
+    let mut playback = new(1.0);
+    let (old, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 2, Start::All)),
+    ));
+    and_play(
+        &mut playback,
+        Message::Start(long_playlist(2, 2, Start::All)),
+    );
+
+    playback.update(Message::PageArrived(old, page(1, 3, 4)));
+
+    assert_eq!(play_order(&playback), vec![201, 202]);
+}
+
+#[test]
+fn with_shuffle_on_pages_go_into_random_places_in_the_unplayed_tail() {
+    let mut playback = shuffled(new(1.0));
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 10, Start::Track(0))),
+    ));
+    and_play(&mut playback, Message::Next);
+    let playing_now = current(&playback);
+
+    playback.update(Message::PageArrived(fill_id, page(1, 11, 20)));
+
+    assert_eq!(history(&playback), vec![101]);
+    assert_eq!(current(&playback), playing_now);
+    assert_eq!(
+        sorted(play_order(&playback)),
+        (102..=120).collect::<Vec<_>>()
+    );
+    let upcoming = ids(playback.upcoming());
+    assert_eq!(upcoming.len(), 18);
+    assert_ne!(
+        sorted(upcoming[8..].to_vec()),
+        (111..=120).collect::<Vec<_>>(),
+        "the new tracks aren't all at the end"
+    );
+}
+
+#[test]
+fn after_a_shuffle_play_pages_are_shuffled_in_too() {
+    let mut playback = new(1.0);
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 10, Start::Shuffled)),
+    ));
+
+    playback.update(Message::PageArrived(fill_id, page(1, 11, 20)));
+
+    let upcoming = ids(playback.upcoming());
+    assert_ne!(
+        sorted(upcoming[9..].to_vec()),
+        (111..=120).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn turning_shuffle_off_puts_tracks_that_arrived_back_in_source_order() {
+    let mut playback = shuffled(new(1.0));
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 5, Start::Track(0))),
+    ));
+    playback.update(Message::PageArrived(fill_id, page(1, 6, 10)));
+
+    playback.update(Message::ToggleShuffle);
+
+    assert_eq!(ids(playback.upcoming()), (102..=110).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_new_source_cancels_the_fill() {
+    let mut playback = playing(long_playlist(1, 3, Start::All));
+
+    let effects = playback.update(Message::Start(album(2, 3, 0)));
+
+    assert!(effects.contains(&Effect::CancelFill), "{effects:?}");
+}
+
+#[test]
+fn a_new_long_source_cancels_the_old_fill_and_starts_its_own() {
+    let mut playback = new(1.0);
+    let (old, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::All)),
+    ));
+
+    let effects = playback.update(Message::Start(long_playlist(2, 3, Start::All)));
+
+    assert!(effects.contains(&Effect::CancelFill), "{effects:?}");
+    let (new, continuation) = fill(&effects);
+    assert_ne!(new, old);
+    assert_eq!(continuation.source, playlist_ref(2));
+}
+
+#[test]
+fn a_finished_fill_has_nothing_to_cancel() {
+    let mut playback = new(1.0);
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::All)),
+    ));
+    playback.update(Message::PageArrived(fill_id, page(1, 4, 5)));
+    assert_eq!(playback.update(Message::FillEnded(fill_id)), vec![]);
+
+    let effects = playback.update(Message::Start(album(2, 3, 0)));
+
+    assert!(!effects.contains(&Effect::CancelFill), "{effects:?}");
+}
+
+#[test]
+fn repeat_all_starts_over_with_what_has_loaded() {
+    let mut playback = repeating(Repeat::All);
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 2, Start::All)),
+    ));
+    playback.update(Message::PageArrived(fill_id, page(1, 3, 3)));
+    and_play(&mut playback, Message::TrackFinished);
+    and_play(&mut playback, Message::TrackFinished);
+
+    let effects = playback.update(Message::TrackFinished);
+
+    assert!(matches!(
+        the_play(&effects),
+        Effect::Play { track_id: 101, .. }
+    ));
+    assert_eq!(play_order(&playback), vec![101, 102, 103]);
+}
+
+#[test]
+fn pages_that_arrive_while_the_next_track_loads_survive_its_failure() {
+    let mut playback = new(1.0);
+    let (fill_id, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 2, Start::All)),
+    ));
+    let loading = token(&playback.update(Message::Next));
+
+    playback.update(Message::PageArrived(fill_id, page(1, 3, 4)));
+    playback.update(resolve_failed(loading));
+
+    assert_eq!(play_order(&playback), vec![101, 102, 103, 104]);
+}
+
+#[test]
+fn a_new_source_that_fails_to_play_brings_back_the_old_fill_from_where_it_got_to() {
+    let mut playback = new(1.0);
+    let (old, _) = fill(&and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 2, Start::All)),
+    ));
+    playback.update(Message::PageArrived(old, page(1, 3, 4)));
+    let loading = token(&playback.update(Message::Start(long_playlist(2, 2, Start::All))));
+
+    let effects = playback.update(resolve_failed(loading));
+
+    let (refill, continuation) = fill(&effects);
+    assert_ne!(refill, old);
+    assert_eq!(
+        continuation,
+        Continuation {
+            source: playlist_ref(1),
+            offset: 4,
+        }
+    );
+    playback.update(Message::PageArrived(refill, page(1, 5, 5)));
+    assert_eq!(play_order(&playback), vec![101, 102, 103, 104, 105]);
+}
+
+#[test]
+fn a_new_source_that_fails_to_play_cancels_its_own_fill() {
+    let mut playback = playing(album(1, 3, 0));
+    let loading = token(&playback.update(Message::Start(long_playlist(2, 2, Start::All))));
+
+    let effects = playback.update(resolve_failed(loading));
+
+    assert_eq!(effects, vec![Effect::CancelFill]);
+}
+
+#[test]
+fn shuffled_pages_never_go_ahead_of_what_plays_next() {
+    for seed in 0..20 {
+        let mut playback = shuffled(Playback::new(
+            Preferences {
+                volume: 1.0,
+                shuffle: false,
+                repeat: Repeat::Off,
+            },
+            SmallRng::seed_from_u64(seed),
+        ));
+        let (fill_id, _) = fill(&and_play(
+            &mut playback,
+            Message::Start(long_playlist(1, 3, Start::Track(0))),
+        ));
+        and_play(&mut playback, Message::Next);
+        let stepped_back = current(&playback);
+        and_play(&mut playback, Message::Previous);
+
+        playback.update(Message::PageArrived(fill_id, page(1, 4, 10)));
+
+        assert_eq!(
+            playback.upcoming().next().map(|track| track.id),
+            stepped_back,
+            "seed {seed}"
+        );
+    }
 }

@@ -99,6 +99,10 @@ _Avoid_: back stack (that's Pages)
 Loudness levelled across a whole album rather than per track. It applies only while an album plays in album order.
 _Avoid_: album mode
 
+**Fill**:
+Reading the rest of a long Playback source in the background once it starts playing. Tracks join the play order as they arrive, scattered through what's upcoming if the order is shuffled. A new Playback source stops it.
+_Avoid_: lazy load, prefetch
+
 **Gapless advance**:
 Moving to the next track with no silence, because it was prepared before the current one ended.
 

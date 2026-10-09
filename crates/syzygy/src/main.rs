@@ -1,5 +1,6 @@
 mod app;
 mod events;
+mod fill;
 mod icons;
 mod identity;
 mod images;

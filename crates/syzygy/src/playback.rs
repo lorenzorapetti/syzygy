@@ -8,13 +8,18 @@
 //! The Playback source owns its tracks in source order. Playback keeps a
 //! play order (indices into those tracks) and a cursor: the upcoming tracks
 //! are the play order after the cursor.
+//!
+//! A long source starts with the tracks a Page or card had and reads the
+//! rest in the background: a fill. Its pages join the play order as they
+//! arrive.
 
+use rand::RngExt;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use syzygy_catalog::Track;
+use syzygy_catalog::{Track, TrackSort};
 
 #[cfg(test)]
 mod tests;
@@ -44,6 +49,8 @@ pub struct Playback {
     /// Stamped on each source play, so History can tell a step back in the
     /// play order from a track that played under another one.
     next_play: u64,
+    /// Stamped on each fill, so pages for one that stopped are dropped.
+    next_fill: u64,
 }
 
 /// Where listening is: the source, the current track and History.
@@ -72,6 +79,39 @@ struct SourcePlay {
     next: usize,
     /// The order isn't the source's: a Shuffle play, or Shuffle on.
     shuffled: bool,
+    /// The rest of the source, being read. Its id stays across Repeat all
+    /// rounds.
+    fill: Option<Fill>,
+}
+
+/// The source's unread rest, and the fill reading it.
+#[derive(Clone)]
+struct Fill {
+    id: FillId,
+    continuation: Continuation,
+}
+
+impl SourcePlay {
+    /// The next of the source's tracks, read by its fill: on the end of the
+    /// play order, or at random places in what's upcoming when the order is
+    /// shuffled. Never ahead of what plays next, which may already be
+    /// prepared, or put back there by Previous.
+    fn append(&mut self, tracks: &[Track], rng: &mut SmallRng) {
+        let first = self.tracks.len();
+        Arc::make_mut(&mut self.tracks).extend_from_slice(tracks);
+        for index in first..self.tracks.len() {
+            let at = if self.shuffled {
+                let len = self.order.len();
+                rng.random_range((self.next + 1).min(len)..=len)
+            } else {
+                self.order.len()
+            };
+            self.order.insert(at, index);
+        }
+        if let Some(fill) = &mut self.fill {
+            fill.continuation.offset += tracks.len();
+        }
+    }
 }
 
 /// A track that plays, played or is playing, and where it came from.
@@ -107,14 +147,18 @@ pub struct Source {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceRef {
     Album(u64),
-    /// By uuid.
-    Playlist(String),
+    /// In the order it was sorted in, or else its own.
+    Playlist {
+        uuid: String,
+        sort: Option<TrackSort>,
+    },
     Mix(String),
     /// A track's mix, by the mix's id.
     TrackRadio(String),
     /// An artist's top tracks.
     Artist(u64),
-    LovedTracks,
+    /// In the order they were sorted in, or else last added first.
+    LovedTracks(Option<TrackSort>),
     /// The tracks a search found, by its query.
     Search(String),
     /// One track played on its own.
@@ -129,7 +173,25 @@ pub struct PlayRequest {
     pub source: Source,
     pub first_page: Vec<Track>,
     pub start: Start,
+    /// Where the rest of the source is read from, when `first_page` isn't
+    /// all of it.
+    pub continuation: Option<Continuation>,
 }
+
+/// Where the unread rest of a source starts: plain data, so a fill can be
+/// started again from it. A sorted source's sort is part of `source`, so
+/// the rest comes in the same order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Continuation {
+    pub source: SourceRef,
+    /// How many of its tracks have been read.
+    pub offset: usize,
+}
+
+/// Stamped on each fill and echoed by its pages, so pages for a source that
+/// no longer plays are dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FillId(u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Start {
@@ -198,6 +260,10 @@ pub enum Message {
     TrackFinished,
     /// The engine stopped on an error of its own.
     EngineFailed,
+    /// A fill read these tracks, the next ones in the source.
+    PageArrived(FillId, Vec<Track>),
+    /// A fill read the last of its source, or gave up.
+    FillEnded(FillId),
 }
 
 /// Why a play failed.
@@ -235,6 +301,14 @@ pub enum Effect {
     Stop,
     Seek(f32),
     SetVolume(f32),
+    /// Read the rest of the source from `continuation` on, a page at a
+    /// time, until it runs out. Replaces any fill running.
+    StartFill {
+        fill_id: FillId,
+        continuation: Continuation,
+    },
+    /// Stop reading the source.
+    CancelFill,
 }
 
 impl Playback {
@@ -251,6 +325,7 @@ impl Playback {
             rollback: None,
             next_token: 0,
             next_play: 0,
+            next_fill: 0,
         }
     }
 
@@ -338,22 +413,27 @@ impl Playback {
                 }
                 let rollback = self.rollback.take();
                 match (result, rollback) {
-                    (Ok(()), _) => self.status = Status::Playing,
+                    (Ok(()), _) => {
+                        self.status = Status::Playing;
+                        vec![]
+                    }
                     (Err(e), Some(rollback)) => {
                         log::warn!("Could not play the track: {e}");
+                        let filling = self.fill_id();
                         self.listening = rollback.listening;
                         self.position = rollback.position;
                         self.status = match e {
                             PlayError::Resolve(_) => rollback.status,
                             PlayError::Audio(_) => Status::Stopped,
                         };
+                        self.refill(filling)
                     }
                     (Err(e), None) => {
                         log::warn!("Could not play the track: {e}");
                         self.status = Status::Stopped;
+                        vec![]
                     }
                 }
-                vec![]
             }
             Message::TrackFinished => {
                 if let Status::Loading(_) = self.status {
@@ -386,6 +466,19 @@ impl Playback {
                         self.ended_while_loading(position);
                     }
                     Status::Stopped => {}
+                }
+                vec![]
+            }
+            Message::PageArrived(id, tracks) => {
+                let (plays, rng) = self.filling(id);
+                for play in plays {
+                    play.append(&tracks, rng);
+                }
+                vec![]
+            }
+            Message::FillEnded(id) => {
+                for play in self.filling(id).0 {
+                    play.fill = None;
                 }
                 vec![]
             }
@@ -465,6 +558,11 @@ impl Playback {
         }
         self.snapshot();
         self.retire_current();
+        let filling = self.fill_id();
+        let fill = request.continuation.map(|continuation| Fill {
+            id: self.stamp_fill(),
+            continuation,
+        });
         self.listening.source = Some(SourcePlay {
             play: self.stamp_play(),
             source: Arc::new(request.source),
@@ -472,9 +570,12 @@ impl Playback {
             order,
             next: 0,
             shuffled,
+            fill,
         });
         self.advance();
-        self.play(None)
+        let mut effects = self.play(None);
+        effects.extend(self.refill(filling));
+        effects
     }
 
     /// Next, chosen by the user: on even under Repeat one. Past the end it
@@ -588,6 +689,50 @@ impl Playback {
                 self.listening.history.pop_front();
             }
         }
+    }
+
+    /// The source plays fill `id` reads for: the one playing, and the one a
+    /// failed play would roll back to, which pages must reach too.
+    fn filling(&mut self, id: FillId) -> (impl Iterator<Item = &mut SourcePlay>, &mut SmallRng) {
+        let rollback = self.rollback.as_mut().map(|r| &mut r.listening);
+        let plays = std::iter::once(&mut self.listening)
+            .chain(rollback)
+            .filter_map(|listening| listening.source.as_mut())
+            .filter(move |play| play.fill.as_ref().is_some_and(|fill| fill.id == id));
+        (plays, &mut self.rng)
+    }
+
+    /// The fill running for the source, if it's still reading.
+    fn fill_id(&self) -> Option<FillId> {
+        let play = self.listening.source.as_ref()?;
+        play.fill.as_ref().map(|fill| fill.id)
+    }
+
+    /// The source changed from one whose fill was `filling`: stop that
+    /// fill, and read the rest of this one from where it got to.
+    fn refill(&mut self, filling: Option<FillId>) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if filling.is_some() && filling != self.fill_id() {
+            effects.push(Effect::CancelFill);
+        }
+        let id = self.stamp_fill();
+        if let Some(play) = &mut self.listening.source
+            && let Some(fill) = &mut play.fill
+            && filling != Some(fill.id)
+        {
+            // Pages for the fill it had before were dropped with it.
+            fill.id = id;
+            effects.push(Effect::StartFill {
+                fill_id: id,
+                continuation: fill.continuation.clone(),
+            });
+        }
+        effects
+    }
+
+    fn stamp_fill(&mut self) -> FillId {
+        self.next_fill += 1;
+        FillId(self.next_fill)
     }
 
     fn stamp_play(&mut self) -> u64 {

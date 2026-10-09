@@ -5,7 +5,7 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use std::sync::Arc;
 use syzygy_catalog::home_feed::{Card, Target};
-use syzygy_catalog::{Catalog, Error, Read, TrackSort};
+use syzygy_catalog::{Catalog, Error, Paged, Read, TrackSort};
 
 use crate::page::{self, Context};
 use crate::playback::{PlayRequest, SourceRef, Start};
@@ -29,6 +29,10 @@ pub fn read(
         let request = |kind, name: &str, tracks: &[_]| {
             (!tracks.is_empty()).then(|| page::request(kind, name, tracks, Start::All))
         };
+        // The rest of a long list is read once it plays.
+        let long = |kind, name: &str, tracks: Paged<_>| {
+            request(kind, name, &tracks.items).map(|r| page::with_rest(r, tracks.has_more))
+        };
         Ok(match card.target {
             Target::Album(id) => {
                 let album = first(catalog.album(id)).await?;
@@ -37,7 +41,7 @@ pub fn read(
             }
             Target::Playlist(uuid) => {
                 let tracks = first(catalog.playlist_tracks(&uuid, sort)).await?;
-                request(SourceRef::Playlist(uuid), &card.title, &tracks.items)
+                long(SourceRef::Playlist { uuid, sort }, &card.title, tracks)
             }
             Target::Mix(id) => {
                 let mix = first(catalog.mix(&id)).await?;
@@ -52,7 +56,7 @@ pub fn read(
             Target::Favorites => {
                 let user_id = user_id.ok_or_else(|| Arc::new(Error::UnknownUser))?;
                 let tracks = first(catalog.loved_tracks(user_id, sort)).await?;
-                request(SourceRef::LovedTracks, "Loved Tracks", &tracks.items)
+                long(SourceRef::LovedTracks(sort), "Loved Tracks", tracks)
             }
             Target::Track(id) => Some(page::single(&catalog.track(id).await?)),
             Target::Video(_) | Target::None => None,

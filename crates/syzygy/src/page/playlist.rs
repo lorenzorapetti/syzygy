@@ -159,8 +159,8 @@ impl State {
                     (_, Some(preview)) => preview.title.as_str(),
                     _ => "Playlist",
                 };
-                let source = SourceRef::Playlist(self.uuid.clone());
-                Action::Play(super::request(source, name, tracks, start))
+                let request = super::request(self.source(), name, tracks, start);
+                Action::Play(super::with_rest(request, self.tracks.has_more()))
             }
             Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
@@ -175,6 +175,14 @@ impl State {
                     Action::Load(Load::Playlist(self.uuid.clone())),
                 ])
             }
+        }
+    }
+
+    /// The playlist as a Playback source, in the order it's shown in.
+    fn source(&self) -> SourceRef {
+        SourceRef::Playlist {
+            uuid: self.uuid.clone(),
+            sort: self.sort,
         }
     }
 
@@ -244,7 +252,7 @@ impl State {
         )
         .center_y(FILTER_HEIGHT);
         let buttons = play_buttons(
-            &SourceRef::Playlist(self.uuid.clone()),
+            &self.source(),
             now_playing,
             Message::Play,
             Message::TogglePlay,

@@ -32,7 +32,7 @@ use syzygy_catalog::{Album, Artist, Kind, Mix, Read, Shelf, Track, TrackSort};
 
 use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
-use crate::playback::{PlayRequest, Source, SourceRef, Start};
+use crate::playback::{Continuation, PlayRequest, Source, SourceRef, Start};
 use crate::settings::{Settings, Sort};
 use crate::style;
 
@@ -691,6 +691,7 @@ pub fn single(track: &Track) -> PlayRequest {
         },
         first_page: vec![track.clone()],
         start: Start::Track(0),
+        continuation: None,
     }
 }
 
@@ -753,7 +754,20 @@ pub fn request(kind: SourceRef, name: &str, tracks: &[Track], start: Start) -> P
         },
         first_page: tracks.to_vec(),
         start,
+        continuation: None,
     }
+}
+
+/// `request`, its source read on in the background when there's `more` of
+/// it than its tracks.
+pub fn with_rest(mut request: PlayRequest, more: bool) -> PlayRequest {
+    if more {
+        request.continuation = Some(Continuation {
+            source: request.source.kind.clone(),
+            offset: request.first_page.len(),
+        });
+    }
+    request
 }
 
 /// Where "Playing from" leads: the source's Page, or for a track played on
@@ -775,7 +789,7 @@ pub fn source_route(source: &Source, track: &Track) -> Option<Route> {
                 artist: None,
             }),
         },
-        SourceRef::Playlist(uuid) => Route::Playlist {
+        SourceRef::Playlist { uuid, .. } => Route::Playlist {
             uuid: uuid.clone(),
             preview: preview(),
         },
@@ -787,7 +801,7 @@ pub fn source_route(source: &Source, track: &Track) -> Option<Route> {
             id: *id,
             preview: preview(),
         },
-        SourceRef::LovedTracks => Route::Favorites,
+        SourceRef::LovedTracks(_) => Route::Favorites,
         SourceRef::Search(query) => Route::Search {
             query: query.clone(),
             tab: search::Tab::Tracks,

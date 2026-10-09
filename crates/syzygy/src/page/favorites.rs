@@ -121,12 +121,11 @@ impl State {
             Message::Link(link) => link.follow(),
             Message::Play(start) => match self.tracks.items() {
                 [] => Action::None,
-                tracks => Action::Play(super::request(
-                    SourceRef::LovedTracks,
-                    "Loved Tracks",
-                    tracks,
-                    start,
-                )),
+                tracks => {
+                    let source = SourceRef::LovedTracks(self.sort);
+                    let request = super::request(source, "Loved Tracks", tracks, start);
+                    Action::Play(super::with_rest(request, self.tracks.has_more()))
+                }
             },
             Message::TogglePlay => Action::TogglePlay,
             Message::Retry => self.load(),
@@ -209,7 +208,7 @@ impl State {
         )
         .center_y(FILTER_HEIGHT);
         let buttons = play_buttons(
-            &SourceRef::LovedTracks,
+            &SourceRef::LovedTracks(self.sort),
             now_playing,
             Message::Play,
             Message::TogglePlay,
