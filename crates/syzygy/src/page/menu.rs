@@ -5,7 +5,7 @@
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer};
-use iced::widget::{Column, button, container, row, rule, text};
+use iced::widget::{Column, button, container, mouse_area, row, rule, text};
 use iced::{
     Alignment, Border, Color, Element, Event, Length, Rectangle, Shadow, Size, Theme, Vector,
 };
@@ -219,10 +219,12 @@ fn menu<'a>(sections: Vec<Vec<Item>>) -> Element<'a, Link> {
         }
         items = items.extend(section.into_iter().map(item));
     }
-    container(items)
-        .padding([4, 0])
-        .width(WIDTH)
-        .style(panel)
+    let panel = container(items).padding([4, 0]).width(WIDTH).style(panel);
+    // The whole panel is the menu's, dividers and padding too: where the
+    // menu has no interaction of its own, the Page under it would take the
+    // cursor and light up a row.
+    mouse_area(panel)
+        .interaction(mouse::Interaction::Idle)
         .into()
 }
 
