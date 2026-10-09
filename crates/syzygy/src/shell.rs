@@ -281,7 +281,8 @@ impl Shell {
                     player_bar::Effect::Drawer(tab) => {
                         let effect = self.drawer.toggle(tab);
                         let read = self.run_drawer(effect, services, context);
-                        Task::batch([read, drawer_to_top()])
+                        let follow = self.follow_lyrics(services, context);
+                        Task::batch([read, drawer_to_top().chain(follow)])
                     }
                     player_bar::Effect::Maximize => {
                         self.maximized = true;
@@ -298,7 +299,9 @@ impl Shell {
                     _ => Task::none(),
                 };
                 let effect = self.drawer.update(message);
-                return Task::batch([self.run_drawer(effect, services, context), top]);
+                let task = self.run_drawer(effect, services, context);
+                let follow = self.follow_lyrics(services, context);
+                return Task::batch([task, top.chain(follow)]);
             }
             Message::Maximized(maximized::Message::Minimize) => self.maximized = false,
             Message::Maximized(maximized::Message::PlayerBar(message)) => {
@@ -347,14 +350,23 @@ impl Shell {
         Task::none()
     }
 
-    /// The current track is now `track`: the drawer's tabs follow it.
+    /// The current track is now `track`, `position` seconds in: the
+    /// drawer's tabs follow it.
     pub fn playing(
         &mut self,
         track: Option<&Track>,
+        position: f32,
         services: &Services,
         context: &Context,
     ) -> Task<app::Message> {
-        let effect = self.drawer.playing(track);
+        let effect = self.drawer.playing(track, position);
+        let read = self.run_drawer(effect, services, context);
+        Task::batch([read, self.follow_lyrics(services, context)])
+    }
+
+    /// Keep the line sung in view, should the Lyrics tab show.
+    fn follow_lyrics(&mut self, services: &Services, context: &Context) -> Task<app::Message> {
+        let effect = self.drawer.follow();
         self.run_drawer(effect, services, context)
     }
 
@@ -570,6 +582,22 @@ impl Shell {
                     move |result| to_drawer(drawer::Message::Suggested(id, result)),
                 )
                 .abortable()
+            }
+            drawer::Effect::ReadLyrics(id) => {
+                Task::perform(services.catalog.lyrics(id), move |result| {
+                    to_drawer(drawer::Message::Lyrics(id, result))
+                })
+                .abortable()
+            }
+            drawer::Effect::Measure(line) => {
+                return drawer::measure()
+                    .map(move |measure| to_drawer(drawer::Message::Measured(line, measure)));
+            }
+            drawer::Effect::ScrollTo(offset) => {
+                return operation::scroll_to(
+                    drawer::SCROLL,
+                    scrollable::AbsoluteOffset { x: 0.0, y: offset },
+                );
             }
             drawer::Effect::ReadCredits(id) => {
                 Task::perform(services.catalog.credits(id), move |result| {

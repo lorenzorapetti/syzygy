@@ -10,6 +10,7 @@ pub mod feed;
 mod home;
 pub mod home_feed;
 pub mod library;
+pub mod lyrics;
 pub mod mix;
 mod paged;
 pub mod playlist;
@@ -39,6 +40,7 @@ pub use explore::ExplorePage;
 pub use feed::Feed;
 pub use home_feed::{Card, Cover, HomeFeed};
 pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
+pub use lyrics::Lyrics;
 pub use mix::Mix;
 pub use paged::Paged;
 pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
@@ -442,6 +444,22 @@ impl Catalog {
                 .await
                 .map_err(|e| Arc::new(Error::from(e)))?;
             Ok(credits.into_iter().map(track::Credit::from).collect())
+        }
+    }
+
+    /// A track's lyrics. Not cached: they're read for the current track
+    /// while the Lyrics tab shows. TIDAL answers 404 for a track without.
+    pub fn lyrics(
+        &self,
+        track_id: u64,
+    ) -> impl Future<Output = Result<Lyrics, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        async move {
+            let lyrics = tidal
+                .get_track_lyrics(track_id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(Lyrics::from(lyrics))
         }
     }
 

@@ -436,7 +436,12 @@ impl App {
     fn track_changed(&mut self) -> Task<Message> {
         let context = context(self.session.as_ref(), &self.settings);
         match &mut self.phase {
-            Phase::Shell(shell) => shell.playing(self.playback.current(), &self.services, &context),
+            Phase::Shell(shell) => shell.playing(
+                self.playback.current(),
+                self.playback.position(),
+                &self.services,
+                &context,
+            ),
             Phase::Login(_) => Task::none(),
         }
     }

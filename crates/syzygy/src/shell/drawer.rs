@@ -1,20 +1,28 @@
 //! The now-playing drawer. It slides up over everything above the player
 //! bar, on an 80% black backdrop: the current track's cover on the left
-//! (45%), and tabs on the right (55%): the Queue, the Suggested tracks and
-//! the Credits.
+//! (45%), and tabs on the right (55%): the Queue, the Suggested tracks, the
+//! Lyrics and the Credits.
 //!
-//! Suggested and Credits are about the current track only. Each is read
-//! while its tab shows, and again once the track changes.
+//! Suggested, Lyrics and Credits are about the current track only. Each is
+//! read while its tab shows, and again once the track changes.
+//!
+//! Synced lyrics keep the line sung in view: the tab measures where that
+//! line is and scrolls there. A scroll that isn't one of its own is the
+//! user's, and stops it until "Sync lyrics".
 
+use iced::advanced::widget::{Id, Operation, operation};
 use iced::widget::{
     Column, button, column, container, mouse_area, responsive, row, rule, scrollable, space, stack,
     text,
 };
-use iced::{Alignment, Animation, Color, Element, Font, Length, Theme, animation, font, mouse};
+use iced::{
+    Alignment, Animation, Color, Element, Font, Length, Rectangle, Task, Theme, Vector, animation,
+    font, mouse,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use syzygy_catalog::track::Credit;
-use syzygy_catalog::{Read, Track};
+use syzygy_catalog::{Lyrics, Read, Track};
 
 use crate::icons::{Icon, icon};
 use crate::images::Images;
@@ -48,7 +56,12 @@ const TAB_TOP: f32 = 16.0;
 /// How tall the tab's viewport is taken to be until it's reported.
 const UNKNOWN_HEIGHT: f32 = 4000.0;
 /// The scrollable every tab draws in.
-pub const SCROLL: iced::widget::Id = iced::widget::Id::new("drawer");
+pub const SCROLL: Id = Id::new("drawer");
+/// The synced line sung now, for [`measure`] to find.
+const SUNG: Id = Id::new("drawer-sung");
+/// How far the tab may sit from where it scrolled itself and still be
+/// taken as there.
+const LANDED: f32 = 1.0;
 /// The Queue's and Suggested tracks' rows: a cover by the title.
 const COLUMNS: Columns = Columns {
     cover: true,
@@ -67,7 +80,11 @@ pub struct Drawer {
     /// The current track, which the tabs are about.
     track: Option<Track>,
     suggested: Option<TabRead<Option<Radio>>>,
+    lyrics: Option<TabRead<Lyrics>>,
     credits: Option<TabRead<Vec<Credit>>>,
+    /// Playback's position in the current track, in seconds.
+    position: f32,
+    follow: Follow,
     drag: Option<Drag>,
     /// The part of the tab in view, for the Queue's long lists.
     viewport: Viewport,
@@ -77,7 +94,51 @@ pub struct Drawer {
 pub enum Tab {
     Queue,
     Suggested,
+    Lyrics,
     Credits,
+}
+
+/// The Lyrics tab keeping the line sung in view.
+struct Follow {
+    /// Off once the user scrolls, until "Sync lyrics".
+    on: bool,
+    /// The line last brought into view, `None` meaning the top. Unset
+    /// until one is, after the tab shows, the lyrics arrive or it syncs
+    /// again.
+    line: Option<Option<usize>>,
+    /// Where it last scrolled the tab to.
+    placed: Option<Placed>,
+    /// How far down the tab could scroll when it last said.
+    end: Option<f32>,
+}
+
+impl Default for Follow {
+    fn default() -> Self {
+        Self {
+            on: true,
+            line: None,
+            placed: None,
+            end: None,
+        }
+    }
+}
+
+/// A scroll the Lyrics tab made itself.
+struct Placed {
+    offset: f32,
+    /// Whether the tab has said it's there. Until then a scroll elsewhere
+    /// is one from before, not the user's.
+    landed: bool,
+}
+
+/// Where the line sung is, from [`measure`].
+#[derive(Debug, Clone, Copy)]
+pub struct Measure {
+    /// The tab's scrollable.
+    viewport: Rectangle,
+    /// What it scrolls.
+    content: Rectangle,
+    line: Rectangle,
 }
 
 /// A tab's read for one track. Dropping it aborts the read.
@@ -142,7 +203,8 @@ pub enum Message {
     /// A tab was clicked.
     Show(Tab),
     Maximize,
-    Scrolled(Viewport),
+    /// The tab scrolled, and how far down it can go.
+    Scrolled(Viewport, f32),
     Pick(Entry),
     Remove(Entry),
     Clear,
@@ -155,7 +217,12 @@ pub enum Message {
     /// Read the tab showing again, after it failed.
     Retry,
     Suggested(u64, Result<Option<Radio>, Arc<syzygy_catalog::Error>>),
+    Lyrics(u64, Result<Lyrics, Arc<syzygy_catalog::Error>>),
     Credits(u64, Result<Vec<Credit>, Arc<syzygy_catalog::Error>>),
+    /// Where the synced line at this index is.
+    Measured(usize, Measure),
+    /// "Sync lyrics": follow the line sung again.
+    Sync,
     /// Play the Track radio the Suggested tab shows, from this track.
     PlaySuggested(usize),
     Link(Link),
@@ -169,8 +236,14 @@ pub enum Effect {
     Maximize,
     /// Read the track's Track radio, for [`Message::Suggested`].
     ReadSuggested(Track),
+    /// Read the track's lyrics, for [`Message::Lyrics`].
+    ReadLyrics(u64),
     /// Read the track's credits, for [`Message::Credits`].
     ReadCredits(u64),
+    /// Find the line sung, at this index, with [`measure`].
+    Measure(usize),
+    /// Scroll the tab to this offset.
+    ScrollTo(f32),
 }
 
 impl Default for Drawer {
@@ -183,7 +256,10 @@ impl Default for Drawer {
             tab: Tab::Queue,
             track: None,
             suggested: None,
+            lyrics: None,
             credits: None,
+            position: 0.0,
+            follow: Follow::default(),
             drag: None,
             viewport: Viewport {
                 offset: 0.0,
@@ -202,8 +278,11 @@ impl Drawer {
             }
             Message::Show(tab) => self.show(tab),
             Message::Maximize => Effect::Maximize,
-            Message::Scrolled(viewport) => {
+            Message::Scrolled(viewport, end) => {
                 self.viewport = viewport;
+                if self.tab == Tab::Lyrics {
+                    self.scrolled(viewport.offset, end);
+                }
                 Effect::None
             }
             Message::Pick(entry) => Effect::Playback(playback::Message::Pick(entry)),
@@ -235,6 +314,7 @@ impl Drawer {
                 match self.tab {
                     Tab::Queue => {}
                     Tab::Suggested => self.suggested = None,
+                    Tab::Lyrics => self.lyrics = None,
                     Tab::Credits => self.credits = None,
                 }
                 self.wanted()
@@ -248,8 +328,27 @@ impl Drawer {
                 );
                 Effect::None
             }
+            Message::Lyrics(track_id, result) => {
+                TabRead::arrived(&mut self.lyrics, track_id, result, "the lyrics");
+                self.follow.line = None;
+                Effect::None
+            }
             Message::Credits(track_id, result) => {
                 TabRead::arrived(&mut self.credits, track_id, result, "the credits");
+                Effect::None
+            }
+            Message::Measured(line, measure) => {
+                if !self.follow.on || self.follow.line != Some(Some(line)) {
+                    return Effect::None;
+                }
+                // The line in the middle, as far as the tab scrolls.
+                let top = measure.line.y - measure.content.y;
+                let offset = top + measure.line.height / 2.0 - measure.viewport.height / 2.0;
+                let end = (measure.content.height - measure.viewport.height).max(0.0);
+                self.scroll_to(offset.clamp(0.0, end))
+            }
+            Message::Sync => {
+                self.follow = Follow::default();
                 Effect::None
             }
             Message::PlaySuggested(index) => {
@@ -302,6 +401,7 @@ impl Drawer {
         if self.tab != tab || !self.open {
             // The Shell scrolls the new tab to its top.
             self.viewport.offset = 0.0;
+            self.follow = Follow::default();
         }
         self.tab = tab;
         if !self.open {
@@ -311,13 +411,84 @@ impl Drawer {
         self.wanted()
     }
 
-    /// The current track is now `track`.
-    pub fn playing(&mut self, track: Option<&Track>) -> Effect {
+    /// The current track is now `track`, `position` seconds in.
+    pub fn playing(&mut self, track: Option<&Track>, position: f32) -> Effect {
+        self.position = position;
         if self.track.as_ref().map(|track| track.id) == track.map(|track| track.id) {
             return Effect::None;
         }
         self.track = track.cloned();
+        self.follow = Follow::default();
         self.wanted()
+    }
+
+    /// The scroll that brings the line sung into view, when the Lyrics tab
+    /// follows it and it's moved on. Lyrics without synced lines go to
+    /// their top, once.
+    pub fn follow(&mut self) -> Effect {
+        let Some(lyrics) = self.lyrics_showing() else {
+            return Effect::None;
+        };
+        let line = lyrics.active(self.position);
+        if !self.follow.on || self.follow.line == Some(line) {
+            return Effect::None;
+        }
+        self.follow.line = Some(line);
+        match line {
+            Some(line) => Effect::Measure(line),
+            None => self.scroll_to(0.0),
+        }
+    }
+
+    /// The current track's lyrics, while their tab shows.
+    fn lyrics_showing(&self) -> Option<&Lyrics> {
+        let track = self.track.as_ref()?;
+        self.lyrics
+            .as_ref()
+            .filter(|read| self.showing() == Some(Tab::Lyrics) && read.track_id == track.id)?
+            .remote
+            .loaded()
+    }
+
+    /// Whether the user scrolled synced lyrics away from the line sung.
+    fn paused(&self) -> bool {
+        !self.follow.on
+            && self
+                .lyrics_showing()
+                .is_some_and(|lyrics| lyrics.synced.is_some())
+    }
+
+    fn scroll_to(&mut self, offset: f32) -> Effect {
+        // The tab says where it is only when that changes.
+        let landed = (self.viewport.offset - offset).abs() <= LANDED;
+        self.follow.placed = Some(Placed { offset, landed });
+        Effect::ScrollTo(offset)
+    }
+
+    /// The Lyrics tab is `offset` down, of at most `end`: if the tab
+    /// didn't scroll there itself, the user did.
+    fn scrolled(&mut self, offset: f32, end: f32) {
+        // Resized: the line sung has moved, so it's measured again.
+        let resized = self
+            .follow
+            .end
+            .replace(end)
+            .is_some_and(|before| (before - end).abs() > LANDED);
+        if resized {
+            self.follow.line = None;
+        }
+        let Some(placed) = self.follow.placed.as_mut() else {
+            return;
+        };
+        let there = (placed.offset - offset).abs() <= LANDED;
+        // A resize cut the tab's own scroll short.
+        let cut = resized && offset < placed.offset && (end - offset).abs() <= LANDED;
+        if there || cut {
+            placed.offset = offset;
+            placed.landed = true;
+        } else if placed.landed {
+            self.follow.on = false;
+        }
     }
 
     /// The read the tab showing needs, when it has none for the current
@@ -333,11 +504,15 @@ impl Drawer {
                 self.suggested = Some(TabRead::loading(track.id));
                 Effect::ReadSuggested(track.clone())
             }
+            Tab::Lyrics if !current(self.lyrics.as_ref().map(|read| read.track_id)) => {
+                self.lyrics = Some(TabRead::loading(track.id));
+                Effect::ReadLyrics(track.id)
+            }
             Tab::Credits if !current(self.credits.as_ref().map(|read| read.track_id)) => {
                 self.credits = Some(TabRead::loading(track.id));
                 Effect::ReadCredits(track.id)
             }
-            Tab::Suggested | Tab::Credits => Effect::None,
+            Tab::Suggested | Tab::Lyrics | Tab::Credits => Effect::None,
         }
     }
 
@@ -347,6 +522,7 @@ impl Drawer {
         let load = match self.tab {
             Tab::Queue => None,
             Tab::Suggested => self.suggested.as_mut().map(|read| &mut read.load),
+            Tab::Lyrics => self.lyrics.as_mut().map(|read| &mut read.load),
             Tab::Credits => self.credits.as_mut().map(|read| &mut read.load),
         };
         if let Some(load) = load {
@@ -448,6 +624,7 @@ impl Drawer {
         let bar = row![
             pill(Tab::Queue, Icon::ListMusic, "Play queue"),
             pill(Tab::Suggested, Icon::Sparkles, "Suggested tracks"),
+            pill(Tab::Lyrics, Icon::MicVocal, "Lyrics"),
             pill(Tab::Credits, Icon::Users, "Credits"),
             space::horizontal(),
             round(Icon::Maximize2, Message::Maximize),
@@ -458,18 +635,35 @@ impl Drawer {
         let content = match self.tab {
             Tab::Queue => self.queue(playback, images, clock),
             Tab::Suggested => self.suggested(playback, images),
+            Tab::Lyrics => self.lyrics(playback),
             Tab::Credits => self.credits(playback),
         };
         let content = scrollable(container(content).padding([TAB_TOP, TAB_PADDING]))
             .id(SCROLL)
             .on_scroll(|viewport| {
-                Message::Scrolled(Viewport {
-                    offset: viewport.absolute_offset().y,
-                    height: viewport.bounds().height,
-                })
+                let height = viewport.bounds().height;
+                let end = (viewport.content_bounds().height - height).max(0.0);
+                Message::Scrolled(
+                    Viewport {
+                        offset: viewport.absolute_offset().y,
+                        height,
+                    },
+                    end,
+                )
             })
             .width(Length::Fill)
             .height(Length::Fill);
+        let sync = self.paused().then(|| {
+            let sync = button(text("Sync lyrics").size(13))
+                .padding([8, 16])
+                .style(style::accent_pill)
+                .on_press(Message::Sync);
+            container(sync)
+                .center_x(Length::Fill)
+                .align_bottom(Length::Fill)
+                .padding(24)
+        });
+        let content = stack![content].push(sync);
         column![
             container(bar).padding(iced::Padding::new(TAB_PADDING).top(20.0).bottom(8.0)),
             content
@@ -697,6 +891,76 @@ impl Drawer {
             space().height(below)
         ]
         .into()
+    }
+
+    /// The lyrics: synced lines with the one sung lit, else plain text.
+    /// Lines aren't clickable.
+    fn lyrics<'a>(&'a self, playback: &'a Playback) -> Element<'a, Message> {
+        let current = playback.current().map(|track| track.id);
+        let read = self
+            .lyrics
+            .as_ref()
+            .filter(|read| Some(read.track_id) == current);
+        let lyrics = match read.map(|read| &read.remote) {
+            None | Some(Remote::Loading) => return loading(),
+            Some(Remote::Failed(e)) => return failed(e),
+            Some(Remote::NotFound) => None,
+            Some(Remote::Loaded(lyrics)) => Some(lyrics),
+        };
+        let no_lyrics = || empty(Icon::MicVocal, "No lyrics available");
+        let Some(lyrics) = lyrics else {
+            return no_lyrics();
+        };
+        let align = if lyrics.right_to_left {
+            iced::alignment::Horizontal::Right
+        } else {
+            iced::alignment::Horizontal::Left
+        };
+        let words = |words: &'a str| {
+            text(words)
+                .shaping(text::Shaping::Advanced)
+                .width(Length::Fill)
+                .align_x(align)
+        };
+        let body: Element<'a, Message> = match (&lyrics.synced, &lyrics.plain) {
+            (Some(lines), _) => {
+                let sung = lyrics.active(self.position);
+                let lines = lines.iter().enumerate().map(|(i, line)| {
+                    let (color, sung) = match sung {
+                        Some(sung) if sung == i => (style::TEXT_PRIMARY, true),
+                        Some(sung) if i < sung => (style::TEXT_MUTED, false),
+                        _ => (style::TEXT_DISABLED, false),
+                    };
+                    // A break between verses, which would be invisible lit.
+                    let line = if line.text.is_empty() {
+                        "\u{266A}"
+                    } else {
+                        line.text.as_str()
+                    };
+                    let line = container(words(line).size(24).font(BOLD).color(color));
+                    if sung { line.id(SUNG) } else { line }.into()
+                });
+                Column::with_children(lines).spacing(16).into()
+            }
+            (None, Some(plain)) => words(plain)
+                .size(16)
+                .line_height(1.8)
+                .color(style::TEXT_SECONDARY)
+                .into(),
+            (None, None) => return no_lyrics(),
+        };
+        let provider = lyrics.provider.as_ref().map(|provider| {
+            text(format!("Lyrics provided by {provider}"))
+                .width(Length::Fill)
+                .align_x(align)
+                .size(12)
+                .color(style::TEXT_DISABLED)
+        });
+        column![body]
+            .push(provider)
+            .spacing(32)
+            .padding(iced::Padding::new(0.0).bottom(64.0))
+            .into()
     }
 
     /// What the current track is, then who did what on it.
@@ -957,5 +1221,52 @@ fn tab_pill(_theme: &Theme, status: button::Status, on: bool) -> button::Style {
         text_color: style::TEXT_PRIMARY,
         border: style::rounded(999.0),
         ..button::Style::default()
+    }
+}
+
+/// Find where the line sung is in the tab's scrollable.
+pub fn measure() -> Task<Measure> {
+    iced::advanced::widget::operate(Measuring::default())
+}
+
+#[derive(Default)]
+struct Measuring {
+    scrollable: Option<(Rectangle, Rectangle)>,
+    line: Option<Rectangle>,
+}
+
+impl Operation<Measure> for Measuring {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<Measure>)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+        if id == Some(&SUNG) {
+            self.line = Some(bounds);
+        }
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        _translation: Vector,
+        _state: &mut dyn operation::Scrollable,
+    ) {
+        if id == Some(&SCROLL) {
+            self.scrollable = Some((bounds, content_bounds));
+        }
+    }
+
+    fn finish(&self) -> operation::Outcome<Measure> {
+        match (self.scrollable, self.line) {
+            (Some((viewport, content)), Some(line)) => operation::Outcome::Some(Measure {
+                viewport,
+                content,
+                line,
+            }),
+            _ => operation::Outcome::None,
+        }
     }
 }

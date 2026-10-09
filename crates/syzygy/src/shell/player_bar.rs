@@ -255,13 +255,15 @@ fn mode<'a>(glyph: Icon, on: bool, message: Message) -> Element<'a, Message> {
         .into()
 }
 
-/// The drawer's Play queue, lit while it shows, and the maximized player.
+/// The drawer's Lyrics and Play queue, each lit while it shows, and the
+/// maximized player.
 fn toggles<'a>(drawer: Option<Tab>) -> Element<'a, Message> {
-    let queue = drawer == Some(Tab::Queue);
-    let color = if queue {
-        style::ACCENT
-    } else {
-        style::TEXT_MUTED
+    let color = |tab| {
+        if drawer == Some(tab) {
+            style::ACCENT
+        } else {
+            style::TEXT_MUTED
+        }
     };
     let toggle = |glyph, color, message| {
         button(container(icon(glyph, 16.0, color)).center(30))
@@ -270,7 +272,16 @@ fn toggles<'a>(drawer: Option<Tab>) -> Element<'a, Message> {
             .on_press(message)
     };
     row![
-        toggle(Icon::ListMusic, color, Message::Drawer(Tab::Queue)),
+        toggle(
+            Icon::MicVocal,
+            color(Tab::Lyrics),
+            Message::Drawer(Tab::Lyrics)
+        ),
+        toggle(
+            Icon::ListMusic,
+            color(Tab::Queue),
+            Message::Drawer(Tab::Queue)
+        ),
         toggle(Icon::Maximize2, style::TEXT_MUTED, Message::Maximize),
     ]
     .spacing(4)

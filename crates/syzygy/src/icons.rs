@@ -28,6 +28,7 @@ pub enum Icon {
     ListMusic,
     ListPlus,
     Maximize2,
+    MicVocal,
     Minimize2,
     Music,
     Pause,
@@ -54,7 +55,7 @@ pub enum Icon {
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 43] = [
+const SOURCES: [&str; 44] = [
     include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/bell.svg"),
     include_str!("../icons/calendar.svg"),
@@ -75,6 +76,7 @@ const SOURCES: [&str; 43] = [
     include_str!("../icons/list-music.svg"),
     include_str!("../icons/list-plus.svg"),
     include_str!("../icons/maximize-2.svg"),
+    include_str!("../icons/mic-vocal.svg"),
     include_str!("../icons/minimize-2.svg"),
     include_str!("../icons/music.svg"),
     include_str!("../icons/pause.svg"),
