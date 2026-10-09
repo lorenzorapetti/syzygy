@@ -1,11 +1,12 @@
 //! The 90px player bar along the bottom, split 30/40/30: what's playing
 //! and where from on the left, the transport over the seek bar in the
-//! middle, the volume on the right.
+//! middle, the drawer and maximize toggles and the volume on the right.
 
 use iced::widget::slider::{Handle, HandleShape, Rail};
 use iced::widget::{Space, button, column, container, row, slider, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme, font};
 
+use super::drawer::Tab;
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::page::{self, Link};
@@ -49,6 +50,9 @@ pub enum Message {
     /// The volume slider was let go.
     VolumeSet,
     ToggleMute,
+    /// Open the drawer on this tab, or close it if it shows.
+    Drawer(Tab),
+    Maximize,
     Link(Link),
 }
 
@@ -57,6 +61,8 @@ pub enum Effect {
     Playback(playback::Message),
     /// Remember the volume.
     SaveVolume,
+    Drawer(Tab),
+    Maximize,
     Link(Link),
 }
 
@@ -80,11 +86,19 @@ impl PlayerBar {
             Message::Volume(volume) => Effect::Playback(playback::Message::SetVolume(volume)),
             Message::VolumeSet => Effect::SaveVolume,
             Message::ToggleMute => Effect::Playback(playback::Message::ToggleMute),
+            Message::Drawer(tab) => Effect::Drawer(tab),
+            Message::Maximize => Effect::Maximize,
             Message::Link(link) => Effect::Link(link),
         }
     }
 
-    pub fn view<'a>(&'a self, playback: &'a Playback, images: &'a Images) -> Element<'a, Message> {
+    /// `drawer` is the tab the drawer shows, while it's open.
+    pub fn view<'a>(
+        &'a self,
+        playback: &'a Playback,
+        images: &'a Images,
+        drawer: Option<Tab>,
+    ) -> Element<'a, Message> {
         let bar = row![
             container(now_playing(playback, images))
                 .width(Length::FillPortion(3))
@@ -92,9 +106,13 @@ impl PlayerBar {
             container(self.controls(playback))
                 .width(Length::FillPortion(4))
                 .center_x(Length::Fill),
-            container(volume(playback))
-                .width(Length::FillPortion(3))
-                .align_right(Length::Fill),
+            container(
+                row![space::horizontal(), toggles(drawer), volume(playback)]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+            )
+            .width(Length::FillPortion(3))
+            .align_right(Length::Fill),
         ]
         .spacing(16)
         .align_y(Alignment::Center);
@@ -108,7 +126,7 @@ impl PlayerBar {
 
     /// Shuffle, Previous, play or pause, Next and Repeat over the seek bar,
     /// between the time played and the track's length.
-    fn controls<'a>(&self, playback: &'a Playback) -> Element<'a, Message> {
+    pub fn controls<'a>(&self, playback: &'a Playback) -> Element<'a, Message> {
         let glyph = match playback.status() {
             Status::Playing => Icon::Pause,
             _ => Icon::Play,
@@ -237,6 +255,29 @@ fn mode<'a>(glyph: Icon, on: bool, message: Message) -> Element<'a, Message> {
         .into()
 }
 
+/// The drawer's Play queue, lit while it shows, and the maximized player.
+fn toggles<'a>(drawer: Option<Tab>) -> Element<'a, Message> {
+    let queue = drawer == Some(Tab::Queue);
+    let color = if queue {
+        style::ACCENT
+    } else {
+        style::TEXT_MUTED
+    };
+    let toggle = |glyph, color, message| {
+        button(container(icon(glyph, 16.0, color)).center(30))
+            .padding(0)
+            .style(style::icon_button)
+            .on_press(message)
+    };
+    row![
+        toggle(Icon::ListMusic, color, Message::Drawer(Tab::Queue)),
+        toggle(Icon::Maximize2, style::TEXT_MUTED, Message::Maximize),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 /// Mute, and the volume. Its icon says how loud: crossed out at 0, one
 /// wave below half, two above.
 fn volume(playback: &Playback) -> Element<'_, Message> {
@@ -257,7 +298,7 @@ fn volume(playback: &Playback) -> Element<'_, Message> {
         .step(0.01_f32)
         .width(VOLUME_WIDTH)
         .style(scrubber);
-    row![space::horizontal(), mute, slider]
+    row![mute, slider]
         .spacing(8)
         .align_y(Alignment::Center)
         .into()

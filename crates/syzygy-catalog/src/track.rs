@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use syzygy_tidal::models::{TidalArtist, TidalTrack};
+use syzygy_tidal::models::{TidalArtist, TidalCredit, TidalTrack};
 
 use crate::home_feed::Cover;
 
@@ -83,6 +83,37 @@ impl From<TidalTrack> for Track {
     }
 }
 
+/// Who did one thing on a track: its producers, its composers, its lyricist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Credit {
+    /// What they did, as TIDAL names it: "Producer", "Composer".
+    pub role: String,
+    pub contributors: Vec<Contributor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contributor {
+    pub name: String,
+    /// Their Artist page, when TIDAL has one.
+    pub artist_id: Option<u64>,
+}
+
+impl From<TidalCredit> for Credit {
+    fn from(credit: TidalCredit) -> Self {
+        Credit {
+            role: credit.credit_type,
+            contributors: credit
+                .contributors
+                .into_iter()
+                .map(|contributor| Contributor {
+                    name: contributor.name,
+                    artist_id: contributor.id,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// `artists` when TIDAL sends the list, else the one `artist`.
 pub(crate) fn artists(
     artists: Option<Vec<TidalArtist>>,
@@ -131,6 +162,32 @@ mod tests {
             .expect("a track");
 
         assert_eq!(track.track_radio, None);
+    }
+
+    #[test]
+    fn a_credit_names_its_role_and_who_did_it() {
+        let credit: TidalCredit = serde_json::from_value(json!({
+            "type": "Producer",
+            "contributors": [{ "name": "Nellee Hooper", "id": 3 }, { "name": "Björk" }],
+        }))
+        .expect("a credit");
+
+        assert_eq!(
+            Credit::from(credit),
+            Credit {
+                role: "Producer".to_string(),
+                contributors: vec![
+                    Contributor {
+                        name: "Nellee Hooper".to_string(),
+                        artist_id: Some(3),
+                    },
+                    Contributor {
+                        name: "Björk".to_string(),
+                        artist_id: None,
+                    },
+                ],
+            }
+        );
     }
 
     #[test]

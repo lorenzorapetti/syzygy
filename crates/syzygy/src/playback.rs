@@ -32,6 +32,9 @@
 //!
 //! Whatever changes where listening is asks for it to be saved
 //! ([`Effect::SaveSnapshot`]), and the next launch restores it stopped.
+//!
+//! The drawer's Queue tab picks, moves and removes [`Entry`]s, and clears
+//! what's upcoming.
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -122,8 +125,8 @@ struct SourcePlay {
     tracks: Arc<Vec<Track>>,
     /// Indices into `tracks`, in the order they play.
     order: Vec<usize>,
-    /// The steps before this have played or are playing; the rest are
-    /// upcoming.
+    /// The steps before this have played, are playing or were skipped by
+    /// a pick; the rest are upcoming.
     next: usize,
     /// The order isn't the source's: a Shuffle play, or Shuffle on.
     shuffled: bool,
@@ -178,6 +181,85 @@ impl SourcePlay {
             .iter()
             .map(|&index| &self.tracks[index])
     }
+
+    /// Where `slot` is in the play order, if it's still upcoming in it.
+    fn find(&self, slot: Slot) -> Option<usize> {
+        if slot.play != self.play {
+            return None;
+        }
+        let at = self.order[self.next..]
+            .iter()
+            .position(|&index| index == slot.track)?;
+        Some(self.next + at)
+    }
+}
+
+impl Listening {
+    /// The track of the drawer's row, while it's still listed.
+    fn track(&self, entry: Entry) -> Option<&Track> {
+        fn item(items: &VecDeque<Item>, id: EntryId) -> Option<&Track> {
+            let item = items.iter().find(|item| item.id == id)?;
+            Some(&item.track)
+        }
+        match entry {
+            Entry::Played(id) => item(&self.history, id),
+            Entry::Queued(id) => item(&self.manual, id),
+            Entry::Upcoming(slot) => {
+                let play = self.source.as_ref()?;
+                play.find(slot).map(|at| &play.tracks[play.order[at]])
+            }
+        }
+    }
+
+    /// Take `entry` out of what's upcoming. History stays as it is.
+    fn remove(&mut self, entry: Entry) {
+        match entry {
+            Entry::Played(_) => {}
+            Entry::Queued(id) => self.manual.retain(|queued| queued.id != id),
+            Entry::Upcoming(slot) => {
+                if let Some(play) = &mut self.source
+                    && let Some(at) = play.find(slot)
+                {
+                    play.order.remove(at);
+                }
+            }
+        }
+    }
+
+    /// Move `entry` to place `to` of its section: the Manual queue, or
+    /// what's left of the source. Past the end is the end.
+    fn shift(&mut self, entry: Entry, to: usize) {
+        match entry {
+            Entry::Played(_) => {}
+            Entry::Queued(id) => {
+                let manual = &mut self.manual;
+                if let Some(at) = manual.iter().position(|queued| queued.id == id) {
+                    let queued = manual.remove(at).expect("found above");
+                    manual.insert(to.min(manual.len()), queued);
+                }
+            }
+            Entry::Upcoming(slot) => {
+                if let Some(play) = &mut self.source
+                    && let Some(at) = play.find(slot)
+                {
+                    let index = play.order.remove(at);
+                    let to = (play.next + to).min(play.order.len());
+                    play.order.insert(to, index);
+                }
+            }
+        }
+    }
+
+    /// Nothing upcoming: no Manual queue, the play order ends with the
+    /// current track and the fill stops. The source stays, for Repeat all.
+    fn clear(&mut self) {
+        self.manual.clear();
+        if let Some(play) = &mut self.source {
+            play.order.truncate(play.next);
+            play.fill = None;
+            play.round = None;
+        }
+    }
 }
 
 /// Every index of `len` tracks: in random order with `shuffle` on, in
@@ -207,6 +289,24 @@ struct Item {
 /// The engine echoes it for an armed entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryId(pub u64);
+
+/// A row of the drawer's Queue tab: a track in History, in the Manual
+/// queue, or in what's left of the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Entry {
+    Played(EntryId),
+    Queued(EntryId),
+    Upcoming(Slot),
+}
+
+/// An upcoming track's place in a play of the source: it stays put while
+/// the play order around it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slot {
+    play: u64,
+    /// Its index in the source's tracks, which the play order holds once.
+    track: usize,
+}
 
 /// A Track radio fetch, for the entry `after`, the last to play.
 struct RadioFetch {
@@ -434,6 +534,16 @@ pub enum Message {
     RadioArrived(RadioId, Option<Radio>),
     /// What waited for consent, to go ahead with explicit tracks skipped.
     WithoutExplicit(Pending),
+    /// Play the drawer's row now. A track from the source jumps there,
+    /// passing over the ones before it; a queued one leaves the queue; one
+    /// from History plays again, leaving what's upcoming as it is.
+    Pick(Entry),
+    /// Take the drawer's row out of what's upcoming.
+    Remove(Entry),
+    /// Move the drawer's row to this place in its section.
+    Move(Entry, usize),
+    /// Empty the Manual queue and what's left of the source.
+    Clear,
 }
 
 /// What [`Playback::update`] did.
@@ -459,8 +569,8 @@ impl From<Pending> for Message {
 }
 
 /// Whether `message` chooses explicit tracks to play: a start whose tracks
-/// from the chosen one on include one, or queueing one.
-fn chooses_explicit(message: &Message) -> bool {
+/// from the chosen one on include one, or queueing or picking one.
+fn chooses_explicit(message: &Message, listening: &Listening) -> bool {
     match message {
         Message::Start(request) => {
             let from = match request.start {
@@ -473,6 +583,7 @@ fn chooses_explicit(message: &Message) -> bool {
                 .is_some_and(|tracks| tracks.iter().any(|track| track.explicit))
         }
         Message::PlayNext(track, _) | Message::AddToQueue(track, _) => track.explicit,
+        Message::Pick(entry) => listening.track(*entry).is_some_and(|track| track.explicit),
         _ => false,
     }
 }
@@ -498,7 +609,11 @@ fn changes_listening(message: &Message) -> bool {
         | Message::PageArrived(..)
         | Message::FillEnded(_)
         | Message::RadioArrived(..)
-        | Message::WithoutExplicit(_) => true,
+        | Message::WithoutExplicit(_)
+        | Message::Pick(_)
+        | Message::Remove(_)
+        | Message::Move(..)
+        | Message::Clear => true,
         Message::Position(_)
         | Message::DeviceBusy(_)
         | Message::SetVolume(_)
@@ -623,7 +738,7 @@ impl Playback {
     }
 
     pub fn update(&mut self, message: Message) -> Outcome {
-        if !self.allow_explicit && chooses_explicit(&message) {
+        if !self.allow_explicit && chooses_explicit(&message, &self.listening) {
             return Outcome::NeedsExplicitConsent(Pending(Box::new(message)));
         }
         let saves = changes_listening(&message);
@@ -643,6 +758,7 @@ impl Playback {
                 | Message::Next
                 | Message::Previous
                 | Message::Seek(_)
+                | Message::Pick(_)
         ) {
             self.rate_limited = None;
             if let Some(fetch) = &mut self.radio {
@@ -844,10 +960,82 @@ impl Playback {
             Message::WithoutExplicit(pending) => match *pending.0 {
                 // Moving on skips them.
                 message @ Message::Start(_) => self.apply(message),
-                // Queued, it would only be skipped.
+                // Queued or picked, it would only be skipped.
                 _ => vec![],
             },
+            Message::Pick(entry) => self.pick(entry),
+            Message::Remove(entry) => {
+                self.edit(|listening| listening.remove(entry));
+                vec![]
+            }
+            // Its place is where the drawer shows it, so what a play
+            // loading now would roll back to, which lists that play's
+            // track as upcoming, keeps its own order.
+            Message::Move(entry, to) => {
+                self.listening.shift(entry, to);
+                vec![]
+            }
+            // Only what the drawer shows: a failed play brings back what
+            // it would have played after.
+            Message::Clear => {
+                let filling = self.fill_id();
+                self.listening.clear();
+                match filling {
+                    Some(_) => vec![Effect::CancelFill],
+                    None => vec![],
+                }
+            }
         }
+    }
+
+    /// Change what's upcoming, in what a play loading now would roll back
+    /// to as well, so the change outlasts it failing.
+    fn edit(&mut self, change: impl Fn(&mut Listening)) {
+        change(&mut self.listening);
+        if let Some(rollback) = &mut self.rollback {
+            change(&mut rollback.listening);
+        }
+    }
+
+    /// Play the drawer's row now, the current track going into History.
+    /// Nothing for a row that's no longer listed.
+    fn pick(&mut self, entry: Entry) -> Vec<Effect> {
+        let Some(track) = self.listening.track(entry) else {
+            return vec![];
+        };
+        if !track.available {
+            return vec![Effect::Notify(Notice::Unavailable)];
+        }
+        self.failures = 0;
+        self.snapshot();
+        match entry {
+            Entry::Played(id) => {
+                let history = &self.listening.history;
+                let played = history.iter().find(|item| item.id == id).cloned();
+                // A play of its own: the cursor stays where it is.
+                let again = Item {
+                    id: self.stamp_entry(),
+                    step: None,
+                    ..played.expect("listed above")
+                };
+                self.retire_current();
+                self.listening.current = Some(again);
+            }
+            Entry::Queued(id) => {
+                let manual = &mut self.listening.manual;
+                let at = manual.iter().position(|queued| queued.id == id);
+                let queued = manual.remove(at.expect("listed above"));
+                self.retire_current();
+                self.listening.current = queued;
+            }
+            Entry::Upcoming(slot) => {
+                if let Some(play) = &mut self.listening.source {
+                    play.next = play.find(slot).expect("listed above");
+                }
+                self.step();
+            }
+        }
+        self.play(None)
     }
 
     /// The play loading now failed. A track that can't play is skipped,
@@ -942,10 +1130,6 @@ impl Playback {
     }
 
     /// The Manual queue, in the order it plays.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
-    )]
     pub fn queued(&self) -> impl Iterator<Item = (EntryId, &Track)> {
         self.listening
             .manual
@@ -954,21 +1138,30 @@ impl Playback {
     }
 
     /// What's left of the source after the Manual queue, in order.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
-    )]
-    pub fn upcoming(&self) -> impl Iterator<Item = &Track> {
-        self.listening.source.iter().flat_map(SourcePlay::rest)
+    pub fn upcoming(&self) -> impl Iterator<Item = (Slot, &Track)> {
+        self.listening.source.iter().flat_map(|play| {
+            play.order[play.next..].iter().map(|&index| {
+                let slot = Slot {
+                    play: play.play,
+                    track: index,
+                };
+                (slot, &play.tracks[index])
+            })
+        })
     }
 
     /// The tracks already played, oldest first.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the drawer's Queue tab (ticket 29) lists them")
-    )]
-    pub fn history(&self) -> impl Iterator<Item = &Track> {
-        self.listening.history.iter().map(|entry| &entry.track)
+    pub fn history(&self) -> impl Iterator<Item = (EntryId, &Track)> {
+        self.listening
+            .history
+            .iter()
+            .map(|entry| (entry.id, &entry.track))
+    }
+
+    /// The Playback source, which stays while a queued entry plays.
+    pub fn source(&self) -> Option<&Source> {
+        let play = self.listening.source.as_ref()?;
+        Some(&play.source)
     }
 
     pub fn status(&self) -> Status {
@@ -1169,6 +1362,15 @@ impl Playback {
             } else if !self.start_radio() {
                 return false;
             }
+        }
+        self.step()
+    }
+
+    /// Put the current track in History and make the next step of the
+    /// play order current. False, with nothing changed, without a source.
+    fn step(&mut self) -> bool {
+        if self.listening.source.is_none() {
+            return false;
         }
         self.retire_current();
         let id = self.stamp_entry();

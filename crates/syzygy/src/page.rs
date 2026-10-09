@@ -20,7 +20,7 @@ pub mod playlist;
 pub mod profile;
 pub mod profile_playlists;
 pub mod search;
-mod track_list;
+pub mod track_list;
 mod track_menu;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
@@ -576,6 +576,20 @@ pub fn rounded_cover<'a>(
             images.cover(&url, size, radius, wanted)
         }
         None => images::placeholder(size, radius),
+    }
+}
+
+/// The current track's album cover for the drawer and the maximized
+/// player, `side` square, asked for at 640px or more.
+pub fn large_cover<'a>(images: &'a Images, track: &Track, side: f32) -> Element<'a, Link> {
+    const RADIUS: f32 = 8.0;
+    match track.album.as_ref().and_then(|album| album.cover.as_ref()) {
+        Some(cover) => {
+            let url = cover.url((side * 2.0).max(640.0) as u32);
+            let wanted = Link::CoverWanted(url.clone());
+            images.cover(&url, side, RADIUS, wanted)
+        }
+        None => images::placeholder(side, RADIUS),
     }
 }
 

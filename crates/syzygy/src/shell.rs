@@ -1,8 +1,11 @@
 //! The signed-in Shell: the sidebar, the header with its search, the
-//! current Page and the Back stack, and the modal and toasts over them.
+//! current Page and the Back stack, the now-playing drawer and the
+//! maximized player, and the modal and toasts over them.
 
 mod back_stack;
 mod consent;
+pub mod drawer;
+mod maximized;
 mod play_card;
 pub mod player_bar;
 pub mod search;
@@ -16,6 +19,7 @@ use iced::task;
 use iced::widget::{button, column, container, operation, row, scrollable, space, stack};
 use iced::{Alignment, Element, Length, Task};
 use std::sync::Arc;
+use std::time::Instant;
 use syzygy_catalog::{Catalog, Feed, HomeFeed, Read, Track};
 
 use crate::app::{self, Services};
@@ -26,9 +30,11 @@ use crate::page::{
     artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
 };
 use crate::playback::{self, Notice, PlayRequest, Playback, Status};
+use crate::radio;
 use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
+use drawer::Drawer;
 use player_bar::PlayerBar;
 use search::Search;
 use sidebar::Sidebar;
@@ -57,6 +63,9 @@ pub struct Shell {
     sidebar: Sidebar,
     search: Search,
     player_bar: PlayerBar,
+    drawer: Drawer,
+    /// Whether the maximized player covers the window.
+    maximized: bool,
     next_id: u64,
     toasts: Toasts,
     /// Whether the Feed has something the user hasn't seen.
@@ -85,13 +94,16 @@ struct Current {
 pub enum Message {
     Scrolled(PageId, Viewport),
     DismissToast(ToastId),
-    /// Escape: it closes the modal, or else the search dropdown.
+    /// Escape: it closes the modal, or else the maximized player, the
+    /// drawer or the search dropdown.
     Escape,
     /// The explicit-consent modal was answered.
     Consent(consent::Answer),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
+    Drawer(drawer::Message),
+    Maximized(maximized::Message),
     /// The avatar: the user's own Profile.
     OpenProfile,
     /// The Feed check after login.
@@ -123,6 +135,8 @@ impl Shell {
             sidebar,
             search: Search::default(),
             player_bar: PlayerBar::default(),
+            drawer: Drawer::default(),
+            maximized: false,
             next_id: 1,
             toasts: Toasts::default(),
             unseen: Unseen::default(),
@@ -173,6 +187,7 @@ impl Shell {
         context: &Context,
     ) -> Task<app::Message> {
         self.radio_read = None;
+        self.close_overlays();
         if route == self.current.route {
             return scroll_to(0.0);
         }
@@ -226,7 +241,10 @@ impl Shell {
             }
             Message::DismissToast(id) => self.toasts.dismiss(id),
             Message::Escape => {
-                if self.consent.take().is_none() {
+                let closed = self.consent.take().is_some()
+                    || std::mem::take(&mut self.maximized)
+                    || self.drawer.close();
+                if !closed {
                     let effect = self.search.update(search::Message::Escape);
                     return self.run_search(effect, services, context);
                 }
@@ -260,10 +278,31 @@ impl Shell {
                         Task::done(app::Message::Playback(message))
                     }
                     player_bar::Effect::SaveVolume => Task::done(app::Message::SaveVolume),
+                    player_bar::Effect::Drawer(tab) => {
+                        let effect = self.drawer.toggle(tab);
+                        let read = self.run_drawer(effect, services, context);
+                        Task::batch([read, drawer_to_top()])
+                    }
+                    player_bar::Effect::Maximize => {
+                        self.maximized = true;
+                        Task::none()
+                    }
                     player_bar::Effect::Link(link) => {
                         self.run_action(link.follow(), services, context)
                     }
                 };
+            }
+            Message::Drawer(message) => {
+                let top = match message {
+                    drawer::Message::Show(_) => drawer_to_top(),
+                    _ => Task::none(),
+                };
+                let effect = self.drawer.update(message);
+                return Task::batch([self.run_drawer(effect, services, context), top]);
+            }
+            Message::Maximized(maximized::Message::Minimize) => self.maximized = false,
+            Message::Maximized(maximized::Message::PlayerBar(message)) => {
+                return self.update(Message::PlayerBar(message), services, context);
             }
             Message::OpenProfile => {
                 if let Some(user_id) = self.user_id {
@@ -306,6 +345,23 @@ impl Shell {
             }
         }
         Task::none()
+    }
+
+    /// The current track is now `track`: the drawer's tabs follow it.
+    pub fn playing(
+        &mut self,
+        track: Option<&Track>,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let effect = self.drawer.playing(track);
+        self.run_drawer(effect, services, context)
+    }
+
+    /// Navigating anywhere shows where it went.
+    fn close_overlays(&mut self) {
+        self.drawer.close();
+        self.maximized = false;
     }
 
     /// Playback chose explicit tracks while they aren't allowed: ask.
@@ -358,6 +414,7 @@ impl Shell {
     /// and aborting its reads. The scrollable keeps the offset and clamps it
     /// to the content, so it lands once the Page's data is tall enough.
     fn open(&mut self, entry: Entry, services: &Services, context: &Context) -> Task<app::Message> {
+        self.close_overlays();
         let offset = entry.offset;
         if let Route::Search { query, .. } = &entry.route {
             self.search.showing(query);
@@ -489,6 +546,42 @@ impl Shell {
         }
     }
 
+    fn run_drawer(
+        &mut self,
+        effect: drawer::Effect,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let to_drawer = |message| app::Message::Shell(Message::Drawer(message));
+        let (task, handle) = match effect {
+            drawer::Effect::None => return Task::none(),
+            drawer::Effect::Playback(message) => {
+                return Task::done(app::Message::Playback(message));
+            }
+            drawer::Effect::Link(link) => return self.run_action(link.follow(), services, context),
+            drawer::Effect::Maximize => {
+                self.maximized = true;
+                return Task::none();
+            }
+            drawer::Effect::ReadSuggested(track) => {
+                let id = track.id;
+                Task::perform(
+                    radio::fetch(services.catalog.clone(), track),
+                    move |result| to_drawer(drawer::Message::Suggested(id, result)),
+                )
+                .abortable()
+            }
+            drawer::Effect::ReadCredits(id) => {
+                Task::perform(services.catalog.credits(id), move |result| {
+                    to_drawer(drawer::Message::Credits(id, result))
+                })
+                .abortable()
+            }
+        };
+        self.drawer.reading(handle);
+        task
+    }
+
     fn run_sidebar(
         &mut self,
         effect: sidebar::Effect,
@@ -566,18 +659,26 @@ impl Shell {
 
     /// Whether the Page shows the track in a list, where its row animates
     /// while it plays.
+    /// `track_id` is the current track's: the drawer's Queue tab shows it
+    /// too.
     pub fn shows_track(&self, track_id: u64) -> bool {
-        self.current.page.shows_track(track_id)
+        self.drawer.shows_current() || self.current.page.shows_track(track_id)
+    }
+
+    /// Whether the drawer slides, so frames are wanted.
+    pub fn is_animating(&self, now: Instant) -> bool {
+        self.drawer.is_animating(now)
     }
 
     /// `past_searches` are the user's, for the search dropdown. `clock` is
-    /// the seconds animations run on.
+    /// the seconds animations run on, and `now` the last frame.
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
         past_searches: &'a [String],
         playback: &'a Playback,
         clock: f32,
+        now: Instant,
     ) -> Element<'a, app::Message> {
         let id = self.current.id;
         let now_playing = playback
@@ -627,13 +728,28 @@ impl Shell {
         // Only once there's something to play.
         let player_bar = playback.current().map(|_| {
             self.player_bar
-                .view(playback, images)
+                .view(playback, images, self.drawer.showing())
                 .map(|message| app::Message::Shell(Message::PlayerBar(message)))
         });
+        // The drawer covers everything above the player bar.
+        let drawer = self
+            .drawer
+            .view(playback, images, clock, now)
+            .map(|drawer| drawer.map(|message| app::Message::Shell(Message::Drawer(message))));
         let main = column![
-            row![sidebar, column![self.header(), stack![page].push(dropdown)]].height(Length::Fill),
+            stack![row![
+                sidebar,
+                column![self.header(), stack![page].push(dropdown)]
+            ]]
+            .push(drawer)
+            .height(Length::Fill),
         ]
         .push(player_bar);
+        let maximized = self
+            .maximized
+            .then(|| maximized::view(&self.player_bar, playback, images))
+            .flatten()
+            .map(|view| view.map(|message| app::Message::Shell(Message::Maximized(message))));
         let modal = self
             .consent
             .as_ref()
@@ -642,7 +758,7 @@ impl Shell {
             .toasts
             .view()
             .map(|id| app::Message::Shell(Message::DismissToast(id)));
-        stack![main].push(modal).push(toasts).into()
+        stack![main].push(maximized).push(modal).push(toasts).into()
     }
 
     /// Back and forward, search and the avatar.
@@ -738,6 +854,14 @@ fn short(title: &str) -> String {
 
 fn play(request: PlayRequest) -> Task<app::Message> {
     Task::done(app::Message::Playback(playback::Message::Start(request)))
+}
+
+/// The drawer's tab, back at its top.
+fn drawer_to_top() -> Task<app::Message> {
+    operation::scroll_to(
+        drawer::SCROLL,
+        scrollable::AbsoluteOffset { x: 0.0, y: 0.0 },
+    )
 }
 
 fn scroll_to(offset: f32) -> Task<app::Message> {

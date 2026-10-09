@@ -122,7 +122,7 @@ fn fill(effects: &[Effect]) -> (FillId, Continuation) {
 fn play_order(playback: &Playback) -> Vec<u64> {
     current(playback)
         .into_iter()
-        .chain(ids(playback.upcoming()))
+        .chain(upcoming(playback))
         .collect()
 }
 
@@ -131,8 +131,13 @@ fn sorted(mut ids: Vec<u64>) -> Vec<u64> {
     ids
 }
 
+/// What's left of the source after the Manual queue, in order.
+fn upcoming(playback: &Playback) -> Vec<u64> {
+    playback.upcoming().map(|(_, track)| track.id).collect()
+}
+
 fn history(playback: &Playback) -> Vec<u64> {
-    ids(playback.history())
+    playback.history().map(|(_, track)| track.id).collect()
 }
 
 fn playing_from(playback: &Playback) -> Option<SourceRef> {
@@ -173,10 +178,6 @@ fn and_play(playback: &mut Playback, message: Message) -> Vec<Effect> {
         playback.send(played(token));
     }
     effects
-}
-
-fn ids<'a>(tracks: impl Iterator<Item = &'a Track>) -> Vec<u64> {
-    tracks.map(|track| track.id).collect()
 }
 
 fn current(playback: &Playback) -> Option<u64> {
@@ -241,7 +242,7 @@ fn a_track_plays_to_the_end_of_its_album_without_wrapping_around() {
         }]
     );
     assert_eq!(current(&playback), Some(103));
-    assert_eq!(ids(playback.upcoming()), vec![104, 105]);
+    assert_eq!(upcoming(&playback), vec![104, 105]);
 }
 
 #[test]
@@ -251,7 +252,7 @@ fn each_finished_track_starts_the_next_until_the_album_runs_out() {
     let effects = playback.send(Message::TrackFinished);
     assert!(matches!(effects[..], [Effect::Play { track_id: 103, .. }]));
     assert_eq!(current(&playback), Some(103));
-    assert_eq!(ids(playback.upcoming()), Vec::<u64>::new());
+    assert_eq!(upcoming(&playback), Vec::<u64>::new());
     playback.send(played(token(&effects)));
 
     let effects = playback.send(Message::TrackFinished);
@@ -307,7 +308,7 @@ fn a_track_that_cant_be_resolved_rolls_back_to_what_still_plays() {
 
     assert_eq!(unarmed(effects), vec![]);
     assert_eq!(current(&playback), Some(101));
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     assert_eq!(playback.status(), Status::Playing);
     assert_eq!(playback.position(), 42.0);
 }
@@ -346,7 +347,7 @@ fn a_next_track_that_fails_rolls_back_to_the_finished_one_stopped() {
     playback.send(resolve_failed(token(&effects)));
 
     assert_eq!(current(&playback), Some(101));
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     assert_eq!(playback.status(), Status::Stopped);
     assert_eq!(playback.position(), 0.0);
 }
@@ -585,7 +586,7 @@ fn a_track_chosen_with_shuffle_on_plays_first_then_the_rest_after_it_shuffled() 
     let playback = playing_with(shuffled(new(1.0)), playlist(1, 10, Start::Track(3)));
 
     assert_eq!(current(&playback), Some(104));
-    let upcoming = ids(playback.upcoming());
+    let upcoming = upcoming(&playback);
     assert_eq!(sorted(upcoming.clone()), (105..=110).collect::<Vec<_>>());
     assert_ne!(upcoming, sorted(upcoming.clone()));
 }
@@ -629,7 +630,7 @@ fn turning_shuffle_on_shuffles_only_what_is_left() {
     assert!(playback.shuffle());
     assert_eq!(current(&playback), Some(103));
     assert_eq!(history(&playback), vec![101, 102]);
-    let upcoming = ids(playback.upcoming());
+    let upcoming = upcoming(&playback);
     assert_eq!(sorted(upcoming.clone()), (104..=110).collect::<Vec<_>>());
     assert_ne!(upcoming, sorted(upcoming.clone()));
 }
@@ -649,7 +650,7 @@ fn turning_shuffle_off_puts_what_is_left_back_in_source_order() {
     let rest: Vec<u64> = (101..=110)
         .filter(|id| *id != now && !played.contains(id))
         .collect();
-    assert_eq!(ids(playback.upcoming()), rest);
+    assert_eq!(upcoming(&playback), rest);
 }
 
 #[test]
@@ -658,7 +659,7 @@ fn turning_shuffle_off_never_brings_back_tracks_before_the_one_chosen() {
 
     playback.send(Message::ToggleShuffle);
 
-    assert_eq!(ids(playback.upcoming()), vec![108, 109, 110]);
+    assert_eq!(upcoming(&playback), vec![108, 109, 110]);
 }
 
 #[test]
@@ -680,7 +681,7 @@ fn next_plays_what_comes_next_and_puts_the_current_track_in_history() {
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 102, .. }]));
     assert_eq!(current(&playback), Some(102));
-    assert_eq!(ids(playback.upcoming()), vec![103]);
+    assert_eq!(upcoming(&playback), vec![103]);
     assert_eq!(history(&playback), vec![101]);
 }
 
@@ -720,7 +721,7 @@ fn a_next_that_fails_rolls_history_back_too() {
     playback.send(resolve_failed(token(&effects)));
 
     assert_eq!(current(&playback), Some(101));
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     assert_eq!(history(&playback), Vec::<u64>::new());
     assert_eq!(playback.status(), Status::Playing);
 }
@@ -771,7 +772,7 @@ fn repeat_one_replays_the_track_when_it_ends() {
             ..
         }]
     ));
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     assert_eq!(history(&playback), Vec::<u64>::new());
 }
 
@@ -861,7 +862,7 @@ fn previous_within_three_seconds_goes_back_a_step() {
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(current(&playback), Some(101));
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     assert_eq!(history(&playback), Vec::<u64>::new());
 }
 
@@ -896,7 +897,7 @@ fn previous_into_another_source_plays_it_under_that_source() {
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
-    assert_eq!(ids(playback.upcoming()), vec![201, 202, 203]);
+    assert_eq!(upcoming(&playback), vec![201, 202, 203]);
     assert_eq!(history(&playback), Vec::<u64>::new());
 
     and_play(&mut playback, Message::Next);
@@ -1064,7 +1065,7 @@ fn with_shuffle_on_pages_go_into_random_places_in_the_unplayed_tail() {
         sorted(play_order(&playback)),
         (102..=120).collect::<Vec<_>>()
     );
-    let upcoming = ids(playback.upcoming());
+    let upcoming = upcoming(&playback);
     assert_eq!(upcoming.len(), 18);
     assert_ne!(
         sorted(upcoming[8..].to_vec()),
@@ -1083,7 +1084,7 @@ fn after_a_shuffle_play_pages_are_shuffled_in_too() {
 
     playback.send(Message::PageArrived(fill_id, page(1, 11, 20)));
 
-    let upcoming = ids(playback.upcoming());
+    let upcoming = upcoming(&playback);
     assert_ne!(
         sorted(upcoming[9..].to_vec()),
         (111..=120).collect::<Vec<_>>()
@@ -1101,7 +1102,7 @@ fn turning_shuffle_off_puts_tracks_that_arrived_back_in_source_order() {
 
     playback.send(Message::ToggleShuffle);
 
-    assert_eq!(ids(playback.upcoming()), (102..=110).collect::<Vec<_>>());
+    assert_eq!(upcoming(&playback), (102..=110).collect::<Vec<_>>());
 }
 
 #[test]
@@ -1239,7 +1240,7 @@ fn shuffled_pages_never_go_ahead_of_what_plays_next() {
         playback.send(Message::PageArrived(fill_id, page(1, 4, 10)));
 
         assert_eq!(
-            playback.upcoming().next().map(|track| track.id),
+            playback.upcoming().next().map(|(_, track)| track.id),
             stepped_back,
             "seed {seed}"
         );
@@ -1274,7 +1275,7 @@ fn queued_tracks_play_before_the_rest_of_the_source() {
     add(&mut playback, 902);
 
     assert_eq!(queued(&playback), vec![901, 902]);
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     and_play(&mut playback, Message::Next);
     assert_eq!(current(&playback), Some(901));
     and_play(&mut playback, Message::TrackFinished);
@@ -1409,7 +1410,7 @@ fn previous_from_a_queued_entry_puts_it_back_at_the_front_of_the_queue() {
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
     assert_eq!(queued(&playback), vec![901, 902]);
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
 }
 
 #[test]
@@ -1423,7 +1424,7 @@ fn previous_into_a_queued_entry_plays_it_under_its_tag() {
 
     assert_eq!(current(&playback), Some(901));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(9)));
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
     and_play(&mut playback, Message::Next);
     assert_eq!(current(&playback), Some(102));
 }
@@ -1439,7 +1440,7 @@ fn previous_twice_across_sources_keeps_the_track_it_passes() {
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(queued(&playback), vec![102]);
-    assert_eq!(ids(playback.upcoming()), vec![201, 202]);
+    assert_eq!(upcoming(&playback), vec![201, 202]);
     and_play(&mut playback, Message::Next);
     assert_eq!(current(&playback), Some(102));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
@@ -1600,7 +1601,7 @@ fn three_tracks_in_a_row_that_cant_play_stop_playback_with_a_notice() {
     assert_eq!(notices(&effects), vec![Notice::TooManyFailures]);
     assert_eq!(playback.status(), Status::Stopped);
     assert_eq!(current(&playback), Some(104));
-    assert_eq!(ids(playback.upcoming()), vec![105]);
+    assert_eq!(upcoming(&playback), vec![105]);
 }
 
 #[test]
@@ -2043,7 +2044,7 @@ fn autoplay_continues_with_the_radio_when_the_source_runs_out() {
 
     assert_eq!(plays(&effects), 501);
     assert_eq!(playing_from(&playback), Some(radio_ref(5)));
-    assert_eq!(ids(playback.upcoming()), vec![502, 503]);
+    assert_eq!(upcoming(&playback), vec![502, 503]);
     assert_eq!(history(&playback), vec![102]);
 }
 
@@ -2128,7 +2129,7 @@ fn the_radio_leaves_out_what_already_played() {
     let effects = playback.send(Message::TrackFinished);
 
     assert_eq!(plays(&effects), 501);
-    assert_eq!(ids(playback.upcoming()), Vec::<u64>::new());
+    assert_eq!(upcoming(&playback), Vec::<u64>::new());
 }
 
 #[test]
@@ -2175,7 +2176,7 @@ fn a_radio_for_a_track_no_longer_playing_is_dropped() {
     );
 
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(2)));
-    assert_eq!(ids(playback.upcoming()), vec![202, 203]);
+    assert_eq!(upcoming(&playback), vec![202, 203]);
 }
 
 #[test]
@@ -2339,7 +2340,7 @@ fn turning_shuffle_on_arms_the_new_next_track() {
 
     let effects = playback.send(Message::ToggleShuffle);
 
-    let next = ids(playback.upcoming())[0];
+    let next = upcoming(&playback)[0];
     assert_ne!(next, 102);
     assert_eq!(armed(&effects), Some((next, false)));
 }
@@ -2407,7 +2408,7 @@ fn a_gapless_replay_under_repeat_one_leaves_history_alone() {
     assert!(plays_none(&effects));
     assert_eq!(current(&playback), Some(101));
     assert_eq!(history(&playback), Vec::<u64>::new());
-    assert_eq!(ids(playback.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
 }
 
 #[test]
@@ -2523,7 +2524,7 @@ fn a_restore_comes_back_paused_where_listening_left_off() {
     assert_eq!(restored.status(), Status::Stopped);
     assert_eq!(current(&restored), Some(102));
     assert_eq!(restored.position(), 42.0);
-    assert_eq!(ids(restored.upcoming()), vec![103, 104, 105]);
+    assert_eq!(upcoming(&restored), vec![103, 104, 105]);
     assert_eq!(queued(&restored), vec![902, 901]);
     assert_eq!(history(&restored), vec![101]);
     assert_eq!(playing_from(&restored), Some(playlist_ref(1)));
@@ -2569,7 +2570,7 @@ fn a_fill_that_hadnt_finished_starts_again_from_where_it_got_to() {
         }
     );
     restored.send(Message::PageArrived(fill_id, page(1, 6, 6)));
-    assert_eq!(ids(restored.upcoming()), vec![102, 103, 104, 105, 106]);
+    assert_eq!(upcoming(&restored), vec![102, 103, 104, 105, 106]);
 }
 
 #[test]
@@ -2609,7 +2610,7 @@ fn previous_after_a_restore_steps_back_through_the_play_order() {
     let effects = restored.send(Message::Previous);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
-    assert_eq!(ids(restored.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&restored), vec![102, 103]);
     assert_eq!(queued(&restored), Vec::<u64>::new());
 }
 
@@ -2622,7 +2623,7 @@ fn a_queued_entry_comes_back_under_its_tag() {
     let (restored, _) = relaunched(&playback);
 
     assert_eq!(playing_from(&restored), Some(SourceRef::Album(9)));
-    assert_eq!(ids(restored.upcoming()), vec![102, 103]);
+    assert_eq!(upcoming(&restored), vec![102, 103]);
 }
 
 #[test]
@@ -2645,7 +2646,7 @@ fn a_snapshot_whose_play_order_doesnt_fit_its_tracks_restores_no_source() {
     restored.restore(snapshot);
 
     assert_eq!(playing_from(&restored), Some(SourceRef::Album(1)));
-    assert_eq!(ids(restored.upcoming()), Vec::<u64>::new());
+    assert_eq!(upcoming(&restored), Vec::<u64>::new());
     assert_eq!(current(&restored), Some(101), "the current track stays");
 }
 
@@ -2677,4 +2678,388 @@ fn ticks_and_preferences_ask_for_no_save() {
     assert!(!saves(&mut playback, Message::AllowExplicit(false)));
     assert!(!saves(&mut playback, Message::Autoplay(true)));
     assert!(!saves(&mut playback, Message::Gapless(false)));
+}
+
+// The drawer's Queue tab.
+
+/// The drawer's row for upcoming track `id`.
+fn upcoming_row(playback: &Playback, id: u64) -> Entry {
+    playback
+        .upcoming()
+        .find(|(_, track)| track.id == id)
+        .map(|(slot, _)| Entry::Upcoming(slot))
+        .unwrap_or_else(|| panic!("{id} isn't upcoming"))
+}
+
+/// The drawer's row for queued track `id`.
+fn queued_row(playback: &Playback, id: u64) -> Entry {
+    playback
+        .queued()
+        .find(|(_, track)| track.id == id)
+        .map(|(entry, _)| Entry::Queued(entry))
+        .unwrap_or_else(|| panic!("{id} isn't queued"))
+}
+
+/// The drawer's row for track `id` in History.
+fn played_row(playback: &Playback, id: u64) -> Entry {
+    playback
+        .history()
+        .find(|(_, track)| track.id == id)
+        .map(|(entry, _)| Entry::Played(entry))
+        .unwrap_or_else(|| panic!("{id} isn't in History"))
+}
+
+#[test]
+fn picking_an_upcoming_track_jumps_to_it_and_what_it_skips_never_plays() {
+    let mut playback = playing(album(1, 5, 0));
+
+    let pick = upcoming_row(&playback, 104);
+    let effects = and_play(&mut playback, Message::Pick(pick));
+
+    assert_eq!(plays(&effects), 104);
+    assert_eq!(current(&playback), Some(104));
+    assert_eq!(upcoming(&playback), vec![105]);
+    assert_eq!(history(&playback), vec![101]);
+}
+
+#[test]
+fn previous_after_a_jump_goes_back_to_the_track_before_it() {
+    let mut playback = playing(album(1, 5, 0));
+    let pick = upcoming_row(&playback, 104);
+    and_play(&mut playback, Message::Pick(pick));
+
+    and_play(&mut playback, Message::Previous);
+
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(upcoming(&playback), vec![104, 105]);
+}
+
+#[test]
+fn picking_an_upcoming_track_leaves_the_manual_queue_to_play_after_it() {
+    let mut playback = playing(album(1, 5, 0));
+    add(&mut playback, 901);
+
+    let pick = upcoming_row(&playback, 103);
+    and_play(&mut playback, Message::Pick(pick));
+    and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(current(&playback), Some(901));
+    assert_eq!(upcoming(&playback), vec![104, 105]);
+}
+
+#[test]
+fn picking_a_queued_entry_plucks_it_and_plays_it_under_its_tag() {
+    let mut playback = playing(album(1, 3, 0));
+    add(&mut playback, 901);
+    add(&mut playback, 902);
+
+    let pick = queued_row(&playback, 902);
+    let effects = and_play(&mut playback, Message::Pick(pick));
+
+    assert_eq!(plays(&effects), 902);
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(9)));
+    assert_eq!(queued(&playback), vec![901]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
+    assert_eq!(history(&playback), vec![101]);
+}
+
+#[test]
+fn picking_a_history_row_plays_it_under_its_tag_and_changes_nothing_upcoming() {
+    let mut playback = playing(album(1, 2, 0));
+    playback = playing_with(playback, album(2, 3, 0));
+    add(&mut playback, 901);
+
+    let pick = played_row(&playback, 101);
+    let effects = and_play(&mut playback, Message::Pick(pick));
+
+    assert_eq!(plays(&effects), 101);
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
+    assert_eq!(queued(&playback), vec![901]);
+    assert_eq!(upcoming(&playback), vec![202, 203]);
+    assert_eq!(history(&playback), vec![101, 201]);
+    and_play(&mut playback, Message::TrackFinished);
+    assert_eq!(current(&playback), Some(901));
+}
+
+#[test]
+fn picking_an_unavailable_entry_says_so_and_plays_nothing() {
+    let tracks = vec![track(101), unavailable(102), track(103)];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+
+    let pick = upcoming_row(&playback, 102);
+    let effects = playback.send(Message::Pick(pick));
+
+    assert_eq!(notices(&effects), vec![Notice::Unavailable]);
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(upcoming(&playback), vec![102, 103]);
+}
+
+#[test]
+fn picking_an_explicit_entry_while_they_arent_allowed_asks_first() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::AddToQueue(explicit(901), tag(9)));
+    playback.send(Message::AllowExplicit(false));
+
+    let pick = queued_row(&playback, 901);
+    let Outcome::NeedsExplicitConsent(pending) = playback.update(Message::Pick(pick)) else {
+        panic!("expected a consent question");
+    };
+    playback.send(Message::AllowExplicit(true));
+    let effects = playback.send(pending.into());
+
+    assert_eq!(plays(&effects), 901);
+}
+
+#[test]
+fn a_pick_of_a_row_no_longer_listed_does_nothing() {
+    let mut playback = playing(album(1, 3, 0));
+    let pick = upcoming_row(&playback, 102);
+    and_play(&mut playback, Message::Next);
+
+    assert_eq!(playback.send(Message::Pick(pick)), vec![]);
+    assert_eq!(current(&playback), Some(102));
+}
+
+#[test]
+fn a_pick_that_fails_rolls_back_to_what_played() {
+    let mut playback = playing(album(1, 4, 0));
+    let pick = upcoming_row(&playback, 103);
+
+    let effects = playback.send(Message::Pick(pick));
+    playback.send(resolve_failed(token(&effects)));
+
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(upcoming(&playback), vec![102, 103, 104]);
+    assert_eq!(history(&playback), Vec::<u64>::new());
+}
+
+#[test]
+fn removing_takes_an_entry_out_of_the_queue_or_the_source() {
+    let mut playback = playing(album(1, 4, 0));
+    add(&mut playback, 901);
+    add(&mut playback, 902);
+
+    let queued_entry = queued_row(&playback, 901);
+    playback.send(Message::Remove(queued_entry));
+    let upcoming_entry = upcoming_row(&playback, 103);
+    playback.send(Message::Remove(upcoming_entry));
+
+    assert_eq!(queued(&playback), vec![902]);
+    assert_eq!(upcoming(&playback), vec![102, 104]);
+    assert_eq!(current(&playback), Some(101));
+}
+
+#[test]
+fn removing_the_next_track_arms_the_one_after_it() {
+    let mut playback = playing(album(1, 3, 0));
+
+    let next = upcoming_row(&playback, 102);
+    let effects = playback.send(Message::Remove(next));
+
+    assert_eq!(armed(&effects), Some((103, true)));
+}
+
+#[test]
+fn a_removed_track_comes_back_with_the_next_repeat_all_round() {
+    let mut playback = playing_with(repeating(Repeat::All), album(1, 3, 0));
+    let entry = upcoming_row(&playback, 102);
+    playback.send(Message::Remove(entry));
+
+    and_play(&mut playback, Message::Next);
+    and_play(&mut playback, Message::Next);
+
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(upcoming(&playback), vec![102, 103]);
+}
+
+#[test]
+fn a_removal_while_a_play_loads_survives_its_failure() {
+    let mut playback = playing(album(1, 4, 0));
+    let effects = playback.send(Message::Next);
+
+    let entry = upcoming_row(&playback, 104);
+    playback.send(Message::Remove(entry));
+    playback.send(resolve_failed(token(&effects)));
+
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(upcoming(&playback), vec![102, 103]);
+}
+
+#[test]
+fn history_rows_cant_be_removed() {
+    let mut playback = playing(album(1, 3, 0));
+    and_play(&mut playback, Message::Next);
+
+    let entry = played_row(&playback, 101);
+    playback.send(Message::Remove(entry));
+
+    assert_eq!(history(&playback), vec![101]);
+}
+
+#[test]
+fn moving_reorders_the_manual_queue() {
+    let mut playback = playing(album(1, 3, 0));
+    for id in [901, 902, 903] {
+        add(&mut playback, id);
+    }
+
+    let entry = queued_row(&playback, 903);
+    let effects = playback.send(Message::Move(entry, 0));
+
+    assert_eq!(queued(&playback), vec![903, 901, 902]);
+    assert_eq!(upcoming(&playback), vec![102, 103]);
+    assert_eq!(armed(&effects), Some((903, false)));
+}
+
+#[test]
+fn moving_reorders_the_rest_of_the_source() {
+    let mut playback = playing(album(1, 5, 0));
+
+    let entry = upcoming_row(&playback, 102);
+    playback.send(Message::Move(entry, 2));
+    let entry = upcoming_row(&playback, 105);
+    playback.send(Message::Move(entry, 0));
+
+    assert_eq!(upcoming(&playback), vec![105, 103, 104, 102]);
+    and_play(&mut playback, Message::TrackFinished);
+    assert_eq!(current(&playback), Some(105));
+}
+
+#[test]
+fn moving_past_the_end_moves_to_the_end_of_the_section() {
+    let mut playback = playing(album(1, 4, 0));
+    add(&mut playback, 901);
+    add(&mut playback, 902);
+
+    let entry = queued_row(&playback, 901);
+    playback.send(Message::Move(entry, 10));
+    let entry = upcoming_row(&playback, 102);
+    playback.send(Message::Move(entry, 10));
+
+    assert_eq!(queued(&playback), vec![902, 901]);
+    assert_eq!(upcoming(&playback), vec![103, 104, 102]);
+}
+
+#[test]
+fn turning_shuffle_off_after_a_move_puts_the_rest_back_in_source_order() {
+    let mut playback = playing(album(1, 4, 0));
+    let entry = upcoming_row(&playback, 104);
+    playback.send(Message::Move(entry, 0));
+
+    playback.send(Message::ToggleShuffle);
+    playback.send(Message::ToggleShuffle);
+
+    assert_eq!(upcoming(&playback), vec![102, 103, 104]);
+}
+
+#[test]
+fn clear_empties_the_queue_and_the_rest_of_the_source() {
+    let mut playback = playing(album(1, 4, 0));
+    and_play(&mut playback, Message::Next);
+    add(&mut playback, 901);
+
+    let effects = playback.send(Message::Clear);
+
+    assert_eq!(queued(&playback), Vec::<u64>::new());
+    assert_eq!(upcoming(&playback), Vec::<u64>::new());
+    assert_eq!(current(&playback), Some(102));
+    assert_eq!(history(&playback), vec![101]);
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
+    assert!(effects.contains(&Effect::ClearNext));
+}
+
+#[test]
+fn clear_cancels_the_fill_and_drops_its_pages() {
+    let mut playback = new(1.0);
+    let effects = and_play(
+        &mut playback,
+        Message::Start(long_playlist(1, 3, Start::All)),
+    );
+    let (fill_id, _) = fill(&effects);
+
+    let effects = playback.send(Message::Clear);
+    playback.send(Message::PageArrived(fill_id, page(1, 4, 6)));
+
+    assert!(effects.contains(&Effect::CancelFill));
+    assert_eq!(upcoming(&playback), Vec::<u64>::new());
+}
+
+#[test]
+fn after_a_clear_playback_stops_at_the_end_of_the_track() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::Clear);
+
+    let effects = playback.send(Message::TrackFinished);
+
+    assert!(plays_none(&effects));
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(101));
+}
+
+#[test]
+fn after_a_clear_repeat_all_starts_the_source_over() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::Clear);
+    playback.send(Message::CycleRepeat);
+
+    and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(upcoming(&playback), vec![102, 103]);
+}
+
+#[test]
+fn drawer_edits_ask_for_a_save() {
+    let mut playback = playing(album(1, 4, 0));
+    add(&mut playback, 901);
+
+    let entry = upcoming_row(&playback, 104);
+    assert!(saves(&mut playback, Message::Move(entry, 0)));
+    assert!(saves(&mut playback, Message::Remove(entry)));
+    let entry = upcoming_row(&playback, 103);
+    assert!(saves(&mut playback, Message::Pick(entry)));
+    assert!(saves(&mut playback, Message::Clear));
+}
+
+#[test]
+fn the_playback_source_stays_while_a_queued_entry_plays() {
+    let mut playback = playing(album(1, 3, 0));
+    play_next(&mut playback, 901);
+
+    and_play(&mut playback, Message::Next);
+
+    assert_eq!(
+        playback.source().map(|source| source.kind.clone()),
+        Some(SourceRef::Album(1))
+    );
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(9)));
+}
+
+#[test]
+fn a_move_while_a_play_loads_is_undone_with_it_rather_than_misplaced() {
+    let mut playback = playing(album(1, 3, 0));
+    for id in [901, 902, 903] {
+        add(&mut playback, id);
+    }
+    let effects = playback.send(Message::Next);
+
+    let entry = queued_row(&playback, 903);
+    playback.send(Message::Move(entry, 0));
+    assert_eq!(queued(&playback), vec![903, 902]);
+    playback.send(resolve_failed(token(&effects)));
+
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(queued(&playback), vec![901, 902, 903]);
+}
+
+#[test]
+fn a_clear_while_a_play_loads_leaves_the_loading_track_to_play() {
+    let mut playback = playing(album(1, 4, 0));
+    let effects = playback.send(Message::Next);
+
+    playback.send(Message::Clear);
+    playback.send(played(token(&effects)));
+
+    assert_eq!(current(&playback), Some(102));
+    assert_eq!(upcoming(&playback), Vec::<u64>::new());
 }

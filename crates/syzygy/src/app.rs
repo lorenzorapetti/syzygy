@@ -226,6 +226,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 &app.settings.search_history,
                 &app.playback,
                 app.frame.duration_since(app.epoch).as_secs_f32(),
+                app.frame,
             ),
         },
     }
@@ -244,9 +245,9 @@ pub fn subscription(state: &State) -> Subscription<Message> {
                 Status::Playing => iced::time::every(TICK).map(|_| Message::Tick),
                 _ => Subscription::none(),
             };
-            // Frames only while a cover fades in or a playing row's bars
-            // bounce; otherwise nothing redraws.
-            let frames = if app.images.is_animating() || app.bars_bounce() {
+            // Frames only while a cover fades in, a playing row's bars
+            // bounce or the drawer slides; otherwise nothing redraws.
+            let frames = if app.images.is_animating() || app.bars_bounce() || app.slides() {
                 window::frames().map(Message::Frame)
             } else {
                 Subscription::none()
@@ -413,12 +414,30 @@ impl App {
         }
     }
 
+    /// Whether the drawer is sliding up or down.
+    fn slides(&self) -> bool {
+        match &self.phase {
+            Phase::Shell(shell) => shell.is_animating(Instant::now()),
+            Phase::Login(_) => false,
+        }
+    }
+
     fn update_playback(&mut self, message: playback::Message) -> Task<Message> {
-        match self.playback.update(message) {
+        let task = match self.playback.update(message) {
             playback::Outcome::Effects(effects) => self.run_playback_all(effects),
             playback::Outcome::NeedsExplicitConsent(pending) => {
                 self.in_shell(|shell, _, _| shell.ask_explicit_consent(pending))
             }
+        };
+        Task::batch([task, self.track_changed()])
+    }
+
+    /// Tell the Shell what the current track is, should it have changed.
+    fn track_changed(&mut self) -> Task<Message> {
+        let context = context(self.session.as_ref(), &self.settings);
+        match &mut self.phase {
+            Phase::Shell(shell) => shell.playing(self.playback.current(), &self.services, &context),
+            Phase::Login(_) => Task::none(),
         }
     }
 
@@ -736,7 +755,7 @@ impl App {
         let context = context(self.session.as_ref(), &self.settings);
         let (shell, task) = Shell::new(&self.services, &context);
         self.phase = Phase::Shell(Box::new(shell));
-        task
+        Task::batch([task, self.track_changed()])
     }
 
     /// Ask TIDAL who the user is and where, without blocking anything.
@@ -879,8 +898,9 @@ fn context<'a>(session: Option<&Session>, settings: &'a Settings) -> Context<'a>
 }
 
 /// Back and forward from the mouse side buttons and Alt+←/→ (a text field
-/// that takes the arrow keys keeps them), the window regaining focus, and
-/// the clicks and Escape that close the search dropdown.
+/// that takes the arrow keys keeps them), the window regaining focus, the
+/// clicks and Escape that close the search dropdown and the overlays, and
+/// the release that drops a dragged Queue row.
 fn shell_events(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     let search = |message| Some(Message::Shell(shell::Message::Search(message)));
     match event {
@@ -888,6 +908,10 @@ fn shell_events(event: Event, status: event::Status, _window: window::Id) -> Opt
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
             search(shell::search::Message::Pressed)
         }
+        // Wherever it's let go, a dragged Queue row drops.
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::Shell(
+            shell::Message::Drawer(shell::drawer::Message::Dropped),
+        )),
         Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(key::Named::Escape),
             ..

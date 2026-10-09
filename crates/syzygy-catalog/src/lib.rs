@@ -430,6 +430,21 @@ impl Catalog {
         }
     }
 
+    /// Who made a track. Not cached: the drawer reads it once per track.
+    pub fn credits(
+        &self,
+        track_id: u64,
+    ) -> impl Future<Output = Result<Vec<track::Credit>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        async move {
+            let credits = tidal
+                .get_track_credits(track_id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(credits.into_iter().map(track::Credit::from).collect())
+        }
+    }
+
     /// What a search for `query` finds. Not cached: a search is read once
     /// per Search Page.
     pub fn search(
