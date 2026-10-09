@@ -10,6 +10,7 @@ use super::paged::List;
 use super::track_list::{self, Columns};
 use super::{Action, Link, Load, NowPlaying, PADDING, Remote, Viewport, play_buttons};
 use crate::images::Images;
+use crate::library::Library;
 use crate::playback::{SourceRef, Start};
 use crate::style;
 
@@ -109,6 +110,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
@@ -148,7 +150,14 @@ impl State {
                 track_list::header(COLUMNS),
                 |i| {
                     let track = &tracks[i];
-                    let row = track_list::track(images, i + 1, track, COLUMNS, allow_explicit);
+                    let row = track_list::track(
+                        images,
+                        i + 1,
+                        track,
+                        COLUMNS,
+                        allow_explicit,
+                        library.liked(track),
+                    );
                     track_list::playable_track(
                         row.map(Message::Link),
                         track,

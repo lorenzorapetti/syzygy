@@ -14,6 +14,7 @@ pub mod feed;
 mod hero;
 pub mod home;
 pub mod library;
+pub mod menu;
 pub mod mix;
 pub mod paged;
 pub mod playlist;
@@ -21,7 +22,6 @@ pub mod profile;
 pub mod profile_playlists;
 pub mod search;
 pub mod track_list;
-mod track_menu;
 
 use iced::widget::{Row, Text, button, column, container, row, text};
 use iced::{Alignment, Color, Element, Length, Task};
@@ -33,6 +33,7 @@ use syzygy_catalog::{Album, Artist, Kind, Mix, Read, Shelf, Track, TrackSort};
 
 use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
+use crate::library::{Favorite, Library};
 use crate::playback::{Continuation, PlayRequest, Source, SourceRef, Start};
 use crate::settings::{Settings, Sort};
 use crate::style;
@@ -176,9 +177,18 @@ pub enum Action {
         track: Track,
         next: bool,
     },
+    /// Read what a card leads to, then put what that read brings in the
+    /// Manual queue, next or at the end: an album or mix whole, the first
+    /// page of a long playlist.
+    QueueCard {
+        card: Card,
+        next: bool,
+    },
     /// Open the track's Track radio, reading the track first if the list
     /// it came in didn't say which mix that is.
     TrackRadio(Track),
+    /// Edit the user's Library.
+    Library(crate::library::Message),
     /// Pause or resume what's playing.
     TogglePlay,
     /// This Page now shows `route`, as after a tab switch: its Back stack
@@ -275,6 +285,21 @@ pub enum Load {
     },
 }
 
+impl Load {
+    /// The tags of a read whose `Fresh` answer the Library waits on to
+    /// settle its edits: the first page of a Library shelf or the Loved
+    /// tracks.
+    pub fn tags(&self) -> Option<Vec<String>> {
+        match self {
+            Load::Library(shelf) => Some(shelf.tags()),
+            Load::LovedTracks { user_id, .. } => {
+                Some(syzygy_catalog::favorites::loved_tags(*user_id))
+            }
+            _ => None,
+        }
+    }
+}
+
 pub enum Page {
     Home(home::State),
     Album(album::State),
@@ -324,6 +349,13 @@ pub enum Link {
     PlayNext(Track),
     AddToQueue(Track),
     TrackRadio(Track),
+    /// A card's menu: queue all of what it leads to.
+    QueueCard {
+        card: Card,
+        next: bool,
+    },
+    /// A heart, or a menu's like: like (`true`) or unlike.
+    Favorite(Box<Favorite>, bool),
 }
 
 impl Link {
@@ -336,6 +368,10 @@ impl Link {
             Link::PlayNext(track) => Action::Queue { track, next: true },
             Link::AddToQueue(track) => Action::Queue { track, next: false },
             Link::TrackRadio(track) => Action::TrackRadio(track),
+            Link::QueueCard { card, next } => Action::QueueCard { card, next },
+            Link::Favorite(favorite, on) => {
+                Action::Library(crate::library::Message::Favorite(*favorite, on))
+            }
         }
     }
 }
@@ -415,7 +451,8 @@ impl Page {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Action {
+    /// `library` is read only, by the Pages that list the Library.
+    pub fn update(&mut self, message: Message, library: &Library) -> Action {
         match (self, message) {
             (Page::Home(state), Message::Home(message)) => state.update(message),
             (Page::Album(state), Message::Album(message)) => state.update(message),
@@ -424,7 +461,7 @@ impl Page {
             (Page::ArtistViewAll(state), Message::ArtistViewAll(message)) => state.update(message),
             (Page::Mix(state), Message::Mix(message)) => state.update(message),
             (Page::Playlist(state), Message::Playlist(message)) => state.update(message),
-            (Page::Favorites(state), Message::Favorites(message)) => state.update(message),
+            (Page::Favorites(state), Message::Favorites(message)) => state.update(message, library),
             (Page::Library(state), Message::Library(message)) => state.update(message),
             (Page::Search(state), Message::Search(message)) => state.update(message),
             (Page::Explore(state), Message::Explore(message)) => state.update(message),
@@ -434,6 +471,23 @@ impl Page {
                 state.update(message)
             }
             // A message for another kind of Page.
+            _ => Action::None,
+        }
+    }
+
+    /// The Library's pending edits changed.
+    pub fn library_changed(&mut self, library: &Library) {
+        if let Page::Favorites(state) = self {
+            state.library_changed(library);
+        }
+    }
+
+    /// An edit landed: what's read under `tags` is stale, so a Page that
+    /// lists it reads it again.
+    pub fn refresh(&mut self, tags: &[String]) -> Action {
+        match self {
+            Page::Library(state) => state.refresh(tags),
+            Page::Favorites(state) => state.refresh(tags),
             _ => Action::None,
         }
     }
@@ -458,39 +512,42 @@ impl Page {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
     ) -> Element<'a, Message> {
         match self {
-            Page::Home(state) => state.view(images).map(Message::Home),
+            Page::Home(state) => state.view(images, library).map(Message::Home),
             Page::Album(state) => state
-                .view(images, viewport, now_playing, allow_explicit)
+                .view(images, library, viewport, now_playing, allow_explicit)
                 .map(Message::Album),
             Page::Artist(state) => state
-                .view(images, now_playing, allow_explicit)
+                .view(images, library, now_playing, allow_explicit)
                 .map(Message::Artist),
             Page::ArtistTracks(state) => state
-                .view(images, viewport, now_playing, allow_explicit)
+                .view(images, library, viewport, now_playing, allow_explicit)
                 .map(Message::ArtistTracks),
-            Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),
+            Page::ArtistViewAll(state) => state.view(images, library).map(Message::ArtistViewAll),
             Page::Mix(state) => state
-                .view(images, viewport, now_playing, allow_explicit)
+                .view(images, library, viewport, now_playing, allow_explicit)
                 .map(Message::Mix),
             Page::Playlist(state) => state
-                .view(images, viewport, now_playing, allow_explicit)
+                .view(images, library, viewport, now_playing, allow_explicit)
                 .map(Message::Playlist),
             Page::Favorites(state) => state
-                .view(images, viewport, now_playing, allow_explicit)
+                .view(images, library, viewport, now_playing, allow_explicit)
                 .map(Message::Favorites),
-            Page::Library(state) => state.view(images).map(Message::Library),
+            Page::Library(state) => state.view(images, library).map(Message::Library),
             Page::Search(state) => state
-                .view(images, viewport, allow_explicit)
+                .view(images, library, viewport, allow_explicit)
                 .map(Message::Search),
-            Page::Explore(state) => state.view(images).map(Message::Explore),
+            Page::Explore(state) => state.view(images, library).map(Message::Explore),
             Page::Feed(state) => state.view(images).map(Message::Feed),
-            Page::Profile(state) => state.view(images).map(Message::Profile),
-            Page::ProfilePlaylists(state) => state.view(images).map(Message::ProfilePlaylists),
+            Page::Profile(state) => state.view(images, library).map(Message::Profile),
+            Page::ProfilePlaylists(state) => {
+                state.view(images, library).map(Message::ProfilePlaylists)
+            }
         }
     }
 }
@@ -699,6 +756,33 @@ pub fn play_buttons<'a, M: Clone + 'a>(
     );
     container(row![play, shuffle].spacing(12))
         .center_y(PLAY_BUTTONS_HEIGHT)
+        .into()
+}
+
+/// A Page header's heart, when what it shows can be a Favorite, and its
+/// "…" button, which opens the menu of `card`, the Page's own card.
+pub fn header_actions<'a>(
+    card: Card,
+    favorite: Option<Favorite>,
+    library: &Library,
+) -> Element<'a, Link> {
+    let liked = favorite
+        .as_ref()
+        .and_then(|favorite| library.favorite(&favorite.id()));
+    let likes = favorite.is_some();
+    let heart = favorite.map(|favorite| menu::heart(favorite, liked, 22.0));
+    let more = menu::more(move || {
+        if likes {
+            menu::card(&card, liked)
+        } else {
+            vec![menu::playing(&card)]
+        }
+    });
+    row![]
+        .push(heart)
+        .push(more)
+        .spacing(8)
+        .align_y(Alignment::Center)
         .into()
 }
 

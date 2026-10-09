@@ -54,6 +54,14 @@ impl<T> List<T> {
         self.list.loaded()?.total
     }
 
+    /// The list is being read again: the next first page replaces it, even
+    /// once it's paged past its first, and what's loading after it is
+    /// dropped.
+    pub fn reread(&mut self) {
+        self.extended = false;
+        self.more = More::Idle;
+    }
+
     /// The list can't be read: show `error` in its place.
     pub fn fail(&mut self, error: syzygy_catalog::Error) {
         self.list = Remote::Failed(Arc::new(error));

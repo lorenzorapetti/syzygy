@@ -8,14 +8,16 @@ use iced::widget::{Column, button, column, row, text};
 use iced::{Alignment, Element};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::library::{self, Item};
 use syzygy_catalog::{Direction, Kind, LibraryOrder, LibrarySort, Paged, Playlist, Read, Shelf};
 
 use super::cards::{self, CARD_WIDTH};
 use super::paged::List;
-use super::{Action, Context, Link, Load, PADDING, Preview, Route, cover, folder_art};
+use super::{Action, Context, Link, Load, PADDING, Preview, Route, cover, folder_art, menu};
 use crate::icons::{Icon, icon};
 use crate::images::Images;
+use crate::library::{Library, Listing};
 use crate::settings::Sort;
 use crate::style;
 
@@ -124,6 +126,19 @@ impl State {
         }
     }
 
+    /// What's read under `tags` changed: read the shelf again if it's one
+    /// of them, keeping it on screen until the new first page arrives.
+    pub fn refresh(&mut self, tags: &[String]) -> Action {
+        let Some(shelf) = self.shelf() else {
+            return Action::None;
+        };
+        if !shelf.tags().iter().any(|tag| tags.contains(tag)) {
+            return Action::None;
+        }
+        self.items.reread();
+        Action::Load(Load::Library(shelf))
+    }
+
     fn sort(&self) -> LibrarySort {
         self.sorts
             .get(&self.kind)
@@ -163,7 +178,7 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
         let title = match &self.folder {
             Some(folder) => folder.name.as_str(),
             None => title(self.kind),
@@ -200,12 +215,17 @@ impl State {
             .wrap()
         });
         let body = self.items.list.view(Message::Retry, |_| {
-            let items = self.items.items();
+            let items = match self.shelf() {
+                Some(shelf) => library.apply(self.items.items(), Listing::Shelf(&shelf)),
+                None => Vec::new(),
+            };
             if items.is_empty() {
                 let empty = format!("No {} yet", plural(self.kind));
                 return text(empty).color(style::TEXT_MUTED).into();
             }
-            let tiles = items.iter().map(|item| tile(item, self.user_id, images));
+            let tiles = items
+                .into_iter()
+                .map(|item| tile(item, self.user_id, images, library));
             Column::new()
                 .push(cards::wrapped(tiles).map(Message::Link))
                 .push(self.items.end(Message::EndInView, Message::RetryMore))
@@ -251,8 +271,14 @@ impl State {
     }
 }
 
-/// One thing on a shelf as a card. Folders open to their playlists.
-pub fn tile<'a>(item: &'a Item, user_id: Option<u64>, images: &'a Images) -> Element<'a, Link> {
+/// One thing on a shelf as a card. Folders open to their playlists, and
+/// playlists open their menu when right-clicked, as cards do.
+pub fn tile<'a>(
+    item: &'a Item,
+    user_id: Option<u64>,
+    images: &'a Images,
+    library: &'a Library,
+) -> Element<'a, Link> {
     match item {
         Item::Folder(folder) => cards::tile(
             folder_art(CARD_WIDTH, 4.0),
@@ -260,13 +286,43 @@ pub fn tile<'a>(item: &'a Item, user_id: Option<u64>, images: &'a Images) -> Ele
             folder.subtitle(),
             Some(Link::Open(folder_route(folder))),
         ),
-        Item::Playlist(playlist) => cards::tile(
-            cover(images, playlist.cover.as_ref(), CARD_WIDTH),
-            &playlist.title,
-            library::playlist_subtitle(playlist, user_id),
-            Some(Link::Open(playlist_route(playlist))),
-        ),
-        Item::Card(card) => cards::card(card, images),
+        Item::Playlist(playlist) => {
+            let tile = cards::tile(
+                cover(images, playlist.cover.as_ref(), CARD_WIDTH),
+                &playlist.title,
+                library::playlist_subtitle(playlist, user_id),
+                Some(Link::Open(playlist_route(playlist))),
+            );
+            playlist_menu(tile, playlist, user_id, library)
+        }
+        Item::Card(card) => cards::card(card, images, library),
+    }
+}
+
+/// `underlay`, opening a playlist's card menu when right-clicked. An Own
+/// playlist isn't a Favorite: its menu has no like.
+pub fn playlist_menu<'a>(
+    underlay: Element<'a, Link>,
+    playlist: &Playlist,
+    user_id: Option<u64>,
+    library: &Library,
+) -> Element<'a, Link> {
+    let card = playlist_card(playlist);
+    if playlist.is_own(user_id) {
+        menu::with_menu(underlay, move || vec![menu::playing(&card)])
+    } else {
+        let liked = cards::liked(&card, library);
+        menu::with_menu(underlay, move || menu::card(&card, liked))
+    }
+}
+
+/// A playlist as a card, for its menu.
+pub fn playlist_card(playlist: &Playlist) -> Card {
+    Card {
+        title: playlist.title.clone(),
+        subtitle: String::new(),
+        cover: playlist.cover.clone(),
+        target: Target::Playlist(playlist.uuid.clone()),
     }
 }
 

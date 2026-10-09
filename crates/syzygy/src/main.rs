@@ -4,6 +4,7 @@ mod fill;
 mod icons;
 mod identity;
 mod images;
+mod library;
 mod logging;
 mod login;
 mod page;

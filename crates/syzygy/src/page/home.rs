@@ -12,6 +12,7 @@ use super::cards::{self, Rows};
 use super::{Action, Link, Load, PADDING, Remote, Route};
 use crate::icons::{Icon, filled};
 use crate::images::Images;
+use crate::library::Library;
 use crate::style;
 
 /// The feed tab Home opens on.
@@ -198,7 +199,7 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
         let body = self.feed.view(Message::Retry, |feed| {
             if feed.sections.is_empty() {
                 return text("Nothing to show here yet")
@@ -209,7 +210,7 @@ impl State {
                 .sections
                 .iter()
                 .enumerate()
-                .map(|(index, s)| self.section(index, s, images));
+                .map(|(index, s)| self.section(index, s, images, library));
             let mut page = column(sections).spacing(32);
             if matches!(self.more, More::Loading) {
                 page = page.push(text("Loading…").style(text::secondary));
@@ -237,12 +238,13 @@ impl State {
         index: usize,
         section: &'a Section,
         images: &'a Images,
+        library: &'a Library,
     ) -> Element<'a, Message> {
         match section.layout {
             Layout::Shortcuts => shortcuts(&section.cards, images),
             Layout::Row => self
                 .rows
-                .view(index, &section.title, &section.cards, None, images)
+                .view(index, &section.title, &section.cards, None, images, library)
                 .map(Message::Cards),
         }
     }

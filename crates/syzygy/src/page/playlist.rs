@@ -4,16 +4,18 @@
 use iced::widget::{Column, button, column, container, row, space, text, text_input};
 use iced::{Alignment, Element, Length};
 use std::sync::Arc;
+use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
 
 use super::paged::List;
 use super::track_list::{self, Columns};
 use super::{
     Action, Context, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, Viewport, count,
-    duration, hero, play_buttons,
+    duration, header_actions, hero, play_buttons,
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
+use crate::library::{Favorite, Library};
 use crate::playback::{SourceRef, Start};
 use crate::settings::Sort;
 use crate::style;
@@ -232,6 +234,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
@@ -258,7 +261,23 @@ impl State {
             Message::Play,
             Message::TogglePlay,
         );
-        let filter = row![buttons, space::horizontal(), filter].align_y(Alignment::Center);
+        // An Own playlist isn't a Favorite: it has no heart.
+        let actions = self.playlist.loaded().map(|playlist| {
+            let card = Card {
+                title: playlist.title.clone(),
+                subtitle: String::new(),
+                cover: playlist.cover.clone(),
+                target: Target::Playlist(self.uuid.clone()),
+            };
+            let favorite = (!self.is_own()).then(|| Favorite::playlist(playlist));
+            header_actions(card, favorite, library).map(Message::Link)
+        });
+        let filter = row![buttons]
+            .push(actions)
+            .push(space::horizontal())
+            .push(filter)
+            .spacing(24)
+            .align_y(Alignment::Center);
         let columns = Columns {
             cover: true,
             album: true,
@@ -276,7 +295,9 @@ impl State {
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let position = self.shown[i];
                 let track = &tracks[position];
-                let row = track_list::track(images, position + 1, track, columns, allow_explicit);
+                let liked = library.liked(track);
+                let row =
+                    track_list::track(images, position + 1, track, columns, allow_explicit, liked);
                 track_list::playable_track(
                     row.map(Message::Link),
                     track,
@@ -293,7 +314,7 @@ impl State {
                 .push(self.tracks.end(Message::EndInView, Message::RetryMore))
                 .push(
                     all_loaded
-                        .then(|| self.recommendations(images, allow_explicit))
+                        .then(|| self.recommendations(images, library, allow_explicit))
                         .flatten(),
                 )
                 .spacing(SPACING)
@@ -363,6 +384,7 @@ impl State {
     fn recommendations<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         allow_explicit: bool,
     ) -> Option<Element<'a, Message>> {
         let shown = self.recommendations.shown();
@@ -375,7 +397,9 @@ impl State {
             date_added: false,
         };
         let rows = shown.iter().enumerate().map(|(i, track)| {
-            track_list::track(images, i + 1, track, columns, allow_explicit).map(Message::Link)
+            let liked = library.liked(track);
+            track_list::track(images, i + 1, track, columns, allow_explicit, liked)
+                .map(Message::Link)
         });
         let refresh = button(
             row![

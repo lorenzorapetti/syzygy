@@ -5,15 +5,17 @@
 use iced::widget::{Column, column, row, space, text};
 use iced::{Alignment, Element};
 use syzygy_catalog::artist::{Content, Section};
+use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Artist, Read};
 
 use super::cards::{self, Rows};
 use super::track_list::{self, Columns};
 use super::{
-    Action, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, hero, link, play_buttons,
-    top_tracks,
+    Action, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, header_actions, hero, link,
+    play_buttons, top_tracks,
 };
 use crate::images::Images;
+use crate::library::{Favorite, Library};
 use crate::playback::{SourceRef, Start};
 use crate::style;
 
@@ -98,6 +100,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
     ) -> Element<'a, Message> {
@@ -123,10 +126,23 @@ impl State {
                     Message::TogglePlay,
                 )
             });
+            let card = Card {
+                title: artist.name.clone(),
+                subtitle: "Artist".to_string(),
+                cover: artist.picture.clone(),
+                target: Target::Artist(self.id),
+            };
+            let favorite = Favorite::card(&card);
+            let actions = header_actions(card, favorite, library).map(Message::Link);
+            let buttons = row![]
+                .push(buttons)
+                .push(actions)
+                .spacing(24)
+                .align_y(Alignment::Center);
             let sections = artist.sections.iter().enumerate().map(|(index, section)| {
                 // Only the top tracks play, as the artist's source.
                 let now_playing = (top == Some(index)).then_some(now_playing);
-                self.section(index, section, images, now_playing, allow_explicit)
+                self.section(index, section, images, library, now_playing, allow_explicit)
             });
             Column::new()
                 .push(buttons)
@@ -147,6 +163,7 @@ impl State {
         index: usize,
         section: &'a Section,
         images: &'a Images,
+        library: &'a Library,
         playable: Option<Option<NowPlaying>>,
         allow_explicit: bool,
     ) -> Element<'a, Message> {
@@ -164,8 +181,10 @@ impl State {
                     .take(TRACKS_SHOWN)
                     .enumerate()
                     .map(|(i, track)| {
-                        let row = track_list::track(images, i + 1, track, COLUMNS, allow_explicit)
-                            .map(Message::Link);
+                        let liked = library.liked(track);
+                        let row =
+                            track_list::track(images, i + 1, track, COLUMNS, allow_explicit, liked)
+                                .map(Message::Link);
                         match playable {
                             Some(now_playing) => track_list::playable_track(
                                 row,
@@ -187,7 +206,7 @@ impl State {
                     section: path.clone(),
                 });
                 self.cards
-                    .view(index, &section.title, cards, view_all, images)
+                    .view(index, &section.title, cards, view_all, images, library)
                     .map(Message::Cards)
             }
         }

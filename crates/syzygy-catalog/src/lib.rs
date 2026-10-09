@@ -6,6 +6,7 @@ pub mod album;
 pub mod artist;
 mod error;
 pub mod explore;
+pub mod favorites;
 pub mod feed;
 mod home;
 pub mod home_feed;
@@ -37,6 +38,7 @@ pub use album::Album;
 pub use artist::Artist;
 pub use error::Error;
 pub use explore::ExplorePage;
+pub use favorites::{FavoriteId, FavoriteIds};
 pub use feed::Feed;
 pub use home_feed::{Card, Cover, HomeFeed};
 pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
@@ -326,7 +328,7 @@ impl Catalog {
             shelf.folder_id(),
             shelf.sort.key()
         );
-        let tags = library_tags(&shelf);
+        let tags = shelf.tags();
         let cache = self.cache.clone();
         match shelf.kind {
             Kind::Playlists => {
@@ -395,7 +397,7 @@ impl Catalog {
         let entry = Entry {
             key: format!("fav-tracks:{user_id}:{}", TrackSort::key(sort)),
             tier: CacheTier::UserContent,
-            tags: vec!["fav-tracks".to_string(), format!("user:{user_id}")],
+            tags: favorites::loved_tags(user_id),
             encode: playlist::encode_page,
             decode: playlist::decode_page,
         };
@@ -419,6 +421,61 @@ impl Catalog {
                 .await
                 .map_err(|e| Arc::new(Error::from(e)))?;
             Ok(playlist::tracks_page(page))
+        }
+    }
+
+    /// Every Favorite the user has, by id, for the hearts.
+    pub fn favorite_ids(&self, user_id: u64) -> BoxStream<'static, Read<FavoriteIds>> {
+        let tidal = self.tidal.clone();
+        let entry = serde_entry(format!("fav-ids:{user_id}"), favorites::ids_tags(user_id));
+        swr::read(self.cache.clone(), entry, move || async move {
+            let (ids, mixes) = futures::try_join!(
+                tidal.get_all_favorite_ids(user_id),
+                favorite_mix_ids(&tidal)
+            )?;
+            Ok(FavoriteIds::new(ids, mixes))
+        })
+        .boxed()
+    }
+
+    /// Like or unlike a track, album, playlist or mix, or follow or
+    /// unfollow an artist. The reads that list that kind are stale after.
+    pub fn set_favorite(
+        &self,
+        user_id: u64,
+        id: FavoriteId,
+        on: bool,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        async move {
+            let result = match (&id, on) {
+                (FavoriteId::Track(track), true) => tidal.add_favorite_track(user_id, *track).await,
+                (FavoriteId::Track(track), false) => {
+                    tidal.remove_favorite_track(user_id, *track).await
+                }
+                (FavoriteId::Album(album), true) => tidal.add_favorite_album(user_id, *album).await,
+                (FavoriteId::Album(album), false) => {
+                    tidal.remove_favorite_album(user_id, *album).await
+                }
+                (FavoriteId::Artist(artist), true) => {
+                    tidal.add_favorite_artist(user_id, *artist).await
+                }
+                (FavoriteId::Artist(artist), false) => {
+                    tidal.remove_favorite_artist(user_id, *artist).await
+                }
+                (FavoriteId::Playlist(uuid), true) => {
+                    tidal.add_favorite_playlist(user_id, uuid).await
+                }
+                (FavoriteId::Playlist(uuid), false) => {
+                    tidal.remove_favorite_playlist(user_id, uuid).await
+                }
+                (FavoriteId::Mix(mix), true) => tidal.add_favorite_mix(mix).await,
+                (FavoriteId::Mix(mix), false) => tidal.remove_favorite_mix(mix).await,
+            };
+            result.map_err(|e| Arc::new(Error::from(e)))?;
+            cache.invalidate_tag(id.tag()).await;
+            Ok(())
         }
     }
 
@@ -643,20 +700,6 @@ async fn playlist_page(
         .await
 }
 
-/// The tags of a Library shelf's reads: what its edits invalidate.
-fn library_tags(shelf: &Shelf) -> Vec<String> {
-    let kind = match shelf.kind {
-        // Favorite playlists sit among the user's own, and in Folders.
-        Kind::Playlists => vec!["folders".to_string(), "fav-playlists".to_string()],
-        Kind::Albums => vec!["fav-albums".to_string()],
-        Kind::Artists => vec!["fav-artists".to_string()],
-        Kind::Mixes => vec!["fav-mixes".to_string()],
-    };
-    kind.into_iter()
-        .chain([format!("user:{}", shelf.user_id)])
-        .collect()
-}
-
 /// `PAGE_SIZE` of a Folder's playlists and Folders from `offset`, or from
 /// `cursor` past the first page.
 async fn folder(
@@ -710,6 +753,26 @@ async fn favorite_mixes(
     tidal
         .get_favorite_mixes(offset, PAGE_SIZE, order, direction)
         .await
+}
+
+/// The ids of every Favorite mix. TIDAL sends no total for these, so pages
+/// are read until one comes back short.
+async fn favorite_mix_ids(tidal: &TidalClient) -> Result<Vec<String>, syzygy_tidal::Error> {
+    /// More pages than anyone's mixes fill: a stop should TIDAL keep
+    /// sending full ones.
+    const MAX_PAGES: u32 = 20;
+    let mut ids = Vec::new();
+    for page in 0..MAX_PAGES {
+        let mixes = tidal
+            .get_favorite_mixes(page * PAGE_SIZE, PAGE_SIZE, "DATE", "DESC")
+            .await?;
+        let full = mixes.items.len() >= PAGE_SIZE as usize;
+        ids.extend(mixes.items.into_iter().map(|mix| mix.id));
+        if !full {
+            break;
+        }
+    }
+    Ok(ids)
 }
 
 /// `PAGE_SIZE` of the user's Loved tracks from `offset`, sorted by TIDAL:

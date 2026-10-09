@@ -533,10 +533,12 @@ pub enum Message {
     Next,
     /// Restart the track, or go back through History.
     Previous,
-    /// Put the track at the front of the Manual queue, under its Source tag.
-    PlayNext(Track, Source),
-    /// Put the track at the end of the Manual queue, under its Source tag.
-    AddToQueue(Track, Source),
+    /// Put the tracks at the front of the Manual queue, in their order,
+    /// under their Source tag.
+    PlayNext(Vec<Track>, Source),
+    /// Put the tracks at the end of the Manual queue, in their order, under
+    /// their Source tag.
+    AddToQueue(Vec<Track>, Source),
     ToggleShuffle,
     /// Off, all, one, off.
     CycleRepeat,
@@ -646,7 +648,9 @@ fn chooses_explicit(message: &Message, listening: &Listening) -> bool {
                 .get(from..)
                 .is_some_and(|tracks| tracks.iter().any(|track| track.explicit))
         }
-        Message::PlayNext(track, _) | Message::AddToQueue(track, _) => track.explicit,
+        Message::PlayNext(tracks, _) | Message::AddToQueue(tracks, _) => {
+            tracks.iter().any(|track| track.explicit)
+        }
         Message::Pick(entry) => listening.track(*entry).is_some_and(|track| track.explicit),
         _ => false,
     }
@@ -893,8 +897,8 @@ impl Playback {
             },
             Message::Next => self.next(),
             Message::Previous => self.previous(),
-            Message::PlayNext(track, tag) => self.enqueue(track, tag, true),
-            Message::AddToQueue(track, tag) => self.enqueue(track, tag, false),
+            Message::PlayNext(tracks, tag) => self.enqueue(tracks, tag, true),
+            Message::AddToQueue(tracks, tag) => self.enqueue(tracks, tag, false),
             Message::ToggleShuffle => {
                 self.shuffle = !self.shuffle;
                 if let Some(play) = &mut self.listening.source {
@@ -1106,7 +1110,16 @@ impl Playback {
             Message::WithoutExplicit(pending) => match *pending.0 {
                 // Moving on skips them.
                 message @ Message::Start(_) => self.apply(message),
-                // Queued or picked, it would only be skipped.
+                // Queued, they would only be skipped: the rest are queued.
+                Message::PlayNext(mut tracks, tag) => {
+                    tracks.retain(|track| !track.explicit);
+                    self.enqueue(tracks, tag, true)
+                }
+                Message::AddToQueue(mut tracks, tag) => {
+                    tracks.retain(|track| !track.explicit);
+                    self.enqueue(tracks, tag, false)
+                }
+                // Picked, it would only be skipped.
                 _ => vec![],
             },
             Message::Pick(entry) => self.pick(entry),
@@ -1491,20 +1504,29 @@ impl Playback {
         effects
     }
 
-    /// The track into the Manual queue: at the front for Play next, else
-    /// at the end. With nothing playing, it plays.
-    fn enqueue(&mut self, track: Track, tag: Source, next: bool) -> Vec<Effect> {
-        let entry = Item {
-            id: self.stamp_entry(),
-            track,
-            from: Arc::new(tag),
-            step: None,
-            chosen: true,
-        };
+    /// The tracks into the Manual queue, in their order: at the front for
+    /// Play next, else at the end. With nothing playing, the first plays.
+    fn enqueue(&mut self, tracks: Vec<Track>, tag: Source, next: bool) -> Vec<Effect> {
+        let from = Arc::new(tag);
+        let mut entries: VecDeque<Item> = tracks
+            .into_iter()
+            .map(|track| Item {
+                id: self.stamp_entry(),
+                track,
+                from: from.clone(),
+                step: None,
+                chosen: true,
+            })
+            .collect();
+        // With nothing current, the first plays straight away.
         if self.listening.current.is_none() {
+            let Some(first) = entries.pop_front() else {
+                return vec![];
+            };
             let before = self.listening.clone();
             self.snapshot();
-            self.listening.current = Some(entry);
+            self.listening.current = Some(first);
+            self.listening.manual.extend(entries);
             return self.play_or_skip().unwrap_or_else(|| {
                 self.listening = before;
                 self.nothing_moved();
@@ -1512,13 +1534,15 @@ impl Playback {
             });
         }
         // A play loading now may fail: what it rolls back to keeps the
-        // entry too.
+        // entries too.
         let rollback = self.rollback.as_mut().map(|r| &mut r.listening.manual);
         for manual in std::iter::once(&mut self.listening.manual).chain(rollback) {
             if next {
-                manual.push_front(entry.clone());
+                for entry in entries.iter().rev() {
+                    manual.push_front(entry.clone());
+                }
             } else {
-                manual.push_back(entry.clone());
+                manual.extend(entries.iter().cloned());
             }
         }
         vec![]

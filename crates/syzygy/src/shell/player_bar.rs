@@ -9,6 +9,7 @@ use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme, f
 use super::drawer::Tab;
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
+use crate::library::{Favorite, Library};
 use crate::page::{self, Link};
 use crate::playback::{self, Playback, Repeat, Status};
 use crate::style;
@@ -97,10 +98,11 @@ impl PlayerBar {
         &'a self,
         playback: &'a Playback,
         images: &'a Images,
+        library: &'a Library,
         drawer: Option<Tab>,
     ) -> Element<'a, Message> {
         let bar = row![
-            container(now_playing(playback, images))
+            container(now_playing(playback, images, library))
                 .width(Length::FillPortion(3))
                 .align_left(Length::Fill),
             container(self.controls(playback))
@@ -193,7 +195,11 @@ impl PlayerBar {
 
 /// The cover, the title, the artists and "Playing from" of what's playing.
 /// The cover and "Playing from" lead to the Playback source.
-fn now_playing<'a>(playback: &'a Playback, images: &'a Images) -> Element<'a, Message> {
+fn now_playing<'a>(
+    playback: &'a Playback,
+    images: &'a Images,
+    library: &'a Library,
+) -> Element<'a, Message> {
     // The Shell shows the bar only with a current track.
     let (Some(track), Some(source)) = (playback.current(), playback.playing_from()) else {
         return space().into();
@@ -228,7 +234,8 @@ fn now_playing<'a>(playback: &'a Playback, images: &'a Images) -> Element<'a, Me
         .padding(0)
         .style(style::bare_button)
         .on_press_maybe(route.map(Link::Open));
-    let line = row![cover, container(details).clip(true)]
+    let heart = page::menu::heart(Favorite::track(track), library.liked(track), 18.0);
+    let line = row![cover, container(details).clip(true), heart]
         .spacing(12)
         .align_y(Alignment::Center);
     Element::from(line).map(Message::Link)

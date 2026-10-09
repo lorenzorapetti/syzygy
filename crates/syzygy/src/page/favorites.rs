@@ -13,7 +13,8 @@ use super::{
     play_buttons,
 };
 use crate::images::Images;
-use crate::playback::{SourceRef, Start};
+use crate::library::{Library, Listing};
+use crate::playback::{Continuation, SourceRef, Start};
 use crate::settings::Sort;
 use crate::style;
 
@@ -39,7 +40,8 @@ pub struct State {
     sort: Option<TrackSort>,
     tracks: List<Track>,
     filter: String,
-    /// The loaded tracks the filter lets through, by their place in the list.
+    /// The tracks the filter lets through, by their place in the list as
+    /// the pending Library edits change it.
     shown: Vec<usize>,
 }
 
@@ -84,11 +86,11 @@ impl State {
         (state, action)
     }
 
-    pub fn update(&mut self, message: Message) -> Action {
+    pub fn update(&mut self, message: Message, library: &Library) -> Action {
         match message {
             Message::Tracks { sort, read } if sort == self.sort => {
                 self.tracks.apply(read, "Loved tracks");
-                self.loaded()
+                self.loaded(library)
             }
             Message::More {
                 sort,
@@ -96,7 +98,7 @@ impl State {
                 result,
             } if sort == self.sort => {
                 self.tracks.more(offset, result);
-                self.loaded()
+                self.loaded(library)
             }
             // From before the sort changed.
             Message::Tracks { .. } | Message::More { .. } => Action::None,
@@ -116,17 +118,28 @@ impl State {
             }
             Message::Filter(filter) => {
                 self.filter = filter;
-                self.loaded()
+                self.loaded(library)
             }
             Message::Link(link) => link.follow(),
-            Message::Play(start) => match self.tracks.items() {
-                [] => Action::None,
-                tracks => {
-                    let source = SourceRef::LovedTracks(self.sort);
-                    let request = super::request(source, "Loved Tracks", tracks, start);
-                    Action::Play(super::with_rest(request, self.tracks.has_more()))
+            Message::Play(start) => {
+                let tracks: Vec<Track> = library
+                    .apply(self.tracks.items(), Listing::Loved)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                if tracks.is_empty() {
+                    return Action::None;
                 }
-            },
+                let source = SourceRef::LovedTracks(self.sort);
+                let mut request = super::request(source.clone(), "Loved Tracks", &tracks, start);
+                // The rest is read on from where TIDAL's pages end, which
+                // the pending edits don't move.
+                request.continuation = self.tracks.has_more().then(|| Continuation {
+                    source,
+                    offset: self.tracks.items().len(),
+                });
+                Action::Play(request)
+            }
             Message::TogglePlay => Action::TogglePlay,
             Message::Retry => self.load(),
         }
@@ -148,10 +161,41 @@ impl State {
         }
     }
 
+    /// The Library's pending edits changed what the list shows.
+    pub fn library_changed(&mut self, library: &Library) {
+        self.refilter(library);
+    }
+
+    /// What's read under `tags` changed: read the Loved tracks again if
+    /// they're among it, keeping these on screen until the new first page
+    /// arrives.
+    pub fn refresh(&mut self, tags: &[String]) -> Action {
+        let Some(user_id) = self.user_id else {
+            return Action::None;
+        };
+        let load = Load::LovedTracks {
+            user_id,
+            sort: self.sort,
+        };
+        let stale = load
+            .tags()
+            .is_some_and(|read| read.iter().any(|tag| tags.contains(tag)));
+        if !stale {
+            return Action::None;
+        }
+        self.tracks.reread();
+        Action::Load(load)
+    }
+
+    fn refilter(&mut self, library: &Library) {
+        let tracks = library.apply(self.tracks.items(), Listing::Loved);
+        self.shown = track_list::matching(tracks, &self.filter);
+    }
+
     /// The tracks or the filter changed: filter them again, and while a
     /// filter is on, load the rest so it sees every track.
-    fn loaded(&mut self) -> Action {
-        self.shown = track_list::matching(self.tracks.items(), &self.filter);
+    fn loaded(&mut self, library: &Library) -> Action {
+        self.refilter(library);
         if self.filter.trim().is_empty() {
             Action::None
         } else {
@@ -183,6 +227,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
@@ -216,7 +261,7 @@ impl State {
         );
         let filter = row![buttons, space::horizontal(), filter].align_y(Alignment::Center);
         let body = self.tracks.list.view(Message::Retry, |_| {
-            let tracks = self.tracks.items();
+            let tracks = library.apply(self.tracks.items(), Listing::Loved);
             if tracks.is_empty() {
                 return empty("No Loved tracks yet", "Like a track to see it here.");
             }
@@ -224,8 +269,10 @@ impl State {
                 track_list::sortable_header(COLUMNS, Some(self.shown_sort()), Message::Sort);
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let position = self.shown[i];
-                let track = &tracks[position];
-                let row = track_list::track(images, position + 1, track, COLUMNS, allow_explicit);
+                let track = tracks[position];
+                let liked = library.liked(track);
+                let row =
+                    track_list::track(images, position + 1, track, COLUMNS, allow_explicit, liked);
                 track_list::playable_track(
                     row.map(Message::Link),
                     track,

@@ -8,6 +8,7 @@ use syzygy_catalog::{Profile, Read};
 use super::cards::{self, Rows};
 use super::{Action, Link, Load, PADDING, Remote, Route, hero, no_picture, rounded_cover};
 use crate::images::Images;
+use crate::library::Library;
 use crate::style;
 
 /// How wide the bio runs.
@@ -60,7 +61,7 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
         self.profile.view(Message::Retry, |profile| {
             let art = match &profile.picture {
                 Some(picture) => {
@@ -82,7 +83,14 @@ impl State {
                     user_id: self.user_id,
                 };
                 self.rows
-                    .view(0, "Public playlists", &profile.playlists, Some(all), images)
+                    .view(
+                        0,
+                        "Public playlists",
+                        &profile.playlists,
+                        Some(all),
+                        images,
+                        library,
+                    )
                     .map(Message::Cards)
             });
             Column::new()

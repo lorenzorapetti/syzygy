@@ -19,6 +19,7 @@ pub enum Icon {
     Clock,
     Compass,
     Disc3,
+    Ellipsis,
     FolderOpen,
     GripVertical,
     Heart,
@@ -48,6 +49,8 @@ pub enum Icon {
     Star,
     Trophy,
     User,
+    UserCheck,
+    UserPlus,
     Users,
     Volume1,
     Volume2,
@@ -56,7 +59,7 @@ pub enum Icon {
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 45] = [
+const SOURCES: [&str; 48] = [
     include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/bell.svg"),
     include_str!("../icons/calendar.svg"),
@@ -68,6 +71,7 @@ const SOURCES: [&str; 45] = [
     include_str!("../icons/clock.svg"),
     include_str!("../icons/compass.svg"),
     include_str!("../icons/disc-3.svg"),
+    include_str!("../icons/ellipsis.svg"),
     include_str!("../icons/folder-open.svg"),
     include_str!("../icons/grip-vertical.svg"),
     include_str!("../icons/heart.svg"),
@@ -97,6 +101,8 @@ const SOURCES: [&str; 45] = [
     include_str!("../icons/star.svg"),
     include_str!("../icons/trophy.svg"),
     include_str!("../icons/user.svg"),
+    include_str!("../icons/user-check.svg"),
+    include_str!("../icons/user-plus.svg"),
     include_str!("../icons/users.svg"),
     include_str!("../icons/volume-1.svg"),
     include_str!("../icons/volume-2.svg"),

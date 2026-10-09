@@ -1266,11 +1266,11 @@ fn tag(id: u64) -> Source {
 }
 
 fn add(playback: &mut Playback, id: u64) -> Vec<Effect> {
-    playback.send(Message::AddToQueue(track(id), tag(id / 100)))
+    playback.send(Message::AddToQueue(vec![track(id)], tag(id / 100)))
 }
 
 fn play_next(playback: &mut Playback, id: u64) -> Vec<Effect> {
-    playback.send(Message::PlayNext(track(id), tag(id / 100)))
+    playback.send(Message::PlayNext(vec![track(id)], tag(id / 100)))
 }
 
 /// The Manual queue, in order.
@@ -1385,6 +1385,54 @@ fn queueing_with_nothing_playing_plays_it() {
     assert_eq!(current(&playback), Some(901));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(9)));
     assert_eq!(queued(&playback), Vec::<u64>::new());
+}
+
+#[test]
+fn several_tracks_played_next_go_ahead_in_their_own_order() {
+    let mut playback = playing(album(1, 3, 0));
+    add(&mut playback, 901);
+
+    playback.send(Message::PlayNext(vec![track(911), track(912)], tag(9)));
+
+    assert_eq!(queued(&playback), vec![911, 912, 901]);
+}
+
+#[test]
+fn several_tracks_added_to_the_queue_go_at_its_end_in_their_own_order() {
+    let mut playback = playing(album(1, 3, 0));
+    add(&mut playback, 901);
+
+    playback.send(Message::AddToQueue(vec![track(911), track(912)], tag(9)));
+
+    assert_eq!(queued(&playback), vec![901, 911, 912]);
+}
+
+#[test]
+fn queueing_several_with_nothing_playing_plays_the_first_and_queues_the_rest() {
+    let mut playback = new(1.0);
+
+    let effects = playback.send(Message::PlayNext(
+        vec![track(911), track(912), track(913)],
+        tag(9),
+    ));
+
+    assert!(matches!(effects[..], [Effect::Play { track_id: 911, .. }]));
+    assert_eq!(queued(&playback), vec![912, 913]);
+}
+
+#[test]
+fn queueing_several_without_explicit_ones_queues_the_rest() {
+    let mut playback = playing_with(no_explicit(), album(1, 3, 0));
+
+    let Outcome::NeedsExplicitConsent(pending) = playback.update(Message::AddToQueue(
+        vec![track(911), explicit(912), track(913)],
+        tag(9),
+    )) else {
+        panic!("expected a consent question");
+    };
+    playback.send(Message::WithoutExplicit(pending));
+
+    assert_eq!(queued(&playback), vec![911, 913]);
 }
 
 #[test]
@@ -1724,7 +1772,7 @@ fn playing_a_source_skips_its_unavailable_first_track() {
 #[test]
 fn an_unavailable_queued_entry_is_skipped() {
     let mut playback = playing(album(1, 3, 0));
-    playback.send(Message::AddToQueue(unavailable(901), tag(9)));
+    playback.send(Message::AddToQueue(vec![unavailable(901)], tag(9)));
 
     let effects = and_play(&mut playback, Message::TrackFinished);
 
@@ -1894,7 +1942,7 @@ fn queueing_an_explicit_track_asks_first_and_without_them_queues_nothing() {
     let mut playback = playing_with(no_explicit(), album(1, 3, 0));
 
     let Outcome::NeedsExplicitConsent(pending) =
-        playback.update(Message::AddToQueue(explicit(901), tag(9)))
+        playback.update(Message::AddToQueue(vec![explicit(901)], tag(9)))
     else {
         panic!("expected a consent question");
     };
@@ -1902,7 +1950,7 @@ fn queueing_an_explicit_track_asks_first_and_without_them_queues_nothing() {
 
     assert!(queued(&playback).is_empty());
     assert!(matches!(
-        playback.update(Message::PlayNext(explicit(901), tag(9))),
+        playback.update(Message::PlayNext(vec![explicit(901)], tag(9))),
         Outcome::NeedsExplicitConsent(_)
     ));
 }
@@ -2651,7 +2699,7 @@ fn what_changes_listening_asks_for_a_save() {
     assert!(saves(&mut playback, Message::Next));
     assert!(saves(
         &mut playback,
-        Message::AddToQueue(track(901), tag(9))
+        Message::AddToQueue(vec![track(901)], tag(9))
     ));
     assert!(saves(&mut playback, Message::Seek(20.0)));
     assert!(saves(&mut playback, Message::TogglePlay));
@@ -2787,7 +2835,7 @@ fn picking_an_unavailable_entry_says_so_and_plays_nothing() {
 #[test]
 fn picking_an_explicit_entry_while_they_arent_allowed_asks_first() {
     let mut playback = playing(album(1, 3, 0));
-    playback.send(Message::AddToQueue(explicit(901), tag(9)));
+    playback.send(Message::AddToQueue(vec![explicit(901)], tag(9)));
     playback.send(Message::AllowExplicit(false));
 
     let pick = queued_row(&playback, 901);
@@ -3387,7 +3435,7 @@ fn mpris_hears_nothing_when_nothing_it_shows_changes() {
     assert_eq!(
         told_mpris(
             &mut playback,
-            Message::AddToQueue(track(901), source(SourceRef::Track(901)))
+            Message::AddToQueue(vec![track(901)], source(SourceRef::Track(901)))
         ),
         None
     );

@@ -1,17 +1,19 @@
 //! The Album Page: the album's tracks, by volume when it has more than one,
 //! then "More by …" and the other sections TIDAL sends with it.
 
-use iced::Element;
-use iced::widget::{Column, column, mouse_area, text};
+use iced::widget::{Column, column, mouse_area, row, text};
+use iced::{Alignment, Element};
+use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Album, Read};
 
 use super::cards::{self, Rows};
 use super::track_list::{self, Columns, Mark};
 use super::{
     Action, Link, Load, NowPlaying, PADDING, PLAY_BUTTONS_HEIGHT, Preview, Remote, Viewport,
-    album_tracks, artists, count, duration, hero, play_buttons,
+    album_tracks, artists, count, duration, header_actions, hero, play_buttons,
 };
 use crate::images::Images;
+use crate::library::{Favorite, Library};
 use crate::playback::{SourceRef, Start};
 use crate::style;
 
@@ -128,6 +130,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
@@ -140,7 +143,7 @@ impl State {
             _ => None,
         };
         let body = self.album.view(Message::Retry, |album| {
-            let row = |i| self.row(i, album, images, now_playing, allow_explicit);
+            let row = |i| self.row(i, album, images, library, now_playing, allow_explicit);
             let list = track_list::view(
                 self.rows.len(),
                 LIST_TOP,
@@ -155,15 +158,22 @@ impl State {
                 .spacing(4);
             let sections = album.sections.iter().enumerate().map(|(index, section)| {
                 self.cards
-                    .view(index, &section.title, &section.cards, None, images)
+                    .view(index, &section.title, &section.cards, None, images, library)
                     .map(Message::Cards)
             });
-            let buttons = play_buttons(
-                &SourceRef::Album(self.id),
-                now_playing,
-                Message::Play,
-                Message::TogglePlay,
-            );
+            let card = self.card(album);
+            let favorite = Favorite::card(&card);
+            let buttons = row![
+                play_buttons(
+                    &SourceRef::Album(self.id),
+                    now_playing,
+                    Message::Play,
+                    Message::TogglePlay,
+                ),
+                header_actions(card, favorite, library).map(Message::Link),
+            ]
+            .spacing(24)
+            .align_y(Alignment::Center);
             column![buttons, list, footer]
                 .extend(sections)
                 .spacing(SPACING)
@@ -177,11 +187,27 @@ impl State {
             .into()
     }
 
+    /// The album as a card, for its menu.
+    fn card(&self, album: &Album) -> Card {
+        Card {
+            title: album.title.clone(),
+            subtitle: album
+                .artists
+                .iter()
+                .map(|artist| artist.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            cover: album.cover.clone(),
+            target: Target::Album(self.id),
+        }
+    }
+
     fn row<'a>(
         &self,
         i: usize,
         album: &'a Album,
         images: &'a Images,
+        library: &'a Library,
         now_playing: Option<NowPlaying>,
         allow_explicit: bool,
     ) -> Element<'a, Message> {
@@ -199,7 +225,15 @@ impl State {
                     None if hovered => Mark::Hovered,
                     None => Mark::None,
                 };
-                let line = track_list::marked(images, number, track, COLUMNS, allow_explicit, mark);
+                let line = track_list::marked(
+                    images,
+                    number,
+                    track,
+                    COLUMNS,
+                    allow_explicit,
+                    mark,
+                    library.liked(track),
+                );
                 let row = track_list::playable(
                     line.map(Message::Link),
                     Message::Play(Start::Track(index)),

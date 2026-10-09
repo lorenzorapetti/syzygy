@@ -11,6 +11,7 @@ use super::cards::{self, Rows};
 use super::{Action, Link, Load, PADDING, Remote, Route};
 use crate::icons::{Icon, icon};
 use crate::images::Images;
+use crate::library::Library;
 use crate::style;
 
 /// The width of each link in a list of nothing but links.
@@ -82,7 +83,7 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
         let title = text(self.title.as_deref().unwrap_or("Explore")).size(32);
         let body = self.page.view(Message::Retry, |page| {
             if page.sections.is_empty() {
@@ -99,7 +100,7 @@ impl State {
             if let [Section::Cards { title, cards, .. }] = page.sections.as_slice()
                 && title.is_empty()
             {
-                return cards::grid(cards, images).map(Message::Link);
+                return cards::grid(cards, images, library).map(Message::Link);
             }
             // The shortcuts go under everything else, as in sone.
             let (shortcuts, sections): (Vec<_>, Vec<_>) = page
@@ -110,7 +111,7 @@ impl State {
             let sections = sections
                 .into_iter()
                 .chain(shortcuts)
-                .map(|(index, section)| self.section(index, section, images));
+                .map(|(index, section)| self.section(index, section, images, library));
             column(sections).spacing(40).into()
         });
         column![title, body].spacing(32).padding(PADDING).into()
@@ -121,6 +122,7 @@ impl State {
         index: usize,
         section: &'a Section,
         images: &'a Images,
+        library: &'a Library,
     ) -> Element<'a, Message> {
         match section {
             Section::Links { links, .. } if is_shortcuts(section) => shortcuts(links),
@@ -150,7 +152,7 @@ impl State {
                     title: title.clone(),
                 });
                 self.rows
-                    .view(index, title, cards, view_all, images)
+                    .view(index, title, cards, view_all, images, library)
                     .map(Message::Cards)
             }
         }

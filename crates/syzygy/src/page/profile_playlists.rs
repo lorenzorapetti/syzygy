@@ -7,6 +7,7 @@ use syzygy_catalog::{Profile, Read};
 
 use super::{Action, Link, Load, PADDING, Remote, cards};
 use crate::images::Images;
+use crate::library::Library;
 use crate::style;
 
 pub struct State {
@@ -44,7 +45,7 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
         let header = |line: String| {
             Column::new()
                 .push(text("Public playlists").size(32))
@@ -61,7 +62,7 @@ impl State {
             let grid: Element<'a, Message> = if count == 0 {
                 text("No public playlists").style(text::secondary).into()
             } else {
-                cards::grid(&profile.playlists, images).map(Message::Link)
+                cards::grid(&profile.playlists, images, library).map(Message::Link)
             };
             Column::new()
                 .push(header(line))

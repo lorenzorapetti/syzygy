@@ -10,9 +10,10 @@ use iced::{Alignment, Element, Length, Theme};
 use std::collections::HashMap;
 use syzygy_catalog::home_feed::{Card, Target};
 
-use super::{Action, COVER_RADIUS, Link, Preview, Route, cover, loved_art};
+use super::{Action, COVER_RADIUS, Link, Preview, Route, cover, loved_art, menu};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
+use crate::library::{Favorite, Library};
 use crate::style;
 
 pub const CARD_WIDTH: f32 = 160.0;
@@ -96,6 +97,7 @@ impl Rows {
         cards: &'a [Card],
         view_all: Option<Route>,
         images: &'a Images,
+        library: &'a Library,
     ) -> Element<'a, Message> {
         let scroll = self.rows.get(&index).copied().unwrap_or_default();
         let content = row_width(cards.len());
@@ -123,7 +125,9 @@ impl Rows {
             .push(arrow(Icon::ChevronRight, 1.0, can_right))
             .spacing(8)
             .align_y(Alignment::Center);
-        let cards = cards.iter().map(|c| card(c, images).map(Message::Link));
+        let cards = cards
+            .iter()
+            .map(|c| card(c, images, library).map(Message::Link));
         let cards = scrollable(row(cards).spacing(CARD_GAP))
             .id(row_id(index))
             .direction(scrollable::Direction::Horizontal(
@@ -138,8 +142,8 @@ impl Rows {
 }
 
 /// Cards wrapped onto as many lines as they need.
-pub fn grid<'a>(cards: &'a [Card], images: &'a Images) -> Element<'a, Link> {
-    wrapped(cards.iter().map(|c| card(c, images)))
+pub fn grid<'a>(cards: &'a [Card], images: &'a Images, library: &'a Library) -> Element<'a, Link> {
+    wrapped(cards.iter().map(|c| card(c, images, library)))
 }
 
 /// Cards or tiles wrapped onto as many lines as they need.
@@ -152,8 +156,9 @@ pub fn wrapped<'a>(tiles: impl IntoIterator<Item = Element<'a, Link>>) -> Elemen
 }
 
 /// A card. Under the pointer, what can play shows a play button over its
-/// cover; a track's card plays wherever it's clicked.
-pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
+/// cover; a track's card plays wherever it's clicked. Right-clicked, it
+/// opens its menu.
+pub fn card<'a>(card: &'a Card, images: &'a Images, library: &'a Library) -> Element<'a, Link> {
     let art = art(card, images, CARD_WIDTH);
     let art = match play_button(card) {
         Some(play) => hover(
@@ -165,7 +170,15 @@ pub fn card<'a>(card: &'a Card, images: &'a Images) -> Element<'a, Link> {
         ),
         None => art,
     };
-    tile(art, &card.title, &card.subtitle, open(card))
+    let tile = tile(art, &card.title, &card.subtitle, open(card));
+    let liked = liked(card, library);
+    menu::with_menu(tile, move || menu::card(card, liked))
+}
+
+/// Whether what a card leads to is a Favorite, if it can be one and the
+/// Favorites have loaded.
+pub fn liked(card: &Card, library: &Library) -> Option<bool> {
+    Favorite::card(card).and_then(|favorite| library.favorite(&favorite.id()))
 }
 
 /// A card's picture, `size` square: its cover, or the Loved tracks' heart,

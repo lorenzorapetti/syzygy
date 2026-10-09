@@ -12,6 +12,7 @@ use super::cards;
 use super::paged::List;
 use super::{Action, Link, Load, PADDING, Remote, Route};
 use crate::images::Images;
+use crate::library::Library;
 use crate::style;
 
 pub struct State {
@@ -136,7 +137,7 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images) -> Element<'a, Message> {
+    pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
         let artist = self.artist.loaded();
         let tabs: Vec<(&str, &str)> = artist
             .map(|artist| {
@@ -175,7 +176,7 @@ impl State {
         .wrap();
         let body = self.cards.list.view(Message::Retry, |_| {
             Column::new()
-                .push(cards::grid(self.cards.items(), images).map(Message::Link))
+                .push(cards::grid(self.cards.items(), images, library).map(Message::Link))
                 .push(self.cards.end(Message::EndInView, Message::RetryMore))
                 .spacing(24)
                 .into()

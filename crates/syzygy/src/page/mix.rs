@@ -1,15 +1,17 @@
 //! The Mix Page: a mix's tracks.
 
-use iced::Element;
-use iced::widget::{Column, text};
+use iced::widget::{Column, row, text};
+use iced::{Alignment, Element};
+use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Mix, Read};
 
 use super::track_list::{self, Columns};
 use super::{
     Action, Link, Load, NowPlaying, PADDING, PLAY_BUTTONS_HEIGHT, Preview, Remote, Viewport, count,
-    hero, mix_source, play_buttons,
+    header_actions, hero, mix_source, play_buttons,
 };
 use crate::images::Images;
+use crate::library::{Favorite, Library};
 use crate::playback::{Source, Start};
 use crate::style;
 
@@ -84,6 +86,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
@@ -94,12 +97,28 @@ impl State {
             _ => None,
         };
         let body = self.mix.view(Message::Retry, |mix| {
-            let buttons = play_buttons(
-                &self.source(mix).kind,
-                now_playing,
-                Message::Play,
-                Message::TogglePlay,
-            );
+            let source = self.source(mix);
+            let card = Card {
+                title: source.name.clone(),
+                subtitle: mix.subtitle.clone().unwrap_or_default(),
+                cover: mix
+                    .cover
+                    .clone()
+                    .or_else(|| self.preview.as_ref().and_then(|p| p.cover.clone())),
+                target: Target::Mix(self.id.clone()),
+            };
+            let favorite = Favorite::card(&card);
+            let buttons = row![
+                play_buttons(
+                    &source.kind,
+                    now_playing,
+                    Message::Play,
+                    Message::TogglePlay
+                ),
+                header_actions(card, favorite, library).map(Message::Link),
+            ]
+            .spacing(24)
+            .align_y(Alignment::Center);
             let list = track_list::view(
                 mix.tracks.len(),
                 LIST_TOP,
@@ -107,7 +126,9 @@ impl State {
                 track_list::header(COLUMNS),
                 |i| {
                     let track = &mix.tracks[i];
-                    let row = track_list::track(images, i + 1, track, COLUMNS, allow_explicit);
+                    let liked = library.liked(track);
+                    let row =
+                        track_list::track(images, i + 1, track, COLUMNS, allow_explicit, liked);
                     track_list::playable_track(
                         row.map(Message::Link),
                         track,

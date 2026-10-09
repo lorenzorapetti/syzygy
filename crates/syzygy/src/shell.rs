@@ -26,9 +26,11 @@ use syzygy_catalog::{Catalog, Feed, HomeFeed, Read, Track};
 use crate::app::{self, Services};
 use crate::icons::{Icon, icon};
 use crate::images::{self, Images};
+use crate::library::{self, Library, Stamp, short};
 use crate::page::{
     self, Action, Context, Load, NowPlaying, Page, PageId, Route, Viewport, album, artist_tracks,
-    artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
+    artist_view_all, explore, favorites, feed, library as library_page, mix, playlist,
+    search as search_page,
 };
 use crate::playback::{self, Notice, PlayRequest, Playback, Status};
 use crate::radio;
@@ -82,6 +84,9 @@ pub struct Shell {
     consent: Option<playback::Pending>,
     /// The Settings modal, while it's open. Never on the Back stack.
     settings: Option<SettingsModal>,
+    /// The user's Library: their Favorites, their root playlists and
+    /// Folders, and their pending edits.
+    library: Library,
 }
 
 /// The Page on screen and the reads it started. Dropping it aborts them.
@@ -121,6 +126,12 @@ pub enum Message {
     CardRead(Result<Option<PlayRequest>, Arc<syzygy_catalog::Error>>),
     /// A track was read for its Track radio.
     TrackRead(Track, Result<Track, Arc<syzygy_catalog::Error>>),
+    /// A card's source was read, to queue: next, or at the end.
+    CardQueued {
+        next: bool,
+        result: Result<Option<PlayRequest>, Arc<syzygy_catalog::Error>>,
+    },
+    Library(library::Message),
 }
 
 impl Shell {
@@ -134,7 +145,8 @@ impl Shell {
             },
             context,
         );
-        let (sidebar, read) = Sidebar::new(context.user_id, context.settings);
+        let (mut library, favorites) = Library::new(context.user_id, context.settings);
+        let (sidebar, read) = Sidebar::new(context.user_id, context.settings, &mut library);
         let mut shell = Self {
             user_id: context.user_id,
             back_stack: BackStack::default(),
@@ -152,11 +164,13 @@ impl Shell {
             radio_read: None,
             consent: None,
             settings: None,
+            library,
         };
         let task = shell.run_action(action, services, context);
         let read = shell.run_sidebar(read, services, context);
+        let favorites = shell.run_library(favorites, services, context);
         let check = shell.check_feed(context.user_id, services);
-        (shell, Task::batch([task, read, check]))
+        (shell, Task::batch([task, read, favorites, check]))
     }
 
     /// TIDAL said who's signed in.
@@ -172,9 +186,16 @@ impl Shell {
             Route::Feed => self.feed_seen(user_id, services),
             _ => Task::none(),
         };
-        let effect = self.sidebar.user_known(user_id);
+        let favorites = self.library.user_known(user_id);
+        let favorites = self.run_library(favorites, services, context);
+        let effect = self.sidebar.user_known(user_id, &mut self.library);
         let read = self.run_sidebar(effect, services, context);
-        Task::batch([read, seen, self.check_feed(Some(user_id), services)])
+        Task::batch([
+            read,
+            favorites,
+            seen,
+            self.check_feed(Some(user_id), services),
+        ])
     }
 
     /// Read the Feed once, for the sidebar's dot.
@@ -224,7 +245,7 @@ impl Shell {
         if id != self.current.id {
             return Task::none();
         }
-        let action = self.current.page.update(message);
+        let action = self.current.page.update(message, &self.library);
         self.run_action(action, services, context)
     }
 
@@ -296,7 +317,7 @@ impl Shell {
                 }
             }
             Message::Sidebar(message) => {
-                let effect = self.sidebar.update(message);
+                let effect = self.sidebar.update(message, &mut self.library);
                 return self.run_sidebar(effect, services, context);
             }
             Message::Search(message) => {
@@ -365,6 +386,22 @@ impl Shell {
                         self.navigate(page::track_radio_route(&track, mix_id), services, context)
                     }
                     None => self.toast(Kind::Info, "Track radio unavailable"),
+                };
+            }
+            Message::Library(message) => return self.update_library(message, services, context),
+            Message::CardQueued { next, result } => {
+                return match result {
+                    Ok(Some(request)) => self.queue(
+                        request.first_page,
+                        request.source,
+                        next,
+                        context.settings.allow_explicit,
+                    ),
+                    Ok(None) => Task::none(),
+                    Err(e) => {
+                        log::warn!("Could not read what to queue: {e}");
+                        self.toast(Kind::Error, format!("Couldn't queue it: {e}"))
+                    }
                 };
             }
             Message::CardRead(result) => {
@@ -521,7 +558,7 @@ impl Shell {
                 // The sidebar lists each Library type in the same order.
                 let resort = match &sort {
                     Sort::Library(kind, library_sort) => {
-                        let effect = self.sidebar.sorted(*kind, *library_sort);
+                        let effect = self.sidebar.sorted(*kind, *library_sort, &mut self.library);
                         self.run_sidebar(effect, services, context)
                     }
                     _ => Task::none(),
@@ -544,28 +581,14 @@ impl Shell {
                 task
             }
             Action::Queue { track, next } => {
-                let title = short(&track.title);
-                let track_explicit = track.explicit;
                 let tag = page::queue_tag(&track);
-                let (message, toast) = if next {
-                    (
-                        playback::Message::PlayNext(track, tag),
-                        format!("\u{201c}{title}\u{201d} will play next"),
-                    )
-                } else {
-                    (
-                        playback::Message::AddToQueue(track, tag),
-                        format!("Added \u{201c}{title}\u{201d} to the queue"),
-                    )
-                };
-                // An explicit track that isn't allowed asks first instead.
-                let toast = if track_explicit && !context.settings.allow_explicit {
-                    Task::none()
-                } else {
-                    self.toast(Kind::Info, toast)
-                };
-                Task::batch([Task::done(app::Message::Playback(message)), toast])
+                self.queue(vec![track], tag, next, context.settings.allow_explicit)
             }
+            Action::QueueCard { card, next } => Task::perform(
+                play_card::read(card, &services.catalog, context),
+                move |result| app::Message::Shell(Message::CardQueued { next, result }),
+            ),
+            Action::Library(message) => self.update_library(message, services, context),
             Action::TrackRadio(track) => match track.track_radio.clone() {
                 Some(mix_id) => {
                     self.navigate(page::track_radio_route(&track, mix_id), services, context)
@@ -597,14 +620,96 @@ impl Shell {
             }
             Action::Load(load) => {
                 let id = self.current.id;
-                let (task, handle) = Task::run(read(load, &services.catalog), move |message| {
-                    app::Message::Page(id, message)
-                })
-                .abortable();
+                let note = load.tags().map(|tags| (self.library.start_read(), tags));
+                let reads = noting(read(load, &services.catalog), page_fresh, note, move |m| {
+                    app::Message::Page(id, m)
+                });
+                let (task, handle) = Task::run(reads, std::convert::identity).abortable();
                 self.current.loads.push(handle.abort_on_drop());
                 task
             }
         }
+    }
+
+    /// Put tracks in the Manual queue under `tag`, and say so.
+    fn queue(
+        &mut self,
+        tracks: Vec<Track>,
+        tag: playback::Source,
+        next: bool,
+        allow_explicit: bool,
+    ) -> Task<app::Message> {
+        let what = match tracks.as_slice() {
+            [track] => short(&track.title),
+            _ => short(&tag.name),
+        };
+        // Explicit tracks that aren't allowed ask first instead.
+        let asks = !allow_explicit && tracks.iter().any(|track| track.explicit);
+        let message = if next {
+            playback::Message::PlayNext(tracks, tag)
+        } else {
+            playback::Message::AddToQueue(tracks, tag)
+        };
+        let toast = match (asks, next) {
+            (true, _) => Task::none(),
+            (false, true) => {
+                self.toast(Kind::Info, format!("\u{201c}{what}\u{201d} will play next"))
+            }
+            (false, false) => self.toast(
+                Kind::Info,
+                format!("Added \u{201c}{what}\u{201d} to the queue"),
+            ),
+        };
+        Task::batch([Task::done(app::Message::Playback(message)), toast])
+    }
+
+    /// Hand the Library a message, and let the Page know its edits moved.
+    fn update_library(
+        &mut self,
+        message: library::Message,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let effects = self.library.update(message);
+        self.current.page.library_changed(&self.library);
+        self.run_library(effects, services, context)
+    }
+
+    fn run_library(
+        &mut self,
+        effects: Vec<library::Effect>,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let to_library = |message| app::Message::Shell(Message::Library(message));
+        let mut tasks = Vec::new();
+        for effect in effects {
+            let task = match effect {
+                library::Effect::Mutate(edit, library::Mutation::Favorite { user_id, id, on }) => {
+                    Task::perform(
+                        services.catalog.set_favorite(user_id, id, on),
+                        move |result| to_library(library::Message::Done(edit, result)),
+                    )
+                }
+                library::Effect::ReadFavorites { user_id, stamp } => {
+                    Task::run(services.catalog.favorite_ids(user_id), move |read| {
+                        to_library(library::Message::FavoriteIds(stamp, read))
+                    })
+                }
+                library::Effect::Refresh(tags) => {
+                    let mut reads = Vec::new();
+                    for effect in self.sidebar.refresh(&tags, &mut self.library) {
+                        reads.push(self.run_sidebar(effect, services, context));
+                    }
+                    let action = self.current.page.refresh(&tags);
+                    reads.push(self.run_action(action, services, context));
+                    Task::batch(reads)
+                }
+                library::Effect::Toast(text) => self.toast(Kind::Error, text),
+            };
+            tasks.push(task);
+        }
+        Task::batch(tasks)
     }
 
     fn run_drawer(
@@ -669,12 +774,15 @@ impl Shell {
         match effect {
             sidebar::Effect::None => Task::none(),
             sidebar::Effect::Read(shelf) => {
-                Task::run(services.catalog.library(&shelf), move |read| {
+                let note = Some((self.library.start_read(), shelf.tags()));
+                let reads = services.catalog.library(&shelf);
+                let reads = noting(reads, is_fresh, note, move |read| {
                     to_shell(sidebar::Message::Items {
                         shelf: shelf.clone(),
                         read,
                     })
-                })
+                });
+                Task::run(reads, std::convert::identity)
             }
             sidebar::Effect::More {
                 shelf,
@@ -773,7 +881,13 @@ impl Shell {
         let page = container(
             self.current
                 .page
-                .view(images, viewport, now_playing, playback.allow_explicit())
+                .view(
+                    images,
+                    &self.library,
+                    viewport,
+                    now_playing,
+                    playback.allow_explicit(),
+                )
                 .map(move |m| app::Message::Page(id, m)),
         )
         .max_width(MAX_PAGE_WIDTH)
@@ -794,7 +908,12 @@ impl Shell {
 
         let sidebar = self
             .sidebar
-            .view(images, &self.current.route, self.unseen.any())
+            .view(
+                images,
+                &self.library,
+                &self.current.route,
+                self.unseen.any(),
+            )
             .map(|message| app::Message::Shell(Message::Sidebar(message)));
         // The dropdown hangs over the Page, under the search field.
         let dropdown = self
@@ -808,13 +927,13 @@ impl Shell {
         // Only once there's something to play.
         let player_bar = playback.current().map(|_| {
             self.player_bar
-                .view(playback, images, self.drawer.showing())
+                .view(playback, images, &self.library, self.drawer.showing())
                 .map(|message| app::Message::Shell(Message::PlayerBar(message)))
         });
         // The drawer covers everything above the player bar.
         let drawer = self
             .drawer
-            .view(playback, images, clock, now)
+            .view(playback, images, &self.library, clock, now)
             .map(|drawer| drawer.map(|message| app::Message::Shell(Message::Drawer(message))));
         let main = column![
             stack![row![
@@ -939,16 +1058,6 @@ fn cut(text: &str, max: usize) -> String {
     }
 }
 
-/// A title short enough for a toast, as sone cuts it.
-fn short(title: &str) -> String {
-    if title.chars().count() > 30 {
-        let cut: String = title.chars().take(28).collect();
-        format!("{cut}\u{2026}")
-    } else {
-        title.to_string()
-    }
-}
-
 fn play(request: PlayRequest) -> Task<app::Message> {
     Task::done(app::Message::Playback(playback::Message::Start(request)))
 }
@@ -1055,7 +1164,7 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
         Load::Library(shelf) => catalog
             .library(&shelf)
             .map(move |read| {
-                page::Message::Library(library::Message::Items {
+                page::Message::Library(library_page::Message::Items {
                     shelf: shelf.clone(),
                     read,
                 })
@@ -1067,7 +1176,7 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
             cursor,
         } => stream::once(catalog.more_library(&shelf, offset, cursor))
             .map(move |result| {
-                page::Message::Library(library::Message::More {
+                page::Message::Library(library_page::Message::More {
                     shelf: shelf.clone(),
                     offset,
                     result,
@@ -1102,6 +1211,46 @@ fn read(load: Load, catalog: &Catalog) -> BoxStream<'static, page::Message> {
             .map(|result| page::Message::Feed(feed::Message::Loaded(result)))
             .boxed(),
         Load::Profile { user_id, then } => catalog.profile(user_id).map(then).boxed(),
+    }
+}
+
+/// A read's values as app messages through `wrap`. With a `note` (the
+/// read's stamp and tags), each value `fresh` says is TIDAL's answer is
+/// followed by word to the Library, which settles the edits it shows.
+fn noting<T: Send + 'static>(
+    reads: BoxStream<'static, T>,
+    fresh: fn(&T) -> bool,
+    note: Option<(Stamp, Vec<String>)>,
+    wrap: impl Fn(T) -> app::Message + Send + 'static,
+) -> BoxStream<'static, app::Message> {
+    reads
+        .flat_map(move |value| {
+            let settled = note
+                .as_ref()
+                .filter(|_| fresh(&value))
+                .map(|(stamp, tags)| {
+                    app::Message::Shell(Message::Library(library::Message::Fresh(
+                        *stamp,
+                        tags.clone(),
+                    )))
+                });
+            stream::iter(std::iter::once(wrap(value)).chain(settled))
+        })
+        .boxed()
+}
+
+/// Whether a read brought TIDAL's answer.
+fn is_fresh<T>(read: &Read<T>) -> bool {
+    matches!(read, Read::Fresh(Ok(_)))
+}
+
+/// Whether a Page's message brings TIDAL's answer to one of its Library
+/// reads.
+fn page_fresh(message: &page::Message) -> bool {
+    match message {
+        page::Message::Library(library_page::Message::Items { read, .. }) => is_fresh(read),
+        page::Message::Favorites(favorites::Message::Tracks { read, .. }) => is_fresh(read),
+        _ => false,
     }
 }
 

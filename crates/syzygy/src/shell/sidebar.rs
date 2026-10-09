@@ -1,7 +1,9 @@
 //! The sidebar: Home, and the user's Library one type at a time, with
 //! covers. The Shell keeps it for as long as the user is signed in, and a
 //! list stays on screen while it's read again, until the new read arrives,
-//! so the sidebar is never emptied by a reload.
+//! so the sidebar is never emptied by a reload. The root playlists and
+//! Folders are the Library's; the other types' lists are the sidebar's.
+//! Every list shows through the Library's merge with its pending edits.
 
 use iced::widget::{Column, button, column, container, row, scrollable, space, stack, text};
 use iced::{Alignment, Element, Length, Theme};
@@ -14,9 +16,10 @@ use syzygy_catalog::{Kind, LibrarySort, Paged, Read, Shelf};
 use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
 use crate::images::Images;
-use crate::page::library::{folder_route, label, playlist_route};
+use crate::library::{Library, Listing, Shelved};
+use crate::page::library::{folder_route, label, playlist_menu, playlist_route};
 use crate::page::paged::List;
-use crate::page::{Link, Remote, Route, cards, folder_art, loved_art, rounded_cover};
+use crate::page::{Link, Remote, Route, cards, folder_art, loved_art, menu, rounded_cover};
 use crate::settings::Settings;
 use crate::style;
 
@@ -29,18 +32,8 @@ pub struct Sidebar {
     user_id: Option<u64>,
     /// The Library type showing.
     kind: Kind,
+    /// Every type's list but the playlists, which are the Library's.
     lists: BTreeMap<Kind, Shelved>,
-}
-
-/// One Library type's list in the sidebar.
-struct Shelved {
-    /// The order it's wanted in.
-    sort: LibrarySort,
-    /// The order `items` was read in, once a read has arrived.
-    read_in: Option<LibrarySort>,
-    items: List<Item>,
-    /// It has been asked for, so a new order reads it again.
-    asked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,68 +74,78 @@ pub enum Effect {
 
 impl Sidebar {
     /// The sidebar on the playlists, and their first read.
-    pub fn new(user_id: Option<u64>, settings: &Settings) -> (Self, Effect) {
+    pub fn new(user_id: Option<u64>, settings: &Settings, library: &mut Library) -> (Self, Effect) {
         let lists = Kind::ALL
             .into_iter()
-            .map(|kind| {
-                let shelved = Shelved {
-                    sort: settings.library_sort(kind),
-                    read_in: None,
-                    items: List::new(),
-                    asked: false,
-                };
-                (kind, shelved)
-            })
+            .filter(|&kind| kind != Kind::Playlists)
+            .map(|kind| (kind, Shelved::new(settings.library_sort(kind))))
             .collect();
         let mut sidebar = Self {
             user_id,
             kind: Kind::Playlists,
             lists,
         };
-        let effect = sidebar.ask(Kind::Playlists);
+        let effect = sidebar.ask(Kind::Playlists, library);
         (sidebar, effect)
     }
 
     /// TIDAL said who's signed in: read what was waiting for it.
-    pub fn user_known(&mut self, user_id: u64) -> Effect {
+    pub fn user_known(&mut self, user_id: u64, library: &mut Library) -> Effect {
         if self.user_id.is_some() {
             return Effect::None;
         }
         self.user_id = Some(user_id);
-        self.ask(self.kind)
+        self.ask(self.kind, library)
     }
 
     /// A Library type is now read in `sort`. A list that's been read is
     /// read again, and keeps showing in its old order until that arrives.
-    pub fn sorted(&mut self, kind: Kind, sort: LibrarySort) -> Effect {
-        let Some(list) = self.lists.get_mut(&kind) else {
-            return Effect::None;
-        };
+    pub fn sorted(&mut self, kind: Kind, sort: LibrarySort, library: &mut Library) -> Effect {
+        let list = self.list_mut(kind, library);
         list.sort = sort;
         if !list.asked {
             return Effect::None;
         }
-        self.shelf(kind).map_or(Effect::None, Effect::Read)
+        self.shelf(kind, library).map_or(Effect::None, Effect::Read)
     }
 
-    pub fn update(&mut self, message: Message) -> Effect {
+    /// An edit landed: each list that's been read and is read under one of
+    /// `tags` is read again. The new first page replaces it, even one
+    /// paged past it, and it shows until then.
+    pub fn refresh(&mut self, tags: &[String], library: &mut Library) -> Vec<Effect> {
+        Kind::ALL
+            .into_iter()
+            .filter_map(|kind| {
+                let shelf = self.shelf(kind, library)?;
+                let list = self.list_mut(kind, library);
+                let stale = list.asked && shelf.tags().iter().any(|tag| tags.contains(tag));
+                stale.then(|| {
+                    list.read_in = None;
+                    list.items.reread();
+                    Effect::Read(shelf)
+                })
+            })
+            .collect()
+    }
+
+    pub fn update(&mut self, message: Message, library: &mut Library) -> Effect {
         match message {
             Message::Select(kind) => {
                 self.kind = kind;
-                self.ask(kind)
+                self.ask(kind, library)
             }
             Message::Items { shelf, read } => {
-                if Some(&shelf) != self.shelf(shelf.kind).as_ref() {
+                if Some(&shelf) != self.shelf(shelf.kind, library).as_ref() {
                     return Effect::None;
                 }
-                if let Some(list) = self.lists.get_mut(&shelf.kind) {
-                    // The first read in a new order replaces the old list.
-                    if list.read_in != Some(shelf.sort) {
-                        list.items = List::new();
-                        list.read_in = Some(shelf.sort);
-                    }
-                    list.items.apply(read, "sidebar's Library");
+                let list = self.list_mut(shelf.kind, library);
+                // The first read in a new order, or after an edit, replaces
+                // the old list.
+                if list.read_in != Some(shelf.sort) {
+                    list.items.reread();
+                    list.read_in = Some(shelf.sort);
                 }
+                list.items.apply(read, "sidebar's Library");
                 Effect::None
             }
             Message::More {
@@ -150,83 +153,86 @@ impl Sidebar {
                 offset,
                 result,
             } => {
-                if Some(&shelf) != self.shelf(shelf.kind).as_ref() {
+                if Some(&shelf) != self.shelf(shelf.kind, library).as_ref() {
                     return Effect::None;
                 }
-                if let Some(list) = self.lists.get_mut(&shelf.kind)
-                    && list.read_in == Some(shelf.sort)
-                {
+                let list = self.list_mut(shelf.kind, library);
+                if list.read_in == Some(shelf.sort) {
                     list.items.more(offset, result);
                 }
                 Effect::None
             }
             Message::EndInView => {
-                let offset = self.showing_mut().items.next();
-                self.more(offset)
+                let offset = self.list_mut(self.kind, library).items.next();
+                self.more(offset, library)
             }
             Message::RetryMore => {
-                let offset = self.showing_mut().items.retry();
-                self.more(offset)
+                let offset = self.list_mut(self.kind, library).items.retry();
+                self.more(offset, library)
             }
             Message::Retry => {
-                let list = self.showing_mut();
+                let list = self.list_mut(self.kind, library);
                 list.items = List::new();
                 list.read_in = None;
-                self.shelf(self.kind).map_or(Effect::None, Effect::Read)
+                self.shelf(self.kind, library)
+                    .map_or(Effect::None, Effect::Read)
             }
             Message::Link(link) => Effect::Link(link),
         }
     }
 
     /// Read a type's list the first time it's wanted.
-    fn ask(&mut self, kind: Kind) -> Effect {
-        let Some(shelf) = self.shelf(kind) else {
+    fn ask(&mut self, kind: Kind, library: &mut Library) -> Effect {
+        let Some(shelf) = self.shelf(kind, library) else {
             return Effect::None;
         };
-        match self.lists.get_mut(&kind) {
-            Some(list) if !list.asked => {
-                list.asked = true;
-                Effect::Read(shelf)
-            }
-            _ => Effect::None,
+        let list = self.list_mut(kind, library);
+        if list.asked {
+            return Effect::None;
         }
+        list.asked = true;
+        Effect::Read(shelf)
     }
 
     /// Read on from `offset`, unless the list on screen is in an order
     /// that's being replaced: its offset means nothing in the new one.
-    fn more(&self, offset: Option<usize>) -> Effect {
-        let showing = self.showing();
+    fn more(&self, offset: Option<usize>, library: &Library) -> Effect {
+        let showing = self.list(self.kind, library);
         if showing.read_in != Some(showing.sort) {
             return Effect::None;
         }
-        match (self.shelf(self.kind), offset) {
+        match (self.shelf(self.kind, library), offset) {
             (Some(shelf), Some(offset)) => Effect::More {
                 shelf,
                 offset,
-                cursor: self.showing().items.cursor(),
+                cursor: showing.items.cursor(),
             },
             _ => Effect::None,
         }
     }
 
     /// What a type's list is read as now: the top level, in its order.
-    fn shelf(&self, kind: Kind) -> Option<Shelf> {
+    fn shelf(&self, kind: Kind, library: &Library) -> Option<Shelf> {
         Some(Shelf {
             user_id: self.user_id?,
             kind,
             folder: None,
-            sort: self.lists.get(&kind)?.sort,
+            sort: self.list(kind, library).sort,
         })
     }
 
-    fn showing(&self) -> &Shelved {
-        &self.lists[&self.kind]
+    fn list<'a>(&'a self, kind: Kind, library: &'a Library) -> &'a Shelved {
+        match kind {
+            Kind::Playlists => &library.root,
+            _ => &self.lists[&kind],
+        }
     }
 
-    fn showing_mut(&mut self) -> &mut Shelved {
-        self.lists
-            .get_mut(&self.kind)
-            .expect("every type has a list")
+    fn list_mut<'a>(&'a mut self, kind: Kind, library: &'a mut Library) -> &'a mut Shelved {
+        match kind {
+            Kind::Playlists => &mut library.root,
+            _ => self.lists.get_mut(&kind).expect("every type has a list"),
+        }
     }
 
     /// The sidebar, with the Page at `current` marked where it's listed,
@@ -234,6 +240,7 @@ impl Sidebar {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         current: &Route,
         unseen: bool,
     ) -> Element<'a, Message> {
@@ -292,7 +299,7 @@ impl Sidebar {
         let pills = scrollable(pills).direction(scrollable::Direction::Horizontal(
             scrollable::Scrollbar::hidden(),
         ));
-        let list = scrollable(self.list(images, current))
+        let list = scrollable(self.rows(images, library, current))
             .height(Length::Fill)
             .width(Length::Fill);
         let body = column![text(DISPLAY_NAME).size(22), pages, header, pills, list].spacing(12);
@@ -305,8 +312,17 @@ impl Sidebar {
     }
 
     /// The type showing, with Loved tracks pinned above the playlists.
-    fn list<'a>(&'a self, images: &'a Images, current: &Route) -> Element<'a, Message> {
-        let shelved = self.showing();
+    fn rows<'a>(
+        &'a self,
+        images: &'a Images,
+        library: &'a Library,
+        current: &Route,
+    ) -> Element<'a, Message> {
+        let shelved = self.list(self.kind, library);
+        let items = match self.shelf(self.kind, library) {
+            Some(shelf) => library.apply(shelved.items.items(), Listing::Shelf(&shelf)),
+            None => Vec::new(),
+        };
         let loved = (self.kind == Kind::Playlists).then(|| {
             entry(
                 loved_art(ART_SIZE, ART_RADIUS),
@@ -315,6 +331,7 @@ impl Sidebar {
                 Route::Favorites,
                 current,
             )
+            .map(Message::Link)
         });
         let rows: Element<'a, Message> = match &shelved.items.list {
             Remote::Loading => notice("Loading…"),
@@ -324,13 +341,11 @@ impl Sidebar {
             ]
             .spacing(8)
             .into(),
-            Remote::Loaded(_) if shelved.items.items().is_empty() => notice(empty(self.kind)),
+            Remote::Loaded(_) if items.is_empty() => notice(empty(self.kind)),
             Remote::Loaded(_) => Column::with_children(
-                shelved
-                    .items
-                    .items()
-                    .iter()
-                    .map(|item| self.item(item, images, current)),
+                items
+                    .into_iter()
+                    .map(|item| self.item(item, images, library, current)),
             )
             .spacing(2)
             .into(),
@@ -344,14 +359,17 @@ impl Sidebar {
             .into()
     }
 
+    /// One row. Playlists and cards open their card menu when
+    /// right-clicked.
     fn item<'a>(
         &self,
         item: &'a Item,
         images: &'a Images,
+        library: &'a Library,
         current: &Route,
     ) -> Element<'a, Message> {
-        let art = |cover, radius| rounded_cover(images, cover, ART_SIZE, radius).map(Message::Link);
-        match item {
+        let art = |cover, radius| rounded_cover(images, cover, ART_SIZE, radius);
+        let row = match item {
             Item::Folder(folder) => entry(
                 folder_art(ART_SIZE, ART_RADIUS),
                 &folder.name,
@@ -359,13 +377,16 @@ impl Sidebar {
                 folder_route(folder),
                 current,
             ),
-            Item::Playlist(playlist) => entry(
-                art(playlist.cover.as_ref(), ART_RADIUS),
-                &playlist.title,
-                library::playlist_subtitle(playlist, self.user_id),
-                playlist_route(playlist),
-                current,
-            ),
+            Item::Playlist(playlist) => {
+                let row = entry(
+                    art(playlist.cover.as_ref(), ART_RADIUS),
+                    &playlist.title,
+                    library::playlist_subtitle(playlist, self.user_id),
+                    playlist_route(playlist),
+                    current,
+                );
+                playlist_menu(row, playlist, self.user_id, library)
+            }
             Item::Card(card) => {
                 let radius = match card.target {
                     Target::Artist(_) => ART_SIZE / 2.0,
@@ -374,15 +395,18 @@ impl Sidebar {
                 let Some(route) = cards::route(card) else {
                     return space().into();
                 };
-                entry(
+                let row = entry(
                     art(card.cover.as_ref(), radius),
                     &card.title,
                     card.subtitle.clone(),
                     route,
                     current,
-                )
+                );
+                let liked = cards::liked(card, library);
+                menu::with_menu(row, move || menu::card(card, liked))
             }
-        }
+        };
+        row.map(Message::Link)
     }
 }
 
@@ -420,12 +444,12 @@ fn dot(_theme: &Theme) -> container::Style {
 
 /// One row: the art, the title over a line about it, leading to `route`.
 fn entry<'a>(
-    art: Element<'a, Message>,
+    art: Element<'a, Link>,
     title: &'a str,
     subtitle: String,
     route: Route,
     current: &Route,
-) -> Element<'a, Message> {
+) -> Element<'a, Link> {
     let line = |line: text::Text<'a>| {
         container(line.wrapping(text::Wrapping::None))
             .width(Length::Fill)
@@ -441,7 +465,7 @@ fn entry<'a>(
         .padding([6, 6])
         .width(Length::Fill)
         .style(item_style(here))
-        .on_press(Message::Link(Link::Open(route)))
+        .on_press(Link::Open(route))
         .into()
 }
 

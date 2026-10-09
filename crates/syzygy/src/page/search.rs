@@ -13,6 +13,7 @@ use super::cards;
 use super::track_list::{self, Columns};
 use super::{Action, Link, Load, PADDING, Remote, Route, Viewport, rounded_cover, single};
 use crate::images::Images;
+use crate::library::Library;
 use crate::playback::{SourceRef, Start};
 use crate::style;
 
@@ -126,6 +127,7 @@ impl State {
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
+        library: &'a Library,
         viewport: Viewport,
         allow_explicit: bool,
     ) -> Element<'a, Message> {
@@ -153,12 +155,12 @@ impl State {
                 .into();
             }
             match self.tab {
-                Tab::All => all(results, images, allow_explicit),
+                Tab::All => all(results, images, library, allow_explicit),
                 Tab::TopHits => top_hits(&results.top_hits, images),
-                Tab::Tracks => tracks(&results.tracks, images, viewport, allow_explicit),
-                Tab::Playlists => grid(&results.playlists, "playlists", images),
-                Tab::Albums => grid(&results.albums, "albums", images),
-                Tab::Artists => grid(&results.artists, "artists", images),
+                Tab::Tracks => tracks(&results.tracks, images, library, viewport, allow_explicit),
+                Tab::Playlists => grid(&results.playlists, "playlists", images, library),
+                Tab::Albums => grid(&results.albums, "albums", images, library),
+                Tab::Artists => grid(&results.artists, "artists", images, library),
             }
         });
         Column::new()
@@ -174,6 +176,7 @@ impl State {
 fn all<'a>(
     results: &'a SearchResults,
     images: &'a Images,
+    library: &'a Library,
     allow_explicit: bool,
 ) -> Element<'a, Message> {
     let section = |title: &'a str, tab: Tab, content: Element<'a, Message>| {
@@ -190,7 +193,7 @@ fn all<'a>(
     };
     let cards = |cards: &'a [Card]| {
         let cards = cards.iter().take(CARDS_PREVIEW);
-        cards::wrapped(cards.map(|card| cards::card(card, images))).map(Message::Link)
+        cards::wrapped(cards.map(|card| cards::card(card, images, library))).map(Message::Link)
     };
     let mut sections: Vec<Element<'a, Message>> = Vec::new();
     if !results.tracks.is_empty() {
@@ -199,7 +202,7 @@ fn all<'a>(
             .iter()
             .take(TRACKS_PREVIEW)
             .enumerate()
-            .map(|(i, track)| track_row(images, i, track, allow_explicit));
+            .map(|(i, track)| track_row(images, library, i, track, allow_explicit));
         let list = Column::with_children(rows).into();
         sections.push(section("Tracks", Tab::Tracks, list));
     }
@@ -228,6 +231,7 @@ fn top_hits<'a>(hits: &'a [Hit], images: &'a Images) -> Element<'a, Message> {
 fn tracks<'a>(
     tracks: &'a [Track],
     images: &'a Images,
+    library: &'a Library,
     viewport: Viewport,
     allow_explicit: bool,
 ) -> Element<'a, Message> {
@@ -239,27 +243,34 @@ fn tracks<'a>(
         LIST_TOP,
         viewport,
         track_list::header(COLUMNS),
-        |i| track_row(images, i, &tracks[i], allow_explicit),
+        |i| track_row(images, library, i, &tracks[i], allow_explicit),
     )
 }
 
 /// A track found, which plays the tracks found from there.
 fn track_row<'a>(
     images: &'a Images,
+    library: &'a Library,
     index: usize,
     track: &'a Track,
     allow_explicit: bool,
 ) -> Element<'a, Message> {
-    let row =
-        track_list::track(images, index + 1, track, COLUMNS, allow_explicit).map(Message::Link);
+    let liked = library.liked(track);
+    let row = track_list::track(images, index + 1, track, COLUMNS, allow_explicit, liked)
+        .map(Message::Link);
     track_list::playable(row, Message::Play(index), false)
 }
 
-fn grid<'a>(cards: &'a [Card], what: &str, images: &'a Images) -> Element<'a, Message> {
+fn grid<'a>(
+    cards: &'a [Card],
+    what: &str,
+    images: &'a Images,
+    library: &'a Library,
+) -> Element<'a, Message> {
     if cards.is_empty() {
         return none_found(what);
     }
-    cards::grid(cards, images).map(Message::Link)
+    cards::grid(cards, images, library).map(Message::Link)
 }
 
 fn none_found<'a>(what: &str) -> Element<'a, Message> {

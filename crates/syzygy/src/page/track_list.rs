@@ -8,9 +8,7 @@ use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 
-use super::{
-    Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link, track_menu,
-};
+use super::{Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link, menu};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::style;
@@ -25,6 +23,8 @@ const COVER_SIZE: f32 = 40.0;
 const NUMBER_WIDTH: f32 = 36.0;
 const DATE_WIDTH: f32 = 110.0;
 const TIME_WIDTH: f32 = 56.0;
+/// The heart before the time.
+const HEART_WIDTH: f32 = 32.0;
 
 /// What a list shows besides each track's title and artists.
 #[derive(Debug, Clone, Copy)]
@@ -119,6 +119,7 @@ fn titles<'a, Message: 'a>(
             Length::Fixed(DATE_WIDTH),
         )
     }))
+    .push(space().width(HEART_WIDTH))
     .push(
         container(title("TIME", Some(TrackOrder::Duration)))
             .width(TIME_WIDTH)
@@ -165,17 +166,27 @@ pub enum Mark {
 }
 
 /// One track: its number, the cover if the list shows covers, the title
-/// over its artists, the album if shown, and how long it is. Right-clicked,
-/// it opens the track's menu. Dimmed if it can't play: TIDAL won't stream
-/// it, or it's explicit and `allow_explicit` is off.
+/// over its artists, the album if shown, its heart and how long it is.
+/// Right-clicked, it opens the track's menu. Dimmed if it can't play: TIDAL
+/// won't stream it, or it's explicit and `allow_explicit` is off. `liked`
+/// is whether it's a Loved track, `None` while that isn't known.
 pub fn track<'a>(
     images: &'a Images,
     number: usize,
     track: &'a Track,
     columns: Columns,
     allow_explicit: bool,
+    liked: Option<bool>,
 ) -> Element<'a, Link> {
-    marked(images, number, track, columns, allow_explicit, Mark::None)
+    marked(
+        images,
+        number,
+        track,
+        columns,
+        allow_explicit,
+        Mark::None,
+        liked,
+    )
 }
 
 /// [`track`], with its number marked.
@@ -186,6 +197,7 @@ pub fn marked<'a>(
     columns: Columns,
     allow_explicit: bool,
     mark: Mark,
+    liked: Option<bool>,
 ) -> Element<'a, Link> {
     let current = matches!(mark, Mark::Current { .. } | Mark::Playing(_));
     let dimmed = !track.available || (track.explicit && !allow_explicit);
@@ -269,6 +281,7 @@ pub fn marked<'a>(
     let line = row![container(lead).width(NUMBER_WIDTH), title]
         .push(album)
         .push(date_added)
+        .push(heart(track, liked))
         .push(
             text(duration(track.duration))
                 .size(14)
@@ -279,7 +292,23 @@ pub fn marked<'a>(
         .spacing(16)
         .align_y(Alignment::Center);
     let row = container(line).padding([0, 16]).center_y(ROW_HEIGHT);
-    track_menu::with_menu(row.into(), track)
+    menu::with_menu(row.into(), move || menu::track(track, liked))
+}
+
+/// A row's heart: filled in the accent for a Loved track.
+fn heart<'a>(track: &Track, liked: Option<bool>) -> Element<'a, Link> {
+    const SIZE: f32 = 16.0;
+    let glyph = match liked {
+        Some(true) => filled(Icon::Heart, SIZE, style::ACCENT),
+        Some(false) => icon(Icon::Heart, SIZE, style::TEXT_MUTED),
+        None => icon(Icon::Heart, SIZE, style::TEXT_DISABLED),
+    };
+    let favorite = crate::library::Favorite::track(track);
+    button(container(glyph).center(HEART_WIDTH))
+        .padding(0)
+        .style(style::icon_button)
+        .on_press_maybe(liked.map(|liked| Link::Favorite(Box::new(favorite), !liked)))
+        .into()
 }
 
 /// sone's playing indicator: three accent bars bouncing between 40% and
@@ -422,11 +451,11 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 
 /// Where in `tracks` the ones whose title, artists or album contain
 /// `filter` are, ignoring case. All of them for an empty filter.
-pub fn matching(tracks: &[Track], filter: &str) -> Vec<usize> {
+pub fn matching<'a>(tracks: impl IntoIterator<Item = &'a Track>, filter: &str) -> Vec<usize> {
     let filter = filter.trim().to_lowercase();
     let contains = |s: &str| s.to_lowercase().contains(&filter);
     tracks
-        .iter()
+        .into_iter()
         .enumerate()
         .filter(|(_, track)| {
             filter.is_empty()

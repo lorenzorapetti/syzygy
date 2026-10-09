@@ -26,6 +26,7 @@ use syzygy_catalog::{Lyrics, Read, Track};
 
 use crate::icons::{Icon, icon};
 use crate::images::Images;
+use crate::library::Library;
 use crate::page::track_list::{self, Columns, Mark, ROW_HEIGHT};
 use crate::page::{self, Link, Preview, Remote, Route, Viewport};
 use crate::playback::{self, Entry, EntryId, PlayRequest, Playback, Radio, Slot, Start};
@@ -547,6 +548,7 @@ impl Drawer {
         &'a self,
         playback: &'a Playback,
         images: &'a Images,
+        library: &'a Library,
         clock: f32,
         now: Instant,
     ) -> Option<Element<'a, Message>> {
@@ -570,7 +572,7 @@ impl Drawer {
                 container(cover_side(track, images))
                     .width(Length::FillPortion(COVER_SHARE))
                     .height(Length::Fill),
-                container(self.tabs(playback, images, clock))
+                container(self.tabs(playback, images, library, clock))
                     .width(Length::FillPortion(TABS_SHARE))
                     .height(Length::Fill)
                     .style(tabs_side),
@@ -597,6 +599,7 @@ impl Drawer {
         &'a self,
         playback: &'a Playback,
         images: &'a Images,
+        library: &'a Library,
         clock: f32,
     ) -> Element<'a, Message> {
         let pill = |tab: Tab, glyph: Icon, label: &'static str| {
@@ -633,8 +636,8 @@ impl Drawer {
         .spacing(4)
         .align_y(Alignment::Center);
         let content = match self.tab {
-            Tab::Queue => self.queue(playback, images, clock),
-            Tab::Suggested => self.suggested(playback, images),
+            Tab::Queue => self.queue(playback, images, library, clock),
+            Tab::Suggested => self.suggested(playback, images, library),
             Tab::Lyrics => self.lyrics(playback),
             Tab::Credits => self.credits(playback),
         };
@@ -678,6 +681,7 @@ impl Drawer {
         &'a self,
         playback: &'a Playback,
         images: &'a Images,
+        library: &'a Library,
         clock: f32,
     ) -> Element<'a, Message> {
         let lines = lines(playback);
@@ -686,7 +690,7 @@ impl Drawer {
         let below = (lines.len() - range.end) as f32 * ROW_HEIGHT;
         let built = lines[range]
             .iter()
-            .map(|line| self.line(line, playback, images, clock));
+            .map(|line| self.line(line, playback, images, library, clock));
         column![
             space().height(above),
             Column::with_children(built),
@@ -700,11 +704,13 @@ impl Drawer {
         line: &Line<'a>,
         playback: &'a Playback,
         images: &'a Images,
+        library: &'a Library,
         clock: f32,
     ) -> Element<'a, Message> {
         let allow_explicit = playback.allow_explicit();
         let track_row = |number: usize, track: &'a Track, mark| {
-            track_list::marked(images, number, track, COLUMNS, allow_explicit, mark)
+            let liked = library.liked(track);
+            track_list::marked(images, number, track, COLUMNS, allow_explicit, mark, liked)
                 .map(Message::Link)
         };
         match *line {
@@ -850,7 +856,12 @@ impl Drawer {
     }
 
     /// The current track's Track radio, each track playing it from there.
-    fn suggested<'a>(&'a self, playback: &'a Playback, images: &'a Images) -> Element<'a, Message> {
+    fn suggested<'a>(
+        &'a self,
+        playback: &'a Playback,
+        images: &'a Images,
+        library: &'a Library,
+    ) -> Element<'a, Message> {
         let current = playback.current().map(|track| track.id);
         let read = self
             .suggested
@@ -881,6 +892,7 @@ impl Drawer {
                 COLUMNS,
                 playback.allow_explicit(),
                 Mark::None,
+                library.liked(track),
             )
             .map(Message::Link);
             track_list::playable(line, Message::PlaySuggested(i), Some(track.id) == current)

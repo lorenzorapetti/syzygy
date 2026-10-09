@@ -8,6 +8,7 @@ use syzygy_tidal::models::{
     PaginatedResponse, TidalAlbumDetail, TidalArtistDetail, TidalFavoriteMix,
 };
 
+use crate::favorites::{self, FavoriteId};
 use crate::home_feed::{self, Card, Cover, Target, items, string};
 use crate::paged::Paged;
 use crate::playlist::{self, Direction, Playlist};
@@ -122,6 +123,32 @@ pub struct Shelf {
 impl Shelf {
     pub(crate) fn folder_id(&self) -> &str {
         self.folder.as_deref().unwrap_or(ROOT)
+    }
+
+    /// The tags of this shelf's reads: what its edits invalidate.
+    pub fn tags(&self) -> Vec<String> {
+        let kind: &[&str] = match self.kind {
+            // Favorite playlists sit among the user's own, and in Folders.
+            Kind::Playlists => &["folders", favorites::PLAYLISTS],
+            Kind::Albums => &[favorites::ALBUMS],
+            Kind::Artists => &[favorites::ARTISTS],
+            Kind::Mixes => &[favorites::MIXES],
+        };
+        kind.iter()
+            .map(|tag| tag.to_string())
+            .chain([favorites::user_tag(self.user_id)])
+            .collect()
+    }
+
+    /// Whether this shelf lists that kind of Favorite.
+    pub fn lists(&self, id: &FavoriteId) -> bool {
+        matches!(
+            (self.kind, id),
+            (Kind::Playlists, FavoriteId::Playlist(_))
+                | (Kind::Albums, FavoriteId::Album(_))
+                | (Kind::Artists, FavoriteId::Artist(_))
+                | (Kind::Mixes, FavoriteId::Mix(_))
+        )
     }
 }
 
