@@ -106,6 +106,21 @@ pub fn modal(_theme: &Theme) -> container::Style {
     }
 }
 
+/// A notice across the top of a screen, such as the login screen's after
+/// Session expiry.
+pub fn banner(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(BG_ELEVATED.into()),
+        text_color: Some(TEXT_PRIMARY),
+        border: Border {
+            color: BORDER_SUBTLE,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 /// What darkens the Shell under a modal.
 pub fn backdrop(_theme: &Theme) -> container::Style {
     container::Style {

@@ -585,6 +585,10 @@ pub enum Message {
     Move(Entry, usize),
     /// Empty the Manual queue and what's left of the source.
     Clear,
+    /// Stop, and forget the source, the Manual queue, the current track
+    /// and History, as the account they belong to leaves. Preferences
+    /// stay.
+    Reset,
 }
 
 /// What [`Playback::update`] did.
@@ -655,7 +659,9 @@ fn changes_listening(message: &Message) -> bool {
         | Message::Remove(_)
         | Message::Move(..)
         | Message::Clear => true,
-        Message::Position(_)
+        // What's on disk is the app's to keep or delete.
+        Message::Reset
+        | Message::Position(_)
         | Message::DeviceBusy(_)
         | Message::SetVolume(_)
         | Message::ToggleMute
@@ -1083,7 +1089,27 @@ impl Playback {
                     None => vec![],
                 }
             }
+            Message::Reset => self.reset(),
         }
+    }
+
+    /// Let go of everything listening was, and of a play still loading.
+    fn reset(&mut self) -> Vec<Effect> {
+        let mut effects = match self.status {
+            Status::Stopped => vec![],
+            _ => vec![Effect::Stop],
+        };
+        if self.fill_id().is_some() {
+            effects.push(Effect::CancelFill);
+        }
+        self.listening = Listening::default();
+        self.status = Status::Stopped;
+        self.position = 0.0;
+        self.failures = 0;
+        self.rate_limited = None;
+        self.radio = None;
+        self.rollback = None;
+        effects
     }
 
     /// Whether what comes next is armed. The engine never advances with

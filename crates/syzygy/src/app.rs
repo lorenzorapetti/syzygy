@@ -23,7 +23,7 @@ use crate::page::{self, Context, PageId};
 use crate::persist;
 use crate::playback::{self, PlayError, Playback, Status};
 use crate::radio;
-use crate::session::Session;
+use crate::session::{self, Session};
 use crate::settings::{self, Settings};
 use crate::shell::{self, Shell};
 use crate::style;
@@ -41,7 +41,8 @@ pub enum State {
 pub struct App {
     services: Services,
     settings: Settings,
-    /// The signed-in Session, as last saved. `None` on the login screen.
+    /// The Session as last saved: signed in, or without tokens after
+    /// Session expiry. `None` before the first sign-in and after Logout.
     session: Option<Session>,
     tidal_events: EventSource<syzygy_tidal::Event>,
     audio_events: EventSource<syzygy_audio::Event>,
@@ -59,6 +60,9 @@ pub struct App {
     /// The fill reading the rest of the Playback source. It outlives the
     /// Page that started the play; replacing it aborts it.
     fill_task: Option<task::Handle>,
+    /// Signed in, but TIDAL hasn't said as whom: the Session from before,
+    /// whose queue, cache and sorts stay untouched until it does.
+    unnamed_sign_in: Option<Option<Session>>,
     /// A snapshot save is waiting out [`SNAPSHOT_DELAY`], and will save
     /// whatever playback is by then.
     snapshot_due: bool,
@@ -120,6 +124,10 @@ pub enum Message {
     SaveSnapshot,
     /// The window was asked to close.
     Quit,
+    /// Logout, from the Settings modal.
+    LogOut,
+    /// What the last user left on disk is gone.
+    AccountForgotten,
     SettingsSaved(Result<(), Arc<syzygy_store::Error>>),
     SessionSaved(Result<(), Arc<syzygy_store::Error>>),
     SnapshotSaved(Result<(), Arc<syzygy_store::Error>>),
@@ -183,6 +191,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         arm_task: None,
         ramp_task: None,
         fill_task: None,
+        unnamed_sign_in: None,
         snapshot_due: false,
         epoch: Instant::now(),
         frame: Instant::now(),
@@ -192,17 +201,25 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
     // A stored Session opens straight into the Shell; the account refresh
     // runs behind it.
     let task = match session {
-        Some(session) => {
-            app.services.tidal.restore_session(
-                session.tokens.clone(),
-                session.login_method,
-                session.country_code.clone(),
-            );
-            app.session = Some(session);
-            let restore = app.restore_snapshot();
-            let shell = app.open_shell();
-            Task::batch([restore, shell, app.refresh_session_info()])
-        }
+        Some(session) => match session.tokens.clone() {
+            Some(tokens) => {
+                app.services.tidal.restore_session(
+                    tokens,
+                    session.login_method,
+                    session.country_code.clone(),
+                );
+                app.session = Some(session);
+                let restore = app.restore_snapshot();
+                let shell = app.open_shell();
+                Task::batch([restore, shell, app.refresh_session_info()])
+            }
+            // Expired in an earlier run: still signed out.
+            None => {
+                app.session = Some(session);
+                app.phase = Phase::Login(Box::new(login::State::expired()));
+                Task::none()
+            }
+        },
         None => Task::none(),
     };
     (State::Running(Box::new(app)), Task::batch([engine, task]))
@@ -367,22 +384,18 @@ impl App {
             }
             Message::Audio(event) => self.audio_event(event),
             Message::Tidal(syzygy_tidal::Event::TokensRefreshed(tokens)) => {
-                self.update_session(|session| session.tokens = tokens)
+                self.update_session(|session| session.tokens = Some(tokens))
             }
-            Message::Tidal(syzygy_tidal::Event::SessionExpired) => {
-                // A stub until Session expiry handling: no banner, and the
-                // whole file goes rather than just the tokens, so a relaunch
-                // doesn't open a dead Session.
-                log::warn!("Session expired, back to login");
-                self.session = None;
-                self.phase = Phase::Login(Box::default());
-                let services = self.services.clone();
-                Task::perform(
-                    persist::remove(services.store, services.paths.session_file()),
-                    Message::SessionSaved,
-                )
-            }
+            Message::Tidal(syzygy_tidal::Event::SessionExpired) => self.session_expired(),
+            Message::LogOut => self.log_out(),
+            // Logout stays on the login screen; a sign-in starts afresh.
+            Message::AccountForgotten if self.signed_in() => self.open_shell(),
+            Message::AccountForgotten => Task::none(),
             Message::SessionInfo(Ok(info)) => {
+                let arrived = match self.unnamed_sign_in.take() {
+                    Some(previous) => self.arrive(previous, info.user_id),
+                    None => Task::none(),
+                };
                 let saved = self.update_session(|session| {
                     session.user_id = Some(info.user_id);
                     if info.country_code.is_some() {
@@ -392,7 +405,7 @@ impl App {
                 let known = self.in_shell(|shell, services, context| {
                     shell.user_known(info.user_id, services, context)
                 });
-                Task::batch([saved, known])
+                Task::batch([arrived, saved, known])
             }
             Message::SessionInfo(Err(e)) => {
                 log::warn!("Could not refresh the account info: {e}");
@@ -718,14 +731,18 @@ impl App {
         self.save_settings()
     }
 
+    fn signed_in(&self) -> bool {
+        self.session.as_ref().is_some_and(Session::is_signed_in)
+    }
+
     /// Change the signed-in Session and save it. Nothing when signed out.
     fn update_session(&mut self, change: impl FnOnce(&mut Session)) -> Task<Message> {
         match &mut self.session {
-            Some(session) => {
+            Some(session) if session.is_signed_in() => {
                 change(session);
                 self.save_session()
             }
-            None => Task::none(),
+            _ => Task::none(),
         }
     }
 
@@ -743,9 +760,10 @@ impl App {
 
     /// Write where listening is, encrypted, off the UI thread. Not while
     /// signed out: nothing was restored then, and the saved queue waits
-    /// for the next sign-in.
+    /// for the next sign-in. Nor while the user isn't named: the saved
+    /// queue may still be theirs to restore.
     fn save_snapshot(&self) -> Task<Message> {
-        if self.session.is_none() {
+        if !self.signed_in() || self.unnamed_sign_in.is_some() {
             return Task::none();
         }
         let services = self.services.clone();
@@ -762,10 +780,6 @@ impl App {
     /// Pick up listening where the last launch left it, stopped. An
     /// unreadable file starts afresh: the next save replaces it.
     fn restore_snapshot(&mut self) -> Task<Message> {
-        // Signing in again within one run keeps what's there.
-        if self.playback.current().is_some() {
-            return Task::none();
-        }
         let path = self.services.paths.queue_file();
         let snapshot = match self.services.store.read_json(&path) {
             Ok(snapshot) => snapshot,
@@ -783,10 +797,15 @@ impl App {
         }
     }
 
+    /// Not while TIDAL hasn't said who signed in: a relaunch would take
+    /// the last user's queue for theirs.
     fn save_session(&self) -> Task<Message> {
         let Some(session) = self.session.clone() else {
             return Task::none();
         };
+        if self.unnamed_sign_in.is_some() {
+            return Task::none();
+        }
         let services = self.services.clone();
         Task::perform(
             session.save(services.store, services.paths.session_file()),
@@ -823,20 +842,130 @@ impl App {
         )
     }
 
+    /// Signing in worked. What the last user left is kept only if it's
+    /// them again. When the tokens don't say who signed in, the Shell opens
+    /// without the queue, and the account refresh decides.
     fn sign_in(&mut self, login_method: LoginMethod, tokens: AuthTokens) -> Task<Message> {
         log::info!("Signed in with {login_method:?}");
+        let previous = self.session.take();
+        let user_id = tokens.user_id;
         self.session = Some(Session {
-            user_id: tokens.user_id,
-            tokens,
+            user_id,
+            tokens: Some(tokens),
             login_method,
             country_code: None,
         });
-        Task::batch([
-            self.restore_snapshot(),
-            self.open_shell(),
-            self.save_session(),
-            self.refresh_session_info(),
-        ])
+        let arrived = match user_id {
+            Some(user_id) => self.arrive(previous, user_id),
+            None => {
+                self.unnamed_sign_in = Some(previous);
+                self.open_shell()
+            }
+        };
+        Task::batch([arrived, self.save_session(), self.refresh_session_info()])
+    }
+
+    /// `user_id` signed in after `previous`. The same user picks up their
+    /// queue where they were. Anyone else starts clean once the last user's
+    /// queue, cache and sorts are gone. Either way the Shell is at Home with
+    /// an empty Back stack.
+    fn arrive(&mut self, previous: Option<Session>, user_id: u64) -> Task<Message> {
+        let previous_user = previous.as_ref().and_then(|session| session.user_id);
+        if session::same_user(previous_user, Some(user_id)) {
+            if let (Some(session), Some(previous)) = (&mut self.session, previous)
+                && session.country_code.is_none()
+                && let Some(tokens) = session.tokens.clone()
+            {
+                session.country_code = previous.country_code;
+                self.services.tidal.restore_session(
+                    tokens,
+                    session.login_method,
+                    session.country_code.clone(),
+                );
+            }
+            let restore = self.restore_snapshot();
+            let shell = match self.phase {
+                Phase::Login(_) => self.open_shell(),
+                Phase::Shell(_) => self.track_changed(),
+            };
+            return Task::batch([restore, shell]);
+        }
+        if previous_user.is_some() {
+            log::info!("Another user signed in, forgetting the last one's");
+        }
+        self.forget_account()
+    }
+
+    /// Session expiry: back to login with a banner. Where listening was is
+    /// saved first, for the same user to pick up; the queue, cache,
+    /// preferences, user id and country stay.
+    fn session_expired(&mut self) -> Task<Message> {
+        // Requests still in flight can each report it.
+        if !self.signed_in() {
+            return Task::none();
+        }
+        log::warn!("Session expired, back to login");
+        let position = self.services.position.get();
+        let tick = self.update_playback(playback::Message::Position(position));
+        let snapshot = self.save_snapshot();
+        let reset = self.update_playback(playback::Message::Reset);
+        // Nobody was named: the Session from before, still on disk, stays
+        // the one to compare the next sign-in with.
+        let saved = match self.unnamed_sign_in.take() {
+            Some(previous) => {
+                self.session = previous;
+                Task::none()
+            }
+            None => {
+                if let Some(session) = &mut self.session {
+                    session.expire();
+                }
+                self.save_session()
+            }
+        };
+        self.phase = Phase::Login(Box::new(login::State::expired()));
+        Task::batch([tick, snapshot, reset, saved])
+    }
+
+    /// Logout: stop, and leave nothing of the account on the machine but
+    /// the preferences.
+    fn log_out(&mut self) -> Task<Message> {
+        log::info!("Logging out");
+        let reset = self.update_playback(playback::Message::Reset);
+        self.services.tidal.sign_out();
+        self.session = None;
+        self.unnamed_sign_in = None;
+        self.phase = Phase::Login(Box::default());
+        let services = self.services.clone();
+        let session = Task::perform(
+            persist::remove(services.store, services.paths.session_file()),
+            Message::SessionSaved,
+        );
+        Task::batch([reset, session, self.forget_account()])
+    }
+
+    /// Forget the account's sorts, then delete its saved queue and the disk
+    /// cache, after any save of them already asked for, and send
+    /// [`Message::AccountForgotten`].
+    fn forget_account(&mut self) -> Task<Message> {
+        self.settings.forget_account();
+        let Services {
+            store,
+            paths,
+            catalog,
+            ..
+        } = self.services.clone();
+        let queue = persist::remove(store, paths.queue_file());
+        let files = Task::perform(
+            async move {
+                if let Err(e) = queue.await {
+                    log::error!("Failed to delete the queue: {e}");
+                }
+                catalog.clear_cache().await;
+            },
+            |()| Message::AccountForgotten,
+        );
+        Task::batch([self.save_settings(), files])
     }
 
     fn run_images(&self, effect: images::Effect) -> Task<Message> {

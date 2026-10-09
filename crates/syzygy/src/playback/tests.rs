@@ -3295,3 +3295,62 @@ fn the_gapless_setting_goes_to_the_engine() {
         vec![Effect::SetGapless(true)]
     );
 }
+
+// Leaving the account: logout, Session expiry, another user.
+
+#[test]
+fn a_reset_stops_and_forgets_where_listening_was() {
+    let mut playback = playing(long_playlist(1, 5, Start::All));
+    and_play(&mut playback, Message::Next);
+    add(&mut playback, 901);
+
+    let effects = playback.send(Message::Reset);
+
+    assert_eq!(effects, vec![Effect::Stop, Effect::CancelFill]);
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), None);
+    assert_eq!(queued(&playback), Vec::<u64>::new());
+    assert_eq!(upcoming(&playback), Vec::<u64>::new());
+    assert_eq!(history(&playback), Vec::<u64>::new());
+    assert_eq!(playing_from(&playback), None);
+    assert_eq!(playback.position(), 0.0);
+}
+
+#[test]
+fn a_reset_keeps_the_preferences() {
+    let mut playback = shuffled(playing(album(1, 3, 0)));
+    playback.send(Message::SetVolume(0.4));
+    playback.send(Message::CycleRepeat);
+
+    playback.send(Message::Reset);
+
+    assert_eq!(playback.volume(), 0.4);
+    assert!(playback.shuffle());
+    assert_eq!(playback.repeat(), Repeat::All);
+}
+
+#[test]
+fn a_reset_with_nothing_playing_asks_nothing_of_the_engine() {
+    let mut playback = new(1.0);
+
+    assert_eq!(playback.send(Message::Reset), vec![]);
+}
+
+#[test]
+fn a_play_that_was_loading_before_a_reset_is_dropped() {
+    let mut playback = playing(album(1, 3, 0));
+    let effects = playback.send(Message::Next);
+
+    playback.send(Message::Reset);
+
+    assert_eq!(playback.send(played(token(&effects))), vec![]);
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), None);
+}
+
+#[test]
+fn a_reset_doesnt_save_the_snapshot() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert!(!saves(&mut playback, Message::Reset));
+}

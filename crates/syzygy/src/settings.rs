@@ -139,6 +139,14 @@ impl Settings {
         }
     }
 
+    /// Drop what belongs to the account rather than to the machine: the
+    /// sorts of its playlists, Loved tracks and Library. Preferences stay.
+    pub fn forget_account(&mut self) {
+        self.track_sorts.clear();
+        self.loved_tracks_sort = None;
+        self.library_sorts.clear();
+    }
+
     /// Put a search at the front of the history, once whatever its case
     /// (sone's `addToHistory`). Blank searches aren't kept.
     pub fn remember_search(&mut self, query: &str) {
@@ -337,6 +345,39 @@ mod tests {
         settings.forget_search("björk");
 
         assert_eq!(settings.search_history, ["sigur rós"]);
+    }
+
+    #[test]
+    fn forgetting_the_account_drops_its_sorts_and_keeps_the_preferences() {
+        let mut settings = Settings {
+            volume: 0.4,
+            max_quality: Quality::Lossless,
+            exclusive_device: Some("hw:1,0".into()),
+            ..Settings::default()
+        };
+        settings.remember_search("björk");
+        settings.save_sort(Sort::Playlist("u-1".into(), Some(by_title())));
+        settings.save_sort(Sort::LovedTracks(Some(by_title())));
+        settings.save_sort(Sort::Library(
+            Kind::Albums,
+            LibrarySort {
+                order: LibraryOrder::Name,
+                direction: Direction::Ascending,
+            },
+        ));
+        let kept = settings.clone();
+
+        settings.forget_account();
+
+        assert_eq!(
+            settings,
+            Settings {
+                track_sorts: BTreeMap::new(),
+                loved_tracks_sort: None,
+                library_sorts: BTreeMap::new(),
+                ..kept
+            }
+        );
     }
 
     #[test]

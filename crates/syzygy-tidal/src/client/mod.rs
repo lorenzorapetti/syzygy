@@ -87,9 +87,12 @@ impl TidalClient {
         }
     }
 
-    /// Forget the tokens. Later calls fail with `Error::NotAuthenticated`.
+    /// Forget the tokens and the account's country. Later calls fail with
+    /// `Error::NotAuthenticated`.
     pub fn sign_out(&self) {
-        self.write().tokens = None;
+        let mut session = self.write();
+        session.tokens = None;
+        session.country_code = DEFAULT_COUNTRY_CODE.to_string();
     }
 
     pub fn tokens(&self) -> Option<AuthTokens> {

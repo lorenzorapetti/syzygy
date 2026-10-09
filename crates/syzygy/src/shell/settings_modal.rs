@@ -61,6 +61,7 @@ pub enum Message {
     Autoplay(bool),
     AllowExplicit(bool),
     ReportPlays(bool),
+    LogOut,
 }
 
 impl SettingsModal {
@@ -95,6 +96,7 @@ impl SettingsModal {
             Message::Autoplay(on) => to_playback(playback::Message::Autoplay(on)),
             Message::AllowExplicit(on) => to_playback(playback::Message::AllowExplicit(on)),
             Message::ReportPlays(on) => preference(Preference::ReportPlays(on)),
+            Message::LogOut => Some(app::Message::LogOut),
         }
     }
 
@@ -207,6 +209,16 @@ impl SettingsModal {
             .push(autoplay)
             .push(explicit)
             .push(report)
+            .push(heading("Account"))
+            .push(setting(
+                "Log out",
+                "Sign out and delete your Session, cache and queue. Preferences stay",
+                button(text("Log out").size(14))
+                    .padding([8, 16])
+                    .style(style::pill_button)
+                    .on_press(Message::LogOut)
+                    .into(),
+            ))
             .spacing(16);
 
         let card = container(

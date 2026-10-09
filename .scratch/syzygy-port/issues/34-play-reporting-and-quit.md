@@ -11,3 +11,7 @@
 - [ ] "Chosen by user" is false only for tracks from an Autoplay-started Track radio, whether the advance was gapless or not
 - [ ] iced's exit-on-close is off. Close requests and MPRIS Quit map to `Message::Quit`, which runs stop, report flush (~2 s timeout), settings save and snapshot save together, then `iced::exit()`
 - [ ] Seam 1 tests cover the "chosen by user" flag on reports
+
+## Comments
+
+- From ticket 32: Logout must also delete the persisted report queue. Hook it into `App::log_out` in `crates/syzygy/src/app.rs`, next to the `session.json` removal.

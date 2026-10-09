@@ -15,6 +15,8 @@ use crate::style;
 
 pub struct State {
     screen: Screen,
+    /// Session expiry brought the user here: say so above the screen.
+    expired: bool,
 }
 
 enum Screen {
@@ -128,6 +130,15 @@ impl State {
     pub fn new() -> Self {
         Self {
             screen: Screen::Browser(Browser::new()),
+            expired: false,
+        }
+    }
+
+    /// The login screen after Session expiry, with a banner saying why.
+    pub fn expired() -> Self {
+        Self {
+            expired: true,
+            ..Self::new()
         }
     }
 
@@ -280,10 +291,15 @@ impl State {
             Screen::Browser(browser) => browser.view(),
             Screen::DeviceCode(device) => device.view(),
         };
-        container(body.max_width(440).spacing(16))
-            .center(Length::Fill)
-            .padding(24)
-            .into()
+        let banner = self.expired.then(|| {
+            container(text("Your session expired, sign in again").size(14))
+                .padding([10, 16])
+                .style(style::banner)
+        });
+        let body = column![banner, body.max_width(440).spacing(16)]
+            .spacing(24)
+            .align_x(Alignment::Center);
+        container(body).center(Length::Fill).padding(24).into()
     }
 }
 

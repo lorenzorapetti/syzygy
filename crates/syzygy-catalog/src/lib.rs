@@ -66,6 +66,11 @@ impl Catalog {
         }
     }
 
+    /// Delete everything cached, as the account it was read for leaves.
+    pub async fn clear_cache(&self) {
+        self.cache.clear().await;
+    }
+
     /// One Home feed tab, by its slug (`"static"` for the default tab).
     pub fn home_feed(&self, slug: &str) -> BoxStream<'static, Read<HomeFeed>> {
         let slug = slug.to_lowercase();
