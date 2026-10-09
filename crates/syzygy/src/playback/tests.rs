@@ -24,11 +24,14 @@ fn track(id: u64) -> Track {
 
 impl Playback {
     /// Send a message that mustn't need consent, for its effects. Asks to
-    /// save the snapshot are left out: [`saves`] checks those.
+    /// save the snapshot are left out: [`saves`] checks those. So is what
+    /// MPRIS is told: [`told_mpris`] checks that.
     fn send(&mut self, message: Message) -> Vec<Effect> {
         match self.update(message) {
             Outcome::Effects(mut effects) => {
-                effects.retain(|effect| *effect != Effect::SaveSnapshot);
+                effects.retain(|effect| {
+                    *effect != Effect::SaveSnapshot && !matches!(effect, Effect::Mpris(_))
+                });
                 effects
             }
             Outcome::NeedsExplicitConsent(pending) => {
@@ -2501,8 +2504,15 @@ fn autoplay_fetches_the_radio_early_when_the_rest_would_all_be_skipped() {
 // Session restore.
 
 /// What `playback` saves, written out and read back into a new Playback, as
-/// at the next launch, and what restoring it asked for.
+/// at the next launch, and what restoring it asked for but MPRIS.
 fn relaunched(playback: &Playback) -> (Playback, Vec<Effect>) {
+    let (restored, mut effects) = relaunched_telling_mpris(playback);
+    effects.retain(|effect| !matches!(effect, Effect::Mpris(_)));
+    (restored, effects)
+}
+
+/// [`relaunched`], with what MPRIS is told.
+fn relaunched_telling_mpris(playback: &Playback) -> (Playback, Vec<Effect>) {
     let json = serde_json::to_vec(&playback.to_snapshot()).unwrap();
     let mut restored = new(1.0);
     let effects = restored.restore(serde_json::from_slice(&json).unwrap());
@@ -3353,4 +3363,316 @@ fn a_reset_doesnt_save_the_snapshot() {
     let mut playback = playing(album(1, 3, 0));
 
     assert!(!saves(&mut playback, Message::Reset));
+}
+
+// MPRIS
+
+/// What `message` tells MPRIS, if anything.
+fn told_mpris(playback: &mut Playback, message: Message) -> Option<mpris::Diff> {
+    let Outcome::Effects(effects) = playback.update(message) else {
+        panic!("expected effects");
+    };
+    let mut diffs = effects.into_iter().filter_map(|effect| match effect {
+        Effect::Mpris(diff) => Some(diff),
+        _ => None,
+    });
+    let diff = diffs.next();
+    assert_eq!(diffs.next(), None, "one diff at most");
+    diff
+}
+
+#[test]
+fn starting_a_track_shows_it_playing_in_mpris() {
+    let mut playback = new(0.5);
+
+    let diff = told_mpris(&mut playback, Message::Start(album(1, 3, 0))).expect("a diff");
+
+    assert_eq!(
+        diff,
+        mpris::Diff {
+            track: Some(Some(mpris::Track {
+                id: 101,
+                title: "Track 101".to_string(),
+                artists: vec!["Artist".to_string()],
+                album: None,
+                art_url: None,
+                length: 200,
+            })),
+            status: Some(mpris::Status::Playing),
+            ..mpris::Diff::default()
+        }
+    );
+}
+
+#[test]
+fn mpris_hears_nothing_when_nothing_it_shows_changes() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(told_mpris(&mut playback, Message::Position(12.0)), None);
+    assert_eq!(told_mpris(&mut playback, Message::Seek(30.0)), None);
+    assert_eq!(
+        told_mpris(
+            &mut playback,
+            Message::AddToQueue(track(901), source(SourceRef::Track(901)))
+        ),
+        None
+    );
+    assert_eq!(told_mpris(&mut playback, Message::SetVolume(1.0)), None);
+}
+
+#[test]
+fn mpris_hears_only_what_changed() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(
+        told_mpris(&mut playback, Message::TogglePlay),
+        Some(mpris::Diff {
+            status: Some(mpris::Status::Paused),
+            ..mpris::Diff::default()
+        })
+    );
+    assert_eq!(
+        told_mpris(&mut playback, Message::SetVolume(0.25)),
+        Some(mpris::Diff {
+            volume: Some(0.25),
+            ..mpris::Diff::default()
+        })
+    );
+    assert_eq!(
+        told_mpris(&mut playback, Message::ToggleShuffle),
+        Some(mpris::Diff {
+            shuffle: Some(true),
+            ..mpris::Diff::default()
+        })
+    );
+    assert_eq!(
+        told_mpris(&mut playback, Message::CycleRepeat),
+        Some(mpris::Diff {
+            repeat: Some(mpris::Repeat::All),
+            ..mpris::Diff::default()
+        })
+    );
+}
+
+#[test]
+fn mpris_shows_the_next_track_once_it_loads_and_nothing_more_once_it_plays() {
+    let mut playback = playing(album(1, 3, 0));
+
+    let effects = playback.send(Message::Next);
+    assert_eq!(current(&playback), Some(102));
+    let diff = told_mpris(&mut playback, played(token(&effects)));
+
+    // The track changed with Next, so the Played that follows tells nothing.
+    assert_eq!(diff, None);
+}
+
+#[test]
+fn a_track_change_tells_mpris_the_new_track() {
+    let mut playback = playing(album(1, 3, 0));
+
+    let diff = told_mpris(&mut playback, Message::Next).expect("a diff");
+
+    assert_eq!(diff.track.flatten().map(|track| track.id), Some(102));
+    assert_eq!(diff.status, None);
+}
+
+#[test]
+fn a_reset_clears_the_track_answer_mpris() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(
+        told_mpris(&mut playback, Message::Reset),
+        Some(mpris::Diff {
+            track: Some(None),
+            status: Some(mpris::Status::Stopped),
+            ..mpris::Diff::default()
+        })
+    );
+}
+
+#[test]
+fn the_first_view_is_what_playback_starts_with() {
+    let playback = shuffled(new(0.7));
+
+    let view = playback.mpris_view();
+
+    assert_eq!(view.volume, 0.7);
+    assert!(view.shuffle);
+    assert_eq!(view.track, None);
+    assert_eq!(view.status, mpris::Status::Stopped);
+}
+
+#[test]
+fn a_restore_tells_mpris_the_track_it_comes_back_to() {
+    let playback = playing(long_playlist(1, 5, Start::All));
+
+    let (_, effects) = relaunched_telling_mpris(&playback);
+
+    let diff = effects.into_iter().find_map(|effect| match effect {
+        Effect::Mpris(diff) => Some(diff),
+        _ => None,
+    });
+    let track = diff.and_then(|diff| diff.track.flatten());
+    assert_eq!(track.map(|track| track.id), Some(101));
+}
+
+// A stop from the desktop.
+
+#[test]
+fn a_stop_lets_go_of_the_track_and_keeps_it_current_from_the_start() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::Position(42.0));
+
+    let diff = told_mpris(&mut playback, Message::Stop);
+
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(playback.position(), 0.0);
+    assert_eq!(
+        diff,
+        Some(mpris::Diff {
+            status: Some(mpris::Status::Stopped),
+            ..mpris::Diff::default()
+        })
+    );
+}
+
+#[test]
+fn a_stop_asks_the_engine_to_stop_and_play_starts_the_track_over() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::Position(42.0));
+
+    assert_eq!(playback.send(Message::Stop), vec![Effect::Stop]);
+    let effects = playback.send(Message::TogglePlay);
+
+    assert!(matches!(
+        the_play(&effects),
+        Effect::Play {
+            track_id: 101,
+            from: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_stop_while_stopped_asks_nothing() {
+    let mut playback = new(1.0);
+
+    assert_eq!(playback.send(Message::Stop), vec![]);
+}
+
+// Desktop controls into playback messages.
+
+fn names(messages: Vec<Message>) -> Vec<String> {
+    messages.iter().map(|m| format!("{m:?}")).collect()
+}
+
+#[test]
+fn play_and_pause_from_the_desktop_only_toggle_when_they_change_something() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert!(playback.answer_mpris(mpris::Event::Play).is_empty());
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::Pause)),
+        ["TogglePlay"]
+    );
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::PlayPause)),
+        ["TogglePlay"]
+    );
+
+    playback.send(Message::TogglePlay);
+    assert!(playback.answer_mpris(mpris::Event::Pause).is_empty());
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::Play)),
+        ["TogglePlay"]
+    );
+}
+
+#[test]
+fn desktop_buttons_send_the_in_app_buttons_messages() {
+    let playback = playing(album(1, 3, 0));
+
+    assert_eq!(names(playback.answer_mpris(mpris::Event::Next)), ["Next"]);
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::Previous)),
+        ["Previous"]
+    );
+    assert_eq!(names(playback.answer_mpris(mpris::Event::Stop)), ["Stop"]);
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::SetVolume(0.3))),
+        ["SetVolume(0.3)"]
+    );
+}
+
+#[test]
+fn a_seek_from_the_desktop_moves_from_where_the_track_is() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::Position(50.0));
+
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::Seek(10.0))),
+        ["Seek(60.0)"]
+    );
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::Seek(-80.0))),
+        ["Seek(0.0)"]
+    );
+    // Past the end is the next track, as MPRIS says.
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::Seek(500.0))),
+        ["Next"]
+    );
+}
+
+#[test]
+fn set_position_is_for_the_current_track_only() {
+    let playback = playing(album(1, 3, 0));
+
+    let at = |track_id, position| mpris::Event::SetPosition { track_id, position };
+    assert_eq!(names(playback.answer_mpris(at(101, 20.0))), ["Seek(20.0)"]);
+    assert!(playback.answer_mpris(at(102, 20.0)).is_empty());
+    assert!(playback.answer_mpris(at(101, 201.0)).is_empty());
+}
+
+#[test]
+fn shuffle_from_the_desktop_toggles_only_when_it_differs() {
+    let playback = playing(album(1, 3, 0));
+
+    assert!(
+        playback
+            .answer_mpris(mpris::Event::SetShuffle(false))
+            .is_empty()
+    );
+    assert_eq!(
+        names(playback.answer_mpris(mpris::Event::SetShuffle(true))),
+        ["ToggleShuffle"]
+    );
+}
+
+#[test]
+fn loop_status_from_the_desktop_cycles_repeat_to_it() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert!(
+        playback
+            .answer_mpris(mpris::Event::SetRepeat(mpris::Repeat::Off))
+            .is_empty()
+    );
+    let to_one = playback.answer_mpris(mpris::Event::SetRepeat(mpris::Repeat::One));
+    assert_eq!(names(to_one.clone()), ["CycleRepeat", "CycleRepeat"]);
+
+    for message in to_one {
+        playback.send(message);
+    }
+    assert_eq!(playback.repeat(), Repeat::One);
+}
+
+#[test]
+fn raise_and_quit_are_not_playbacks() {
+    let playback = playing(album(1, 3, 0));
+
+    assert!(playback.answer_mpris(mpris::Event::Raise).is_empty());
+    assert!(playback.answer_mpris(mpris::Event::Quit).is_empty());
 }

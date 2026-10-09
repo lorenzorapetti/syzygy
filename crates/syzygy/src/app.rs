@@ -16,7 +16,7 @@ use syzygy_tidal::{LoginMethod, TidalClient};
 
 use crate::events::EventSource;
 use crate::fill;
-use crate::identity::{DISPLAY_NAME, Paths};
+use crate::identity::{DESKTOP_ENTRY, DISPLAY_NAME, MPRIS_BUS_NAME, Paths};
 use crate::images::{self, Images};
 use crate::login;
 use crate::page::{self, Context, PageId};
@@ -46,6 +46,7 @@ pub struct App {
     session: Option<Session>,
     tidal_events: EventSource<syzygy_tidal::Event>,
     audio_events: EventSource<syzygy_audio::Event>,
+    mpris_events: EventSource<syzygy_mpris::Event>,
     images: Images,
     playback: Playback,
     /// The play being fetched and started. Replacing it aborts it, so an
@@ -88,6 +89,7 @@ pub struct Services {
     pub catalog: Catalog,
     pub player: AudioPlayer,
     pub position: PositionCell,
+    pub mpris: syzygy_mpris::Mpris,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +116,8 @@ pub enum Message {
     /// The volume slider was let go: remember the volume.
     SaveVolume,
     Audio(syzygy_audio::Event),
+    /// The desktop's media controls.
+    Mpris(syzygy_mpris::Event),
     /// Time to read where the playing track is.
     Tick,
     Tidal(syzygy_tidal::Event),
@@ -171,6 +175,20 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         },
         rand::make_rng(),
     );
+    let (mpris_sender, mpris_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mpris = syzygy_mpris::Mpris::start(
+        syzygy_mpris::Identity {
+            bus_name: MPRIS_BUS_NAME.to_string(),
+            identity: DISPLAY_NAME.to_string(),
+            desktop_entry: DESKTOP_ENTRY.to_string(),
+        },
+        playback.mpris_view().clone(),
+        {
+            let position = position.clone();
+            move || position.get()
+        },
+        mpris_sender,
+    );
 
     let mut app = App {
         services: Services {
@@ -180,11 +198,13 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
             catalog,
             player,
             position,
+            mpris,
         },
         settings,
         session: None,
         tidal_events: EventSource::new("tidal", receiver),
         audio_events: EventSource::new("audio", audio_receiver),
+        mpris_events: EventSource::new("mpris", mpris_receiver),
         images: Images::new(images::BYTE_CAP),
         playback,
         play_task: None,
@@ -270,6 +290,7 @@ pub fn subscription(state: &State) -> Subscription<Message> {
         State::Running(app) => {
             let tidal = app.tidal_events.subscription().map(Message::Tidal);
             let audio = app.audio_events.subscription().map(Message::Audio);
+            let mpris = app.mpris_events.subscription().map(Message::Mpris);
             // The position is read only while it moves.
             let tick = match app.playback.status() {
                 Status::Playing => iced::time::every(TICK).map(|_| Message::Tick),
@@ -287,11 +308,12 @@ pub fn subscription(state: &State) -> Subscription<Message> {
                     close,
                     tidal,
                     audio,
+                    mpris,
                     tick,
                     frames,
                     event::listen_with(shell_events),
                 ]),
-                Phase::Login(_) => Subscription::batch([close, tidal, audio, tick]),
+                Phase::Login(_) => Subscription::batch([close, tidal, audio, mpris, tick]),
             }
         }
     }
@@ -383,6 +405,32 @@ impl App {
                 self.update_playback(playback::Message::Position(position))
             }
             Message::Audio(event) => self.audio_event(event),
+            Message::Mpris(syzygy_mpris::Event::Quit) => self.update(Message::Quit),
+            Message::Mpris(syzygy_mpris::Event::Raise) => {
+                window::latest().and_then(window::gain_focus)
+            }
+            Message::Mpris(event) => {
+                // There's no slider to let go of: remember the volume now.
+                let saves = matches!(event, syzygy_mpris::Event::SetVolume(_));
+                // A seek moves from where the engine is, not the last tick.
+                let tick = match event {
+                    syzygy_mpris::Event::Seek(_) => {
+                        let position = self.services.position.get();
+                        self.update_playback(playback::Message::Position(position))
+                    }
+                    _ => Task::none(),
+                };
+                let messages = self.playback.answer_mpris(event);
+                let mut tasks = messages
+                    .into_iter()
+                    .map(|message| self.update(Message::Playback(message)))
+                    .collect::<Vec<_>>();
+                tasks.insert(0, tick);
+                if saves {
+                    tasks.push(self.save_preferences());
+                }
+                Task::batch(tasks)
+            }
             Message::Tidal(syzygy_tidal::Event::TokensRefreshed(tokens)) => {
                 self.update_session(|session| session.tokens = Some(tokens))
             }
@@ -553,7 +601,10 @@ impl App {
                 self.arm_task = None;
                 engine(player.stop(), "stop")
             }
-            playback::Effect::Seek(position) => engine(player.seek(position), "seek"),
+            playback::Effect::Seek(position) => {
+                self.services.mpris.seeked(position);
+                engine(player.seek(position), "seek")
+            }
             playback::Effect::SetVolume(volume) => {
                 self.ramp_task = None;
                 engine(player.set_volume(volume), "set the volume")
@@ -662,6 +713,10 @@ impl App {
                 Task::perform(tokio::time::sleep(delay), move |()| {
                     Message::Playback(playback::Message::Resume(token))
                 })
+            }
+            playback::Effect::Mpris(diff) => {
+                self.services.mpris.update(diff);
+                Task::none()
             }
             playback::Effect::Notify(notice) => self.in_shell(|shell, _, _| shell.notify(notice)),
             // One save for whatever changes while it waits.

@@ -35,6 +35,11 @@
 //!
 //! The drawer's Queue tab picks, moves and removes [`Entry`]s, and clears
 //! what's upcoming.
+//!
+//! The desktop's media controls show what playback is: each update that
+//! changes what they show sends them the change ([`Effect::Mpris`]). What
+//! the user does there comes back as the messages the in-app buttons send
+//! ([`Playback::answer_mpris`]).
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -44,7 +49,9 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
+use syzygy_mpris as mpris;
 
+mod controls;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -108,6 +115,8 @@ pub struct Playback {
     /// Stamped on each radio fetch, so one for a track that's no longer
     /// last is dropped.
     next_radio: u64,
+    /// What the desktop's media controls were last told.
+    mpris: mpris::View,
 }
 
 /// Where listening is: the source, the Manual queue, the current track and
@@ -510,6 +519,9 @@ pub enum Message {
     Start(PlayRequest),
     /// Play or pause, as the player bar's button.
     TogglePlay,
+    /// Let go of the track, keeping it to play again from the start.
+    /// From the desktop's media controls.
+    Stop,
     /// Skip to what comes next.
     Next,
     /// Restart the track, or go back through History.
@@ -640,6 +652,7 @@ fn changes_listening(message: &Message) -> bool {
     match message {
         Message::Start(_)
         | Message::TogglePlay
+        | Message::Stop
         | Message::Next
         | Message::Previous
         | Message::PlayNext(..)
@@ -756,6 +769,8 @@ pub enum Effect {
     Notify(Notice),
     /// Where listening is changed: save [`Playback::to_snapshot`] soon.
     SaveSnapshot,
+    /// Show this change in the desktop's media controls.
+    Mpris(mpris::Diff),
 }
 
 /// What playback tells the user.
@@ -775,7 +790,7 @@ pub enum Notice {
 
 impl Playback {
     pub fn new(preferences: Preferences, rng: SmallRng) -> Self {
-        Self {
+        let mut playback = Self {
             listening: Listening::default(),
             shuffle: preferences.shuffle,
             repeat: preferences.repeat,
@@ -800,7 +815,10 @@ impl Playback {
             next_fill: 0,
             next_entry: 0,
             next_radio: 0,
-        }
+            mpris: mpris::View::default(),
+        };
+        playback.mpris = playback.mpris_now();
+        playback
     }
 
     pub fn update(&mut self, message: Message) -> Outcome {
@@ -813,6 +831,7 @@ impl Playback {
         if saves {
             effects.push(Effect::SaveSnapshot);
         }
+        effects.extend(self.announce());
         Outcome::Effects(effects)
     }
 
@@ -821,6 +840,7 @@ impl Playback {
             message,
             Message::Start(_)
                 | Message::TogglePlay
+                | Message::Stop
                 | Message::Next
                 | Message::Previous
                 | Message::Seek(_)
@@ -848,6 +868,16 @@ impl Playback {
                     self.play(from)
                 }
                 Status::Stopped | Status::Loading(_) => vec![],
+            },
+            Message::Stop => match self.status {
+                Status::Stopped => vec![],
+                // Play after a stop starts the track over, as MPRIS has it.
+                Status::Loading(_) | Status::Playing | Status::Paused => {
+                    self.status = Status::Stopped;
+                    self.position = 0.0;
+                    self.rollback = None;
+                    vec![Effect::Stop]
+                }
             },
             Message::Next => self.next(),
             Message::Previous => self.previous(),

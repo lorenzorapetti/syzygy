@@ -11,6 +11,7 @@ authors = ["Lorenzo Rapetti <lorenzo.rapetti.94@gmail.com>"]
 [workspace.dependencies]
 syzygy-audio = { path = "crates/syzygy-audio" }
 syzygy-catalog = { path = "crates/syzygy-catalog" }
+syzygy-mpris = { path = "crates/syzygy-mpris" }
 syzygy-store = { path = "crates/syzygy-store" }
 syzygy-tidal = { path = "crates/syzygy-tidal" }
 
@@ -45,6 +46,7 @@ iced_aw = { version = "0.14.1", default-features = false, features = ["context_m
 keyring = "4"
 libc = "0.2"
 log = "0.4"
+mpris-server = "0.10"
 open = "5"
 rand = "0.10"
 reqwest = { version = "0.13", features = ["json", "form", "query"] }

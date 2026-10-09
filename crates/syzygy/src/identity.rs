@@ -7,6 +7,11 @@ use syzygy_store::{KeySource, KeyringEntry};
 pub const APP_NAME: &str = "syzygy";
 pub const DISPLAY_NAME: &str = "Syzygy";
 pub const APP_ID: &str = "com.lorenzorapetti.syzygy";
+/// The desktop file, without `.desktop`: MPRIS names it so the desktop
+/// can tie the media controls to the window and its icon.
+pub const DESKTOP_ENTRY: &str = APP_ID;
+/// MPRIS's bus name is `org.mpris.MediaPlayer2.` and this.
+pub const MPRIS_BUS_NAME: &str = "syzygy";
 const KEYRING_SERVICE: &str = "syzygy";
 const KEYRING_ENTRY: &str = "master-key";
 

@@ -139,6 +139,7 @@ impl Playback {
             Some(_) if snapshot.position.is_finite() => snapshot.position.max(0.0),
             _ => 0.0,
         };
+        effects.extend(self.announce());
         effects
     }
 }
