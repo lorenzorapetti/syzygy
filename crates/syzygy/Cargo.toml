@@ -10,6 +10,7 @@ authors.workspace = true
 syzygy-audio.workspace = true
 syzygy-catalog.workspace = true
 syzygy-mpris.workspace = true
+syzygy-report.workspace = true
 syzygy-store.workspace = true
 syzygy-tidal.workspace = true
 

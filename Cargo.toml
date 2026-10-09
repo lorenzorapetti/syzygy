@@ -12,6 +12,7 @@ authors = ["Lorenzo Rapetti <lorenzo.rapetti.94@gmail.com>"]
 syzygy-audio = { path = "crates/syzygy-audio" }
 syzygy-catalog = { path = "crates/syzygy-catalog" }
 syzygy-mpris = { path = "crates/syzygy-mpris" }
+syzygy-report = { path = "crates/syzygy-report" }
 syzygy-store = { path = "crates/syzygy-store" }
 syzygy-tidal = { path = "crates/syzygy-tidal" }
 
@@ -56,6 +57,7 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 tokio = "1"
+uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
 # Dependencies are built optimized even in dev builds. Unoptimized, iced's

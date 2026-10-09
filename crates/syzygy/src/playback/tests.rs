@@ -25,12 +25,14 @@ fn track(id: u64) -> Track {
 impl Playback {
     /// Send a message that mustn't need consent, for its effects. Asks to
     /// save the snapshot are left out: [`saves`] checks those. So is what
-    /// MPRIS is told: [`told_mpris`] checks that.
+    /// MPRIS is told, which [`told_mpris`] checks, and what's reported,
+    /// which [`reports`] checks.
     fn send(&mut self, message: Message) -> Vec<Effect> {
         match self.update(message) {
             Outcome::Effects(mut effects) => {
                 effects.retain(|effect| {
-                    *effect != Effect::SaveSnapshot && !matches!(effect, Effect::Mpris(_))
+                    *effect != Effect::SaveSnapshot
+                        && !matches!(effect, Effect::Mpris(_) | Effect::Report(_))
                 });
                 effects
             }
@@ -2201,33 +2203,6 @@ fn choosing_something_while_the_radio_loads_keeps_it_from_playing() {
     assert_eq!(current(&playback), Some(102));
 }
 
-#[test]
-fn radio_tracks_are_not_chosen_by_the_user() {
-    let (mut playback, id) = on_the_last_track();
-    assert!(playback.chosen_by_user());
-    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
-
-    and_play(&mut playback, Message::TrackFinished);
-    assert!(!playback.chosen_by_user());
-
-    and_play(&mut playback, Message::TrackFinished);
-    assert!(!playback.chosen_by_user());
-}
-
-#[test]
-fn queued_entries_during_a_radio_are_chosen_by_the_user() {
-    let (mut playback, id) = on_the_last_track();
-    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
-    and_play(&mut playback, Message::TrackFinished);
-    add(&mut playback, 901);
-
-    and_play(&mut playback, Message::TrackFinished);
-    assert!(playback.chosen_by_user());
-
-    and_play(&mut playback, Message::Start(album(2, 3, 0)));
-    assert!(playback.chosen_by_user());
-}
-
 // Gapless advance.
 
 /// The arm among `effects`: the track and whether it gets album gain.
@@ -2402,7 +2377,6 @@ fn a_gapless_advance_into_the_radio_makes_it_the_source() {
     assert_eq!(current(&playback), Some(501));
     assert_eq!(playing_from(&playback), Some(radio_ref(5)));
     assert_eq!(history(&playback), vec![102]);
-    assert!(!playback.chosen_by_user());
     assert_eq!(armed(&effects), Some((502, false)));
 }
 
@@ -3675,4 +3649,274 @@ fn raise_and_quit_are_not_playbacks() {
 
     assert!(playback.answer_mpris(mpris::Event::Raise).is_empty());
     assert!(playback.answer_mpris(mpris::Event::Quit).is_empty());
+}
+
+// Play reporting.
+
+/// What `message` reports, whatever else it asks for. Lets a play it
+/// starts succeed when `and_play`.
+fn reports(playback: &mut Playback, message: Message) -> Vec<report::Event> {
+    let Outcome::Effects(effects) = playback.update(message) else {
+        panic!("expected effects");
+    };
+    reported(&effects)
+}
+
+fn reported(effects: &[Effect]) -> Vec<report::Event> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Report(event) => Some(event.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What `message` reports, with the play it starts succeeding: its own
+/// reports, then the success's.
+fn reports_once_playing(playback: &mut Playback, message: Message) -> Vec<report::Event> {
+    let Outcome::Effects(effects) = playback.update(message) else {
+        panic!("expected effects");
+    };
+    let mut events = reported(&effects);
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Play { .. }))
+    {
+        events.extend(reports(playback, played(token(&effects))));
+    }
+    events
+}
+
+fn started(track_id: u64, source: report::Source, chosen_by_user: bool) -> report::Event {
+    report::Event::Started(report::Play {
+        track_id,
+        duration: 200,
+        source,
+        chosen_by_user,
+    })
+}
+
+#[test]
+fn a_track_is_reported_once_it_plays_not_while_it_loads() {
+    let mut playback = new(1.0);
+
+    let effects = playback.send(Message::Start(album(1, 3, 0)));
+    assert_eq!(reported(&effects), vec![]);
+
+    assert_eq!(
+        reports(&mut playback, played(token(&effects))),
+        vec![started(101, report::Source::Album(1), true)]
+    );
+}
+
+#[test]
+fn pausing_and_resuming_are_reported() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(
+        reports(&mut playback, Message::TogglePlay),
+        vec![report::Event::Paused]
+    );
+    assert_eq!(
+        reports(&mut playback, Message::TogglePlay),
+        vec![report::Event::Resumed]
+    );
+}
+
+#[test]
+fn position_ticks_and_seeks_report_nothing() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(reports(&mut playback, Message::Position(20.0)), vec![]);
+    assert_eq!(reports(&mut playback, Message::Seek(100.0)), vec![]);
+}
+
+#[test]
+fn a_track_that_ends_is_reported_finished_before_the_next_starts() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::TrackFinished),
+        vec![
+            report::Event::Finished,
+            started(102, report::Source::Album(1), true)
+        ]
+    );
+}
+
+#[test]
+fn the_last_track_ending_is_reported_finished() {
+    let mut playback = playing(album(1, 1, 0));
+
+    assert_eq!(
+        reports(&mut playback, Message::TrackFinished),
+        vec![report::Event::Finished]
+    );
+}
+
+#[test]
+fn skipping_reports_the_track_stopped() {
+    let mut playback = playing(album(1, 3, 0));
+
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::Next),
+        vec![
+            report::Event::Stopped,
+            started(102, report::Source::Album(1), true)
+        ]
+    );
+}
+
+#[test]
+fn a_stop_or_a_reset_reports_the_track_stopped() {
+    let mut playback = playing(album(1, 3, 0));
+    assert_eq!(
+        reports(&mut playback, Message::Stop),
+        vec![report::Event::Stopped]
+    );
+
+    let mut playback = playing(album(1, 3, 0));
+    assert_eq!(
+        reports(&mut playback, Message::Reset),
+        vec![report::Event::Stopped]
+    );
+}
+
+#[test]
+fn a_gapless_advance_reports_the_track_finished_and_the_next_started() {
+    let mut playback = new(1.0);
+    let effects = once_playing(&mut playback, Message::Start(album(1, 3, 0)));
+
+    assert_eq!(
+        reports(&mut playback, Message::TrackAdvanced(armed_entry(&effects))),
+        vec![
+            report::Event::Finished,
+            started(102, report::Source::Album(1), true)
+        ]
+    );
+}
+
+#[test]
+fn a_replay_under_repeat_one_is_a_new_play_gapless_or_not() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::CycleRepeat);
+    let effects = playback.send(Message::CycleRepeat);
+
+    let again = vec![
+        report::Event::Finished,
+        started(101, report::Source::Album(1), true),
+    ];
+    assert_eq!(
+        reports(&mut playback, Message::TrackAdvanced(armed_entry(&effects))),
+        again
+    );
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::TrackFinished),
+        again
+    );
+}
+
+#[test]
+fn radio_tracks_are_reported_as_not_chosen_by_the_user() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    let radio = report::Source::Mix("radio-5".to_string());
+
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::TrackFinished),
+        vec![report::Event::Finished, started(501, radio.clone(), false)]
+    );
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::Next),
+        vec![report::Event::Stopped, started(502, radio, false)]
+    );
+}
+
+#[test]
+fn radio_tracks_reached_with_no_gap_are_reported_as_not_chosen_by_the_user() {
+    let (mut playback, id) = on_the_last_track();
+    let effects = playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    let radio = report::Source::Mix("radio-5".to_string());
+
+    let advanced = playback.update(Message::TrackAdvanced(armed_entry(&effects)));
+    let Outcome::Effects(effects) = advanced else {
+        panic!("expected effects");
+    };
+    assert_eq!(
+        reported(&effects),
+        vec![report::Event::Finished, started(501, radio.clone(), false)]
+    );
+
+    assert_eq!(
+        reports(&mut playback, Message::TrackAdvanced(armed_entry(&effects))),
+        vec![report::Event::Finished, started(502, radio, false)]
+    );
+}
+
+#[test]
+fn queued_entries_during_a_radio_are_reported_as_chosen_by_the_user() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    and_play(&mut playback, Message::TrackFinished);
+    add(&mut playback, 901);
+
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::TrackFinished),
+        vec![
+            report::Event::Finished,
+            started(901, report::Source::Album(9), true)
+        ]
+    );
+}
+
+#[test]
+fn a_new_source_after_a_radio_is_chosen_by_the_user() {
+    let (mut playback, id) = on_the_last_track();
+    playback.send(Message::RadioArrived(id, Some(radio(5, 3))));
+    and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(
+        reports_once_playing(&mut playback, Message::Start(album(2, 3, 0))),
+        vec![
+            report::Event::Stopped,
+            started(201, report::Source::Album(2), true)
+        ]
+    );
+}
+
+#[test]
+fn each_source_is_reported_as_what_tidal_attributes_it_to() {
+    let cases = [
+        (
+            playlist_ref(1),
+            report::Source::Playlist("playlist-1".into()),
+        ),
+        (SourceRef::Mix("m".into()), report::Source::Mix("m".into())),
+        (radio_ref(1), report::Source::Mix("radio-1".into())),
+        (SourceRef::Artist(1), report::Source::Artist(1)),
+        (SourceRef::LovedTracks(None), report::Source::LovedTracks),
+        (SourceRef::Search("q".into()), report::Source::Item),
+        (SourceRef::Track(101), report::Source::Item),
+    ];
+    for (kind, attributed) in cases {
+        let mut playback = new(1.0);
+        let start = Message::Start(request(kind.clone(), 1, 1, Start::All));
+        assert_eq!(
+            reports_once_playing(&mut playback, start),
+            vec![started(101, attributed, true)],
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_play_that_fails_reports_the_track_before_it_again() {
+    let mut playback = playing(album(1, 3, 0));
+    let effects = playback.send(Message::Next);
+
+    assert_eq!(
+        reports(&mut playback, resolve_failed(token(&effects))),
+        vec![started(101, report::Source::Album(1), true)]
+    );
 }

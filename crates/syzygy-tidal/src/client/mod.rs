@@ -104,6 +104,21 @@ impl TidalClient {
         self.read().login_method
     }
 
+    /// The OAuth client id the tokens were issued to. None when this build
+    /// has no credentials for the Login method.
+    pub fn client_id(&self) -> Option<String> {
+        self.login_method()
+            .credentials()
+            .ok()
+            .map(|credentials| credentials.client_id)
+    }
+
+    /// A fresh access token after `stale` was refused outside this client:
+    /// a refresh, shared with any other request refreshing now.
+    pub async fn refresh_access_token(&self, stale: &str) -> Result<String, Error> {
+        self.refresh_after_401(stale).await
+    }
+
     /// The account's country, sent with most API calls.
     pub fn country_code(&self) -> String {
         self.read().country_code.clone()

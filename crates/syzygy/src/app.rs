@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use syzygy_audio::{AudioPlayer, PositionCell};
 use syzygy_catalog::Catalog;
+use syzygy_report::Reporter;
 use syzygy_store::{DiskCache, Store};
 use syzygy_tidal::models::{AuthTokens, SessionInfo, StreamInfo};
 use syzygy_tidal::{LoginMethod, TidalClient};
@@ -67,6 +68,8 @@ pub struct App {
     /// A snapshot save is waiting out [`SNAPSHOT_DELAY`], and will save
     /// whatever playback is by then.
     snapshot_due: bool,
+    /// Quit has saved everything and is exiting once reports are flushed.
+    quitting: bool,
     /// What animations count their seconds from, and the last frame.
     epoch: Instant,
     frame: Instant,
@@ -90,6 +93,11 @@ pub struct Services {
     pub player: AudioPlayer,
     pub position: PositionCell,
     pub mpris: syzygy_mpris::Mpris,
+    /// What happens to the track playing reaches it only through
+    /// playback's `Report` effects, and only while `Settings` has reporting
+    /// on. The play runner also tells it what TIDAL served; Quit flushes it
+    /// and forgetting the account clears it.
+    pub reporter: Reporter,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +158,13 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
 
     let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
     let tidal = TidalClient::new(http_client(), events);
+    let (reporter, reporting) = Reporter::new(
+        tidal.clone(),
+        http_client(),
+        store.clone(),
+        paths.report_queue_file(),
+        settings.report_plays,
+    );
     let catalog = Catalog::new(
         tidal.clone(),
         DiskCache::new(&paths.catalog_cache_dir, &store),
@@ -199,6 +214,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
             player,
             position,
             mpris,
+            reporter,
         },
         settings,
         session: None,
@@ -213,6 +229,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         fill_task: None,
         unnamed_sign_in: None,
         snapshot_due: false,
+        quitting: false,
         epoch: Instant::now(),
         frame: Instant::now(),
         phase: Phase::Login(Box::default()),
@@ -242,7 +259,12 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
         },
         None => Task::none(),
     };
-    (State::Running(Box::new(app)), Task::batch([engine, task]))
+    // Runs as long as the app does.
+    let reporting = Task::future(reporting).discard();
+    (
+        State::Running(Box::new(app)),
+        Task::batch([engine, task, reporting]),
+    )
 }
 
 fn http_client() -> reqwest::Client {
@@ -330,11 +352,21 @@ pub fn theme(_state: &State) -> Theme {
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            // The window's close and the desktop's Quit can both come.
+            Message::Quit if self.quitting => Task::none(),
             Message::Quit => {
-                // The position isn't saved as it moves: take it now.
+                // The position isn't saved as it moves: take it now, and
+                // the snapshot before the stop puts it back to 0.
                 let position = self.services.position.get();
                 let tick = self.update_playback(playback::Message::Position(position));
-                Task::batch([tick, self.save_settings(), self.save_snapshot()]).chain(iced::exit())
+                let snapshot = self.save_snapshot();
+                // No more snapshot saves: they'd save the stop's position 0.
+                self.quitting = true;
+                // The stop reports the track before the flush sends it.
+                let stop = self.update_playback(playback::Message::Stop);
+                let flush = tokio::time::timeout(FLUSH_TIMEOUT, self.services.reporter.flush());
+                let flush = Task::future(flush).discard();
+                Task::batch([tick, snapshot, stop, flush, self.save_settings()]).chain(iced::exit())
             }
             Message::Login(message) => {
                 let Phase::Login(login) = &mut self.phase else {
@@ -357,6 +389,9 @@ impl App {
                 self.save_settings()
             }
             Message::Preference(preference) => {
+                if let settings::Preference::ReportPlays(on) = preference {
+                    self.services.reporter.set_enabled(on);
+                }
                 self.settings.set(preference);
                 self.save_settings()
             }
@@ -471,6 +506,7 @@ impl App {
                 }
                 Task::none()
             }
+            Message::SaveSnapshot if self.quitting => Task::none(),
             Message::SaveSnapshot => {
                 self.snapshot_due = false;
                 self.save_snapshot()
@@ -550,6 +586,7 @@ impl App {
                 let player = player.clone();
                 let quality = self.settings.max_quality;
                 let normalize = self.playback.normalization();
+                let reporter = self.reporter();
                 // What was armed would follow the old track if it ended
                 // while this one is fetched: drop it now, not once the play
                 // task runs.
@@ -563,6 +600,7 @@ impl App {
                         .resolve_stream(track_id, quality)
                         .await
                         .map_err(|e| PlayError::Resolve(Arc::new(e)))?;
+                    served(reporter.as_ref(), track_id, &stream.info);
                     let audio = |e| PlayError::Audio(Arc::new(e));
                     if normalize {
                         let (replay_gain, peak) = replay_gain(&stream.info, album_gain);
@@ -664,6 +702,7 @@ impl App {
                 let player = player.clone();
                 let quality = self.settings.max_quality;
                 let normalize = self.playback.normalization();
+                let reporter = self.reporter();
                 // What was armed before mustn't follow while this one is
                 // fetched.
                 let cleared = player.clear_next_track();
@@ -678,6 +717,7 @@ impl App {
                             return;
                         }
                     };
+                    served(reporter.as_ref(), track_id, &stream.info);
                     let (replay_gain, peak) = replay_gain(&stream.info, album_gain);
                     let gain = if normalize {
                         syzygy_audio::compute_norm_gain(replay_gain, peak)
@@ -718,9 +758,15 @@ impl App {
                 self.services.mpris.update(diff);
                 Task::none()
             }
+            playback::Effect::Report(event) => {
+                if self.settings.report_plays {
+                    self.services.reporter.send(event);
+                }
+                Task::none()
+            }
             playback::Effect::Notify(notice) => self.in_shell(|shell, _, _| shell.notify(notice)),
             // One save for whatever changes while it waits.
-            playback::Effect::SaveSnapshot if self.snapshot_due => Task::none(),
+            playback::Effect::SaveSnapshot if self.snapshot_due || self.quitting => Task::none(),
             playback::Effect::SaveSnapshot => {
                 self.snapshot_due = true;
                 Task::perform(tokio::time::sleep(SNAPSHOT_DELAY), |()| {
@@ -728,6 +774,13 @@ impl App {
                 })
             }
         }
+    }
+
+    /// The reporter, while `Settings` has reporting on.
+    fn reporter(&self) -> Option<Reporter> {
+        self.settings
+            .report_plays
+            .then(|| self.services.reporter.clone())
     }
 
     fn audio_event(&mut self, event: syzygy_audio::Event) -> Task<Message> {
@@ -999,23 +1052,28 @@ impl App {
         Task::batch([reset, session, self.forget_account()])
     }
 
-    /// Forget the account's sorts, then delete its saved queue and the disk
-    /// cache, after any save of them already asked for, and send
-    /// [`Message::AccountForgotten`].
+    /// Forget the account's sorts, then delete its saved queue, its unsent
+    /// play reports and the disk cache, after any save of them already
+    /// asked for, and send [`Message::AccountForgotten`].
     fn forget_account(&mut self) -> Task<Message> {
         self.settings.forget_account();
         let Services {
             store,
             paths,
             catalog,
+            reporter,
             ..
         } = self.services.clone();
         let queue = persist::remove(store, paths.queue_file());
+        // Reports carry the account they were made by: another user's
+        // token can't send them.
+        let reports = reporter.clear();
         let files = Task::perform(
             async move {
                 if let Err(e) = queue.await {
                     log::error!("Failed to delete the queue: {e}");
                 }
+                reports.await;
                 catalog.clear_cache().await;
             },
             |()| Message::AccountForgotten,
@@ -1097,6 +1155,8 @@ impl App {
     }
 }
 
+/// How long Quit waits for the play reports to go.
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a snapshot save waits, gathering whatever else changes.
 const SNAPSHOT_DELAY: Duration = Duration::from_secs(2);
 /// How often the position is read while playing.
@@ -1107,6 +1167,21 @@ const DEVICE_TRIES: u32 = 10;
 const DEVICE_RETRY: Duration = Duration::from_millis(500);
 /// How many volume steps a ramp takes, as sone.
 const RAMP_STEPS: u32 = 12;
+
+/// Tell `reporter`, if reporting, what TIDAL served for `track_id`.
+fn served(reporter: Option<&Reporter>, track_id: u64, info: &StreamInfo) {
+    if let Some(reporter) = reporter {
+        reporter.stream_resolved(
+            track_id,
+            syzygy_report::StreamMeta {
+                actual_product_id: info.track_id,
+                quality: info.audio_quality.clone(),
+                audio_mode: info.audio_mode.clone(),
+                presentation: info.asset_presentation.clone(),
+            },
+        );
+    }
+}
 
 /// The replay gain and peak to level a track by: its album's when it plays
 /// in album order and TIDAL has one, its own otherwise.

@@ -140,6 +140,7 @@ impl Playback {
             _ => 0.0,
         };
         effects.extend(self.announce());
+        effects.extend(self.report(false).into_iter().map(Effect::Report));
         effects
     }
 }

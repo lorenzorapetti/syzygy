@@ -18,8 +18,8 @@ const KEYRING_ENTRY: &str = "master-key";
 /// Where syzygy keeps its files.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// `<config_dir>/syzygy`: settings, Session, the queue, the fallback key
-    /// file.
+    /// `<config_dir>/syzygy`: settings, Session, the queue, unsent play
+    /// reports, the fallback key file.
     pub config_dir: PathBuf,
     /// `<cache_dir>/syzygy/catalog`: the disk cache of Catalog reads.
     pub catalog_cache_dir: PathBuf,
@@ -57,6 +57,11 @@ impl Paths {
     /// position.
     pub fn queue_file(&self) -> PathBuf {
         self.config_dir.join("queue.json")
+    }
+
+    /// Plays reported to TIDAL that it hasn't taken yet.
+    pub fn report_queue_file(&self) -> PathBuf {
+        self.config_dir.join("reports.json")
     }
 
     /// The master key: the OS keyring first, then a 0600 key file.

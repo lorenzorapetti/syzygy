@@ -1,0 +1,22 @@
+[package]
+name = "syzygy-report"
+description = "TIDAL play reporting for syzygy, with a persisted queue of unsent reports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+syzygy-store.workspace = true
+syzygy-tidal.workspace = true
+
+base64.workspace = true
+log.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

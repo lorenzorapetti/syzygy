@@ -5190,6 +5190,7 @@ dependencies = [
  "syzygy-audio",
  "syzygy-catalog",
  "syzygy-mpris",
+ "syzygy-report",
  "syzygy-store",
  "syzygy-tidal",
  "tempfile",
@@ -5234,6 +5235,22 @@ dependencies = [
  "log",
  "mpris-server",
  "tokio",
+]
+
+[[package]]
+name = "syzygy-report"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "syzygy-store",
+ "syzygy-tidal",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -5739,6 +5756,7 @@ version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",

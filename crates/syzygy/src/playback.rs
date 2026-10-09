@@ -40,6 +40,9 @@
 //! changes what they show sends them the change ([`Effect::Mpris`]). What
 //! the user does there comes back as the messages the in-app buttons send
 //! ([`Playback::answer_mpris`]).
+//!
+//! What happens to the track playing is reported to TIDAL the same way:
+//! each update compares it with what was last reported ([`Effect::Report`]).
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -50,8 +53,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
 use syzygy_mpris as mpris;
+use syzygy_report as report;
 
 mod controls;
+mod reporting;
 mod snapshot;
 #[cfg(test)]
 mod tests;
@@ -117,6 +122,8 @@ pub struct Playback {
     next_radio: u64,
     /// What the desktop's media controls were last told.
     mpris: mpris::View,
+    /// The track last reported playing or paused.
+    reported: Option<reporting::Reported>,
 }
 
 /// Where listening is: the source, the Manual queue, the current track and
@@ -771,6 +778,8 @@ pub enum Effect {
     SaveSnapshot,
     /// Show this change in the desktop's media controls.
     Mpris(mpris::Diff),
+    /// Tell the play reporter what happened to the track playing.
+    Report(report::Event),
 }
 
 /// What playback tells the user.
@@ -816,6 +825,7 @@ impl Playback {
             next_entry: 0,
             next_radio: 0,
             mpris: mpris::View::default(),
+            reported: None,
         };
         playback.mpris = playback.mpris_now();
         playback
@@ -826,12 +836,14 @@ impl Playback {
             return Outcome::NeedsExplicitConsent(Pending(Box::new(message)));
         }
         let saves = changes_listening(&message);
+        let ended = matches!(message, Message::TrackFinished | Message::TrackAdvanced(_));
         let mut effects = self.apply(message);
         effects.extend(self.prepare());
         if saves {
             effects.push(Effect::SaveSnapshot);
         }
         effects.extend(self.announce());
+        effects.extend(self.report(ended).into_iter().map(Effect::Report));
         Outcome::Effects(effects)
     }
 
@@ -1313,18 +1325,6 @@ impl Playback {
     /// The track playing, or that would play.
     pub fn current(&self) -> Option<&Track> {
         self.listening.current.as_ref().map(|entry| &entry.track)
-    }
-
-    /// False only while a track from a Track radio Autoplay started plays.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "play reporting (ticket 34) sends it")
-    )]
-    pub fn chosen_by_user(&self) -> bool {
-        self.listening
-            .current
-            .as_ref()
-            .is_none_or(|entry| entry.chosen)
     }
 
     /// Where the current track comes from.
