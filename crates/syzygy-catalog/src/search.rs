@@ -152,6 +152,7 @@ fn track(item: DirectHitItem) -> Option<Track> {
         album,
         duration: item.duration.unwrap_or(0),
         explicit: false,
+        available: true,
         volume: 1,
         date_added: None,
         track_radio: None,

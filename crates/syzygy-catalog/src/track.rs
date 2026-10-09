@@ -15,6 +15,9 @@ pub struct Track {
     /// In seconds.
     pub duration: u32,
     pub explicit: bool,
+    /// Whether TIDAL streams it now. False when it says it isn't ready or
+    /// isn't allowed; a list that doesn't say counts as available.
+    pub available: bool,
     /// Which disc of its album the track is on, from 1.
     pub volume: u32,
     /// When it was added to the playlist it's read from, as TIDAL sends it.
@@ -66,6 +69,7 @@ impl From<TidalTrack> for Track {
             }),
             duration: track.duration,
             explicit: track.explicit.unwrap_or(false),
+            available: track.stream_ready != Some(false) && track.allow_streaming != Some(false),
             volume: track.volume_number.unwrap_or(1).max(1),
             date_added: track.date_added,
             track_radio: track
@@ -126,5 +130,23 @@ mod tests {
             .expect("a track");
 
         assert_eq!(track.track_radio, None);
+    }
+
+    #[test]
+    fn a_track_tidal_wont_stream_is_unavailable() {
+        let unavailable = |fields: serde_json::Value| {
+            let mut item = json!({ "id": 11, "title": "Hunter", "duration": 255 });
+            item.as_object_mut()
+                .expect("an object")
+                .extend(fields.as_object().expect("an object").clone());
+            !Track::from_value(&item).expect("a track").available
+        };
+
+        assert!(unavailable(json!({ "streamReady": false })));
+        assert!(unavailable(json!({ "allowStreaming": false })));
+        assert!(!unavailable(
+            json!({ "streamReady": true, "allowStreaming": true })
+        ));
+        assert!(!unavailable(json!({})));
     }
 }

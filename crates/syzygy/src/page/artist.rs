@@ -99,6 +99,7 @@ impl State {
         &'a self,
         images: &'a Images,
         now_playing: Option<NowPlaying<'a>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         let hero = match (&self.artist, &self.preview) {
             (Remote::Loaded(artist), _) => Some(artist_hero(artist, images)),
@@ -125,7 +126,7 @@ impl State {
             let sections = artist.sections.iter().enumerate().map(|(index, section)| {
                 // Only the top tracks play, as the artist's source.
                 let now_playing = (top == Some(index)).then_some(now_playing);
-                self.section(index, section, images, now_playing)
+                self.section(index, section, images, now_playing, allow_explicit)
             });
             Column::new()
                 .push(buttons)
@@ -147,6 +148,7 @@ impl State {
         section: &'a Section,
         images: &'a Images,
         playable: Option<Option<NowPlaying>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         match &section.content {
             Content::Tracks(tracks) => {
@@ -162,8 +164,8 @@ impl State {
                     .take(TRACKS_SHOWN)
                     .enumerate()
                     .map(|(i, track)| {
-                        let row =
-                            track_list::track(images, i + 1, track, COLUMNS).map(Message::Link);
+                        let row = track_list::track(images, i + 1, track, COLUMNS, allow_explicit)
+                            .map(Message::Link);
                         match playable {
                             Some(now_playing) => track_list::playable_track(
                                 row,

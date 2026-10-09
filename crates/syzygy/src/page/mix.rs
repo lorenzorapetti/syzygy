@@ -86,6 +86,7 @@ impl State {
         images: &'a Images,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         let hero = match (&self.mix, &self.preview) {
             (Remote::Loaded(mix), preview) => Some(mix_hero(mix, preview.as_ref(), images)),
@@ -106,7 +107,7 @@ impl State {
                 track_list::header(COLUMNS),
                 |i| {
                     let track = &mix.tracks[i];
-                    let row = track_list::track(images, i + 1, track, COLUMNS);
+                    let row = track_list::track(images, i + 1, track, COLUMNS, allow_explicit);
                     track_list::playable_track(
                         row.map(Message::Link),
                         track,

@@ -460,26 +460,33 @@ impl Page {
         images: &'a Images,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         match self {
             Page::Home(state) => state.view(images).map(Message::Home),
             Page::Album(state) => state
-                .view(images, viewport, now_playing)
+                .view(images, viewport, now_playing, allow_explicit)
                 .map(Message::Album),
-            Page::Artist(state) => state.view(images, now_playing).map(Message::Artist),
+            Page::Artist(state) => state
+                .view(images, now_playing, allow_explicit)
+                .map(Message::Artist),
             Page::ArtistTracks(state) => state
-                .view(images, viewport, now_playing)
+                .view(images, viewport, now_playing, allow_explicit)
                 .map(Message::ArtistTracks),
             Page::ArtistViewAll(state) => state.view(images).map(Message::ArtistViewAll),
-            Page::Mix(state) => state.view(images, viewport, now_playing).map(Message::Mix),
+            Page::Mix(state) => state
+                .view(images, viewport, now_playing, allow_explicit)
+                .map(Message::Mix),
             Page::Playlist(state) => state
-                .view(images, viewport, now_playing)
+                .view(images, viewport, now_playing, allow_explicit)
                 .map(Message::Playlist),
             Page::Favorites(state) => state
-                .view(images, viewport, now_playing)
+                .view(images, viewport, now_playing, allow_explicit)
                 .map(Message::Favorites),
             Page::Library(state) => state.view(images).map(Message::Library),
-            Page::Search(state) => state.view(images, viewport).map(Message::Search),
+            Page::Search(state) => state
+                .view(images, viewport, allow_explicit)
+                .map(Message::Search),
             Page::Explore(state) => state.view(images).map(Message::Explore),
             Page::Feed(state) => state.view(images).map(Message::Feed),
             Page::Profile(state) => state.view(images).map(Message::Profile),

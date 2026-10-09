@@ -15,9 +15,22 @@ fn track(id: u64) -> Track {
         album: None,
         duration: 200,
         explicit: false,
+        available: true,
         volume: 1,
         date_added: None,
         track_radio: None,
+    }
+}
+
+impl Playback {
+    /// Send a message that mustn't need consent, for its effects.
+    fn send(&mut self, message: Message) -> Vec<Effect> {
+        match self.update(message) {
+            Outcome::Effects(effects) => effects,
+            Outcome::NeedsExplicitConsent(pending) => {
+                panic!("expected effects, got a consent question for {pending:?}")
+            }
+        }
     }
 }
 
@@ -29,6 +42,7 @@ fn new(volume: f32) -> Playback {
             volume,
             shuffle: false,
             repeat: Repeat::Off,
+            allow_explicit: true,
         },
         SmallRng::seed_from_u64(7),
     )
@@ -139,18 +153,18 @@ fn the_play(effects: &[Effect]) -> &Effect {
 }
 
 fn shuffled(mut playback: Playback) -> Playback {
-    playback.update(Message::ToggleShuffle);
+    playback.send(Message::ToggleShuffle);
     playback
 }
 
 /// Send `message` and let the play it starts succeed.
 fn and_play(playback: &mut Playback, message: Message) -> Vec<Effect> {
-    let effects = playback.update(message);
+    let effects = playback.send(message);
     if let Some(&Effect::Play { token, .. }) = effects
         .iter()
         .find(|effect| matches!(effect, Effect::Play { .. }))
     {
-        playback.update(played(token));
+        playback.send(played(token));
     }
     effects
 }
@@ -200,7 +214,7 @@ fn playing_with(mut playback: Playback, request: PlayRequest) -> Playback {
 fn a_track_plays_to_the_end_of_its_album_without_wrapping_around() {
     let mut playback = new(1.0);
 
-    let effects = playback.update(Message::Start(album(1, 5, 2)));
+    let effects = playback.send(Message::Start(album(1, 5, 2)));
 
     assert_eq!(
         effects,
@@ -219,13 +233,13 @@ fn a_track_plays_to_the_end_of_its_album_without_wrapping_around() {
 fn each_finished_track_starts_the_next_until_the_album_runs_out() {
     let mut playback = playing(album(1, 3, 1));
 
-    let effects = playback.update(Message::TrackFinished);
+    let effects = playback.send(Message::TrackFinished);
     assert!(matches!(effects[..], [Effect::Play { track_id: 103, .. }]));
     assert_eq!(current(&playback), Some(103));
     assert_eq!(ids(playback.upcoming()), Vec::<u64>::new());
-    playback.update(played(token(&effects)));
+    playback.send(played(token(&effects)));
 
-    let effects = playback.update(Message::TrackFinished);
+    let effects = playback.send(Message::TrackFinished);
     assert_eq!(effects, vec![]);
     assert_eq!(playback.status(), Status::Stopped);
     assert_eq!(current(&playback), Some(103), "the last track stays shown");
@@ -235,7 +249,7 @@ fn each_finished_track_starts_the_next_until_the_album_runs_out() {
 fn the_current_track_changes_as_soon_as_it_is_chosen() {
     let mut playback = playing(album(1, 3, 0));
 
-    let effects = playback.update(Message::Start(album(2, 3, 1)));
+    let effects = playback.send(Message::Start(album(2, 3, 1)));
 
     assert_eq!(current(&playback), Some(202));
     assert_eq!(playback.status(), Status::Loading(token(&effects)));
@@ -245,24 +259,24 @@ fn the_current_track_changes_as_soon_as_it_is_chosen() {
 #[test]
 fn a_play_result_for_an_older_choice_is_dropped() {
     let mut playback = new(1.0);
-    let first = token(&playback.update(Message::Start(album(1, 3, 0))));
-    let second = token(&playback.update(Message::Start(album(1, 3, 2))));
+    let first = token(&playback.send(Message::Start(album(1, 3, 0))));
+    let second = token(&playback.send(Message::Start(album(1, 3, 2))));
 
-    assert_eq!(playback.update(played(first)), vec![]);
+    assert_eq!(playback.send(played(first)), vec![]);
     assert_eq!(playback.status(), Status::Loading(second));
     assert_eq!(current(&playback), Some(103));
 
-    playback.update(played(second));
+    playback.send(played(second));
     assert_eq!(playback.status(), Status::Playing);
 }
 
 #[test]
 fn a_failure_for_an_older_choice_rolls_nothing_back() {
     let mut playback = new(1.0);
-    let first = token(&playback.update(Message::Start(album(1, 3, 0))));
-    let second = token(&playback.update(Message::Start(album(2, 3, 0))));
+    let first = token(&playback.send(Message::Start(album(1, 3, 0))));
+    let second = token(&playback.send(Message::Start(album(2, 3, 0))));
 
-    playback.update(resolve_failed(first));
+    playback.send(resolve_failed(first));
 
     assert_eq!(current(&playback), Some(201));
     assert_eq!(playback.status(), Status::Loading(second));
@@ -271,10 +285,10 @@ fn a_failure_for_an_older_choice_rolls_nothing_back() {
 #[test]
 fn a_track_that_cant_be_resolved_rolls_back_to_what_still_plays() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::Position(42.0));
+    playback.send(Message::Position(42.0));
 
-    let effects = playback.update(Message::Start(album(2, 3, 1)));
-    let effects = playback.update(resolve_failed(token(&effects)));
+    let effects = playback.send(Message::Start(album(2, 3, 1)));
+    let effects = playback.send(resolve_failed(token(&effects)));
 
     assert_eq!(effects, vec![]);
     assert_eq!(current(&playback), Some(101));
@@ -286,10 +300,10 @@ fn a_track_that_cant_be_resolved_rolls_back_to_what_still_plays() {
 #[test]
 fn a_track_the_engine_refuses_rolls_back_stopped() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::Position(42.0));
+    playback.send(Message::Position(42.0));
 
-    let effects = playback.update(Message::Start(album(2, 3, 1)));
-    playback.update(audio_failed(token(&effects)));
+    let effects = playback.send(Message::Start(album(2, 3, 1)));
+    playback.send(audio_failed(token(&effects)));
 
     // The engine let go of the old track to start the new one.
     assert_eq!(current(&playback), Some(101));
@@ -300,10 +314,10 @@ fn a_track_the_engine_refuses_rolls_back_stopped() {
 #[test]
 fn rapid_choices_roll_back_to_what_played_before_them_all() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::Start(album(2, 3, 0)));
-    let last = token(&playback.update(Message::Start(album(3, 3, 0))));
+    playback.send(Message::Start(album(2, 3, 0)));
+    let last = token(&playback.send(Message::Start(album(3, 3, 0))));
 
-    playback.update(resolve_failed(last));
+    playback.send(resolve_failed(last));
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(playback.status(), Status::Playing);
@@ -313,8 +327,8 @@ fn rapid_choices_roll_back_to_what_played_before_them_all() {
 fn a_next_track_that_fails_rolls_back_to_the_finished_one_stopped() {
     let mut playback = playing(album(1, 3, 0));
 
-    let effects = playback.update(Message::TrackFinished);
-    playback.update(resolve_failed(token(&effects)));
+    let effects = playback.send(Message::TrackFinished);
+    playback.send(resolve_failed(token(&effects)));
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(ids(playback.upcoming()), vec![102, 103]);
@@ -326,7 +340,7 @@ fn a_next_track_that_fails_rolls_back_to_the_finished_one_stopped() {
 fn only_track_finished_ends_a_track() {
     let mut playback = playing(album(1, 3, 0));
 
-    let effects = playback.update(Message::Position(500.0));
+    let effects = playback.send(Message::Position(500.0));
 
     assert_eq!(effects, vec![]);
     assert_eq!(current(&playback), Some(101));
@@ -336,9 +350,9 @@ fn only_track_finished_ends_a_track() {
 #[test]
 fn a_track_finishing_while_another_loads_is_ignored() {
     let mut playback = playing(album(1, 3, 0));
-    let loading = token(&playback.update(Message::Start(album(2, 3, 0))));
+    let loading = token(&playback.send(Message::Start(album(2, 3, 0))));
 
-    assert_eq!(playback.update(Message::TrackFinished), vec![]);
+    assert_eq!(playback.send(Message::TrackFinished), vec![]);
     assert_eq!(current(&playback), Some(201));
     assert_eq!(playback.status(), Status::Loading(loading));
 }
@@ -346,10 +360,10 @@ fn a_track_finishing_while_another_loads_is_ignored() {
 #[test]
 fn the_position_moves_only_while_playing() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::Position(10.0));
-    playback.update(Message::TogglePlay);
+    playback.send(Message::Position(10.0));
+    playback.send(Message::TogglePlay);
 
-    playback.update(Message::Position(11.0));
+    playback.send(Message::Position(11.0));
 
     assert_eq!(playback.position(), 10.0);
 }
@@ -358,20 +372,20 @@ fn the_position_moves_only_while_playing() {
 fn play_and_pause_toggle_the_engine() {
     let mut playback = playing(album(1, 3, 0));
 
-    assert_eq!(playback.update(Message::TogglePlay), vec![Effect::Pause]);
+    assert_eq!(playback.send(Message::TogglePlay), vec![Effect::Pause]);
     assert_eq!(playback.status(), Status::Paused);
-    assert_eq!(playback.update(Message::TogglePlay), vec![Effect::Resume]);
+    assert_eq!(playback.send(Message::TogglePlay), vec![Effect::Resume]);
     assert_eq!(playback.status(), Status::Playing);
 }
 
 #[test]
 fn play_while_stopped_starts_the_current_track_where_it_stopped() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::Position(42.0));
-    playback.update(Message::EngineFailed);
+    playback.send(Message::Position(42.0));
+    playback.send(Message::EngineFailed("no sink".to_string()));
     assert_eq!(playback.status(), Status::Stopped);
 
-    let effects = playback.update(Message::TogglePlay);
+    let effects = playback.send(Message::TogglePlay);
 
     assert_eq!(
         effects,
@@ -388,9 +402,9 @@ fn play_while_stopped_starts_the_current_track_where_it_stopped() {
 #[test]
 fn play_after_the_album_ran_out_starts_its_last_track_again() {
     let mut playback = playing(album(1, 1, 0));
-    playback.update(Message::TrackFinished);
+    playback.send(Message::TrackFinished);
 
-    let effects = playback.update(Message::TogglePlay);
+    let effects = playback.send(Message::TogglePlay);
 
     assert!(matches!(
         effects[..],
@@ -405,30 +419,27 @@ fn play_after_the_album_ran_out_starts_its_last_track_again() {
 #[test]
 fn play_and_pause_do_nothing_with_nothing_to_play_or_while_loading() {
     let mut playback = new(1.0);
-    assert_eq!(playback.update(Message::TogglePlay), vec![]);
+    assert_eq!(playback.send(Message::TogglePlay), vec![]);
 
-    playback.update(Message::Start(album(1, 3, 0)));
-    assert_eq!(playback.update(Message::TogglePlay), vec![]);
+    playback.send(Message::Start(album(1, 3, 0)));
+    assert_eq!(playback.send(Message::TogglePlay), vec![]);
 }
 
 #[test]
 fn a_seek_goes_to_the_engine_and_moves_the_position() {
     let mut playback = playing(album(1, 3, 0));
 
-    assert_eq!(
-        playback.update(Message::Seek(30.0)),
-        vec![Effect::Seek(30.0)]
-    );
+    assert_eq!(playback.send(Message::Seek(30.0)), vec![Effect::Seek(30.0)]);
     assert_eq!(playback.position(), 30.0);
 }
 
 #[test]
 fn a_seek_while_stopped_is_where_play_starts() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::EngineFailed);
+    playback.send(Message::EngineFailed("no sink".to_string()));
 
-    assert_eq!(playback.update(Message::Seek(30.0)), vec![]);
-    let effects = playback.update(Message::TogglePlay);
+    assert_eq!(playback.send(Message::Seek(30.0)), vec![]);
+    let effects = playback.send(Message::TogglePlay);
 
     assert!(matches!(
         effects[..],
@@ -444,7 +455,7 @@ fn the_volume_goes_to_the_engine() {
     let mut playback = new(1.0);
 
     assert_eq!(
-        playback.update(Message::SetVolume(0.3)),
+        playback.send(Message::SetVolume(0.3)),
         vec![Effect::SetVolume(0.3)]
     );
     assert_eq!(playback.volume(), 0.3);
@@ -455,12 +466,12 @@ fn unmuting_restores_the_volume_from_before() {
     let mut playback = new(0.8);
 
     assert_eq!(
-        playback.update(Message::ToggleMute),
+        playback.send(Message::ToggleMute),
         vec![Effect::SetVolume(0.0)]
     );
     assert_eq!(playback.volume(), 0.0);
     assert_eq!(
-        playback.update(Message::ToggleMute),
+        playback.send(Message::ToggleMute),
         vec![Effect::SetVolume(0.8)]
     );
 }
@@ -470,7 +481,7 @@ fn unmuting_with_no_volume_from_before_goes_to_half() {
     let mut playback = new(0.0);
 
     assert_eq!(
-        playback.update(Message::ToggleMute),
+        playback.send(Message::ToggleMute),
         vec![Effect::SetVolume(0.5)]
     );
 }
@@ -478,10 +489,10 @@ fn unmuting_with_no_volume_from_before_goes_to_half() {
 #[test]
 fn a_track_that_ends_while_the_next_choice_loads_isnt_brought_back_playing() {
     let mut playback = playing(album(1, 3, 0));
-    let loading = token(&playback.update(Message::Start(album(2, 3, 0))));
+    let loading = token(&playback.send(Message::Start(album(2, 3, 0))));
 
-    playback.update(Message::TrackFinished);
-    playback.update(resolve_failed(loading));
+    playback.send(Message::TrackFinished);
+    playback.send(resolve_failed(loading));
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(playback.status(), Status::Stopped);
@@ -490,11 +501,11 @@ fn a_track_that_ends_while_the_next_choice_loads_isnt_brought_back_playing() {
 #[test]
 fn a_track_that_breaks_while_the_next_choice_loads_isnt_brought_back_playing() {
     let mut playback = playing(album(1, 3, 0));
-    playback.update(Message::Position(42.0));
-    let loading = token(&playback.update(Message::Start(album(2, 3, 0))));
+    playback.send(Message::Position(42.0));
+    let loading = token(&playback.send(Message::Start(album(2, 3, 0))));
 
-    playback.update(Message::EngineFailed);
-    playback.update(resolve_failed(loading));
+    playback.send(Message::EngineFailed("no sink".to_string()));
+    playback.send(resolve_failed(loading));
 
     assert_eq!(playback.status(), Status::Stopped);
     assert_eq!(
@@ -517,7 +528,7 @@ fn a_play_remembers_the_source_it_came_from() {
 #[test]
 fn a_track_played_on_its_own_still_has_a_source() {
     let mut playback = new(1.0);
-    playback.update(Message::CycleRepeat);
+    playback.send(Message::CycleRepeat);
 
     let mut playback = playing_with(
         playback,
@@ -525,7 +536,7 @@ fn a_track_played_on_its_own_still_has_a_source() {
     );
     assert_eq!(playing_from(&playback), Some(SourceRef::Track(5)));
 
-    let effects = playback.update(Message::TrackFinished);
+    let effects = playback.send(Message::TrackFinished);
     assert!(matches!(effects[..], [Effect::Play { track_id: 501, .. }]));
     assert_eq!(playing_from(&playback), Some(SourceRef::Track(5)));
 }
@@ -586,7 +597,7 @@ fn the_same_seed_shuffles_the_same_way() {
 fn a_start_past_the_end_of_the_source_is_ignored() {
     let mut playback = playing(album(1, 3, 0));
 
-    assert_eq!(playback.update(Message::Start(album(2, 3, 3))), vec![]);
+    assert_eq!(playback.send(Message::Start(album(2, 3, 3))), vec![]);
     assert_eq!(current(&playback), Some(101));
 }
 
@@ -598,7 +609,7 @@ fn turning_shuffle_on_shuffles_only_what_is_left() {
     and_play(&mut playback, Message::Next);
     and_play(&mut playback, Message::Next);
 
-    assert_eq!(playback.update(Message::ToggleShuffle), vec![]);
+    assert_eq!(playback.send(Message::ToggleShuffle), vec![]);
 
     assert!(playback.shuffle());
     assert_eq!(current(&playback), Some(103));
@@ -616,7 +627,7 @@ fn turning_shuffle_off_puts_what_is_left_back_in_source_order() {
     let played = history(&playback);
     let now = current(&playback).unwrap();
 
-    playback.update(Message::ToggleShuffle);
+    playback.send(Message::ToggleShuffle);
 
     assert!(!playback.shuffle());
     assert_eq!(current(&playback), Some(now));
@@ -630,7 +641,7 @@ fn turning_shuffle_off_puts_what_is_left_back_in_source_order() {
 fn turning_shuffle_off_never_brings_back_tracks_before_the_one_chosen() {
     let mut playback = playing_with(shuffled(new(1.0)), playlist(1, 10, Start::Track(6)));
 
-    playback.update(Message::ToggleShuffle);
+    playback.send(Message::ToggleShuffle);
 
     assert_eq!(ids(playback.upcoming()), vec![108, 109, 110]);
 }
@@ -639,7 +650,7 @@ fn turning_shuffle_off_never_brings_back_tracks_before_the_one_chosen() {
 fn shuffle_with_nothing_playing_only_changes_the_mode() {
     let mut playback = new(1.0);
 
-    assert_eq!(playback.update(Message::ToggleShuffle), vec![]);
+    assert_eq!(playback.send(Message::ToggleShuffle), vec![]);
     assert!(playback.shuffle());
     assert_eq!(current(&playback), None);
 }
@@ -650,7 +661,7 @@ fn shuffle_with_nothing_playing_only_changes_the_mode() {
 fn next_plays_what_comes_next_and_puts_the_current_track_in_history() {
     let mut playback = playing(album(1, 3, 0));
 
-    let effects = playback.update(Message::Next);
+    let effects = playback.send(Message::Next);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 102, .. }]));
     assert_eq!(current(&playback), Some(102));
@@ -662,7 +673,7 @@ fn next_plays_what_comes_next_and_puts_the_current_track_in_history() {
 fn next_on_the_last_track_stops() {
     let mut playback = playing(album(1, 2, 1));
 
-    assert_eq!(playback.update(Message::Next), vec![Effect::Stop]);
+    assert_eq!(playback.send(Message::Next), vec![Effect::Stop]);
     assert_eq!(playback.status(), Status::Stopped);
     assert_eq!(playback.position(), 0.0);
     assert_eq!(current(&playback), Some(102), "the last track stays shown");
@@ -671,15 +682,15 @@ fn next_on_the_last_track_stops() {
 
 #[test]
 fn next_with_nothing_playing_does_nothing() {
-    assert_eq!(new(1.0).update(Message::Next), vec![]);
+    assert_eq!(new(1.0).send(Message::Next), vec![]);
 }
 
 #[test]
 fn rapid_nexts_each_move_on() {
     let mut playback = playing(album(1, 4, 0));
 
-    playback.update(Message::Next);
-    let last = token(&playback.update(Message::Next));
+    playback.send(Message::Next);
+    let last = token(&playback.send(Message::Next));
 
     assert_eq!(current(&playback), Some(103));
     assert_eq!(history(&playback), vec![101, 102]);
@@ -690,8 +701,8 @@ fn rapid_nexts_each_move_on() {
 fn a_next_that_fails_rolls_history_back_too() {
     let mut playback = playing(album(1, 3, 0));
 
-    let effects = playback.update(Message::Next);
-    playback.update(resolve_failed(token(&effects)));
+    let effects = playback.send(Message::Next);
+    playback.send(resolve_failed(token(&effects)));
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(ids(playback.upcoming()), vec![102, 103]);
@@ -715,18 +726,18 @@ fn repeat_cycles_off_all_one() {
     let mut playback = new(1.0);
     assert_eq!(playback.repeat(), Repeat::Off);
 
-    assert_eq!(playback.update(Message::CycleRepeat), vec![]);
+    assert_eq!(playback.send(Message::CycleRepeat), vec![]);
     assert_eq!(playback.repeat(), Repeat::All);
-    playback.update(Message::CycleRepeat);
+    playback.send(Message::CycleRepeat);
     assert_eq!(playback.repeat(), Repeat::One);
-    playback.update(Message::CycleRepeat);
+    playback.send(Message::CycleRepeat);
     assert_eq!(playback.repeat(), Repeat::Off);
 }
 
 fn repeating(repeat: Repeat) -> Playback {
     let mut playback = new(1.0);
     while playback.repeat() != repeat {
-        playback.update(Message::CycleRepeat);
+        playback.send(Message::CycleRepeat);
     }
     playback
 }
@@ -735,7 +746,7 @@ fn repeating(repeat: Repeat) -> Playback {
 fn repeat_one_replays_the_track_when_it_ends() {
     let mut playback = playing_with(repeating(Repeat::One), album(1, 3, 0));
 
-    let effects = playback.update(Message::TrackFinished);
+    let effects = playback.send(Message::TrackFinished);
 
     assert!(matches!(
         effects[..],
@@ -753,7 +764,7 @@ fn repeat_one_replays_the_track_when_it_ends() {
 fn next_moves_on_under_repeat_one() {
     let mut playback = playing_with(repeating(Repeat::One), album(1, 3, 0));
 
-    let effects = playback.update(Message::Next);
+    let effects = playback.send(Message::Next);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 102, .. }]));
 }
@@ -762,7 +773,7 @@ fn next_moves_on_under_repeat_one() {
 fn next_on_the_last_track_stops_under_repeat_one() {
     let mut playback = playing_with(repeating(Repeat::One), album(1, 2, 1));
 
-    assert_eq!(playback.update(Message::Next), vec![Effect::Stop]);
+    assert_eq!(playback.send(Message::Next), vec![Effect::Stop]);
 }
 
 #[test]
@@ -770,7 +781,7 @@ fn repeat_all_starts_the_source_over_and_keeps_history() {
     let mut playback = playing_with(repeating(Repeat::All), album(1, 3, 1));
     and_play(&mut playback, Message::TrackFinished);
 
-    let effects = playback.update(Message::TrackFinished);
+    let effects = playback.send(Message::TrackFinished);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(play_order(&playback), vec![101, 102, 103]);
@@ -781,7 +792,7 @@ fn repeat_all_starts_the_source_over_and_keeps_history() {
 fn next_on_the_last_track_starts_over_under_repeat_all() {
     let mut playback = playing_with(repeating(Repeat::All), album(1, 2, 1));
 
-    let effects = playback.update(Message::Next);
+    let effects = playback.send(Message::Next);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
 }
@@ -817,9 +828,9 @@ fn repeat_all_after_a_shuffle_play_starts_over_in_source_order() {
 fn previous_past_three_seconds_restarts_the_track() {
     let mut playback = playing(album(1, 3, 0));
     and_play(&mut playback, Message::Next);
-    playback.update(Message::Position(3.5));
+    playback.send(Message::Position(3.5));
 
-    assert_eq!(playback.update(Message::Previous), vec![Effect::Seek(0.0)]);
+    assert_eq!(playback.send(Message::Previous), vec![Effect::Seek(0.0)]);
     assert_eq!(current(&playback), Some(102));
     assert_eq!(playback.position(), 0.0);
     assert_eq!(history(&playback), vec![101]);
@@ -829,9 +840,9 @@ fn previous_past_three_seconds_restarts_the_track() {
 fn previous_within_three_seconds_goes_back_a_step() {
     let mut playback = playing(album(1, 3, 0));
     and_play(&mut playback, Message::Next);
-    playback.update(Message::Position(2.0));
+    playback.send(Message::Position(2.0));
 
-    let effects = playback.update(Message::Previous);
+    let effects = playback.send(Message::Previous);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(current(&playback), Some(101));
@@ -842,9 +853,9 @@ fn previous_within_three_seconds_goes_back_a_step() {
 #[test]
 fn previous_with_no_history_restarts_the_track() {
     let mut playback = playing(album(1, 3, 1));
-    playback.update(Message::Position(1.0));
+    playback.send(Message::Position(1.0));
 
-    assert_eq!(playback.update(Message::Previous), vec![Effect::Seek(0.0)]);
+    assert_eq!(playback.send(Message::Previous), vec![Effect::Seek(0.0)]);
     assert_eq!(current(&playback), Some(102));
 }
 
@@ -866,7 +877,7 @@ fn previous_into_another_source_plays_it_under_that_source() {
     let mut playback = playing(album(1, 3, 0));
     and_play(&mut playback, Message::Start(album(2, 3, 0)));
 
-    let effects = playback.update(Message::Previous);
+    let effects = playback.send(Message::Previous);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
@@ -882,7 +893,7 @@ fn previous_into_another_source_plays_it_under_that_source() {
 fn history_keeps_the_last_500_tracks() {
     let mut playback = playing(playlist(1, 600, Start::All));
     for _ in 0..550 {
-        playback.update(Message::Next);
+        playback.send(Message::Next);
     }
 
     let history = history(&playback);
@@ -897,7 +908,7 @@ fn history_keeps_the_last_500_tracks() {
 fn an_album_played_in_album_order_gets_album_gain() {
     let mut playback = new(1.0);
 
-    assert!(album_gain(&playback.update(Message::Start(album(1, 3, 1)))));
+    assert!(album_gain(&playback.send(Message::Start(album(1, 3, 1)))));
 }
 
 #[test]
@@ -905,7 +916,7 @@ fn an_album_played_with_shuffle_on_gets_track_gain() {
     let mut playback = shuffled(new(1.0));
     let start = request(SourceRef::Album(1), 1, 3, Start::All);
 
-    assert!(!album_gain(&playback.update(Message::Start(start))));
+    assert!(!album_gain(&playback.send(Message::Start(start))));
 }
 
 #[test]
@@ -913,21 +924,21 @@ fn a_shuffle_play_of_an_album_gets_track_gain() {
     let mut playback = new(1.0);
     let start = request(SourceRef::Album(1), 1, 3, Start::Shuffled);
 
-    assert!(!album_gain(&playback.update(Message::Start(start))));
+    assert!(!album_gain(&playback.send(Message::Start(start))));
 }
 
 #[test]
 fn turning_shuffle_on_mid_album_switches_to_track_gain() {
     let mut playback = shuffled(playing(album(1, 4, 0)));
 
-    assert!(!album_gain(&playback.update(Message::Next)));
+    assert!(!album_gain(&playback.send(Message::Next)));
 }
 
 #[test]
 fn other_sources_get_track_gain() {
     let mut playback = new(1.0);
 
-    assert!(!album_gain(&playback.update(Message::Start(playlist(
+    assert!(!album_gain(&playback.send(Message::Start(playlist(
         1,
         3,
         Start::All
@@ -940,7 +951,7 @@ fn other_sources_get_track_gain() {
 fn a_long_source_plays_at_once_and_reads_the_rest_from_where_its_first_page_ends() {
     let mut playback = new(1.0);
 
-    let effects = playback.update(Message::Start(long_playlist(1, 3, Start::All)));
+    let effects = playback.send(Message::Start(long_playlist(1, 3, Start::All)));
 
     assert!(matches!(
         the_play(&effects),
@@ -974,14 +985,14 @@ fn a_sorted_playlist_reads_the_rest_in_its_sort() {
         ..playlist(1, 3, Start::All)
     };
 
-    let effects = new(1.0).update(Message::Start(request));
+    let effects = new(1.0).send(Message::Start(request));
 
     assert_eq!(fill(&effects).1.source, kind);
 }
 
 #[test]
 fn a_source_with_nothing_more_to_read_starts_no_fill() {
-    let effects = new(1.0).update(Message::Start(playlist(1, 3, Start::All)));
+    let effects = new(1.0).send(Message::Start(playlist(1, 3, Start::All)));
 
     assert_eq!(effects.len(), 1, "only the Play: {effects:?}");
 }
@@ -995,10 +1006,10 @@ fn pages_that_arrive_go_on_the_end_of_the_play_order() {
     ));
 
     assert_eq!(
-        playback.update(Message::PageArrived(fill_id, page(1, 4, 5))),
+        playback.send(Message::PageArrived(fill_id, page(1, 4, 5))),
         vec![]
     );
-    playback.update(Message::PageArrived(fill_id, page(1, 6, 6)));
+    playback.send(Message::PageArrived(fill_id, page(1, 6, 6)));
 
     assert_eq!(play_order(&playback), vec![102, 103, 104, 105, 106]);
 }
@@ -1015,7 +1026,7 @@ fn a_page_for_a_fill_from_before_is_dropped() {
         Message::Start(long_playlist(2, 2, Start::All)),
     );
 
-    playback.update(Message::PageArrived(old, page(1, 3, 4)));
+    playback.send(Message::PageArrived(old, page(1, 3, 4)));
 
     assert_eq!(play_order(&playback), vec![201, 202]);
 }
@@ -1030,7 +1041,7 @@ fn with_shuffle_on_pages_go_into_random_places_in_the_unplayed_tail() {
     and_play(&mut playback, Message::Next);
     let playing_now = current(&playback);
 
-    playback.update(Message::PageArrived(fill_id, page(1, 11, 20)));
+    playback.send(Message::PageArrived(fill_id, page(1, 11, 20)));
 
     assert_eq!(history(&playback), vec![101]);
     assert_eq!(current(&playback), playing_now);
@@ -1055,7 +1066,7 @@ fn after_a_shuffle_play_pages_are_shuffled_in_too() {
         Message::Start(long_playlist(1, 10, Start::Shuffled)),
     ));
 
-    playback.update(Message::PageArrived(fill_id, page(1, 11, 20)));
+    playback.send(Message::PageArrived(fill_id, page(1, 11, 20)));
 
     let upcoming = ids(playback.upcoming());
     assert_ne!(
@@ -1071,9 +1082,9 @@ fn turning_shuffle_off_puts_tracks_that_arrived_back_in_source_order() {
         &mut playback,
         Message::Start(long_playlist(1, 5, Start::Track(0))),
     ));
-    playback.update(Message::PageArrived(fill_id, page(1, 6, 10)));
+    playback.send(Message::PageArrived(fill_id, page(1, 6, 10)));
 
-    playback.update(Message::ToggleShuffle);
+    playback.send(Message::ToggleShuffle);
 
     assert_eq!(ids(playback.upcoming()), (102..=110).collect::<Vec<_>>());
 }
@@ -1082,7 +1093,7 @@ fn turning_shuffle_off_puts_tracks_that_arrived_back_in_source_order() {
 fn a_new_source_cancels_the_fill() {
     let mut playback = playing(long_playlist(1, 3, Start::All));
 
-    let effects = playback.update(Message::Start(album(2, 3, 0)));
+    let effects = playback.send(Message::Start(album(2, 3, 0)));
 
     assert!(effects.contains(&Effect::CancelFill), "{effects:?}");
 }
@@ -1095,7 +1106,7 @@ fn a_new_long_source_cancels_the_old_fill_and_starts_its_own() {
         Message::Start(long_playlist(1, 3, Start::All)),
     ));
 
-    let effects = playback.update(Message::Start(long_playlist(2, 3, Start::All)));
+    let effects = playback.send(Message::Start(long_playlist(2, 3, Start::All)));
 
     assert!(effects.contains(&Effect::CancelFill), "{effects:?}");
     let (new, continuation) = fill(&effects);
@@ -1110,10 +1121,10 @@ fn a_finished_fill_has_nothing_to_cancel() {
         &mut playback,
         Message::Start(long_playlist(1, 3, Start::All)),
     ));
-    playback.update(Message::PageArrived(fill_id, page(1, 4, 5)));
-    assert_eq!(playback.update(Message::FillEnded(fill_id)), vec![]);
+    playback.send(Message::PageArrived(fill_id, page(1, 4, 5)));
+    assert_eq!(playback.send(Message::FillEnded(fill_id)), vec![]);
 
-    let effects = playback.update(Message::Start(album(2, 3, 0)));
+    let effects = playback.send(Message::Start(album(2, 3, 0)));
 
     assert!(!effects.contains(&Effect::CancelFill), "{effects:?}");
 }
@@ -1125,11 +1136,11 @@ fn repeat_all_starts_over_with_what_has_loaded() {
         &mut playback,
         Message::Start(long_playlist(1, 2, Start::All)),
     ));
-    playback.update(Message::PageArrived(fill_id, page(1, 3, 3)));
+    playback.send(Message::PageArrived(fill_id, page(1, 3, 3)));
     and_play(&mut playback, Message::TrackFinished);
     and_play(&mut playback, Message::TrackFinished);
 
-    let effects = playback.update(Message::TrackFinished);
+    let effects = playback.send(Message::TrackFinished);
 
     assert!(matches!(
         the_play(&effects),
@@ -1145,10 +1156,10 @@ fn pages_that_arrive_while_the_next_track_loads_survive_its_failure() {
         &mut playback,
         Message::Start(long_playlist(1, 2, Start::All)),
     ));
-    let loading = token(&playback.update(Message::Next));
+    let loading = token(&playback.send(Message::Next));
 
-    playback.update(Message::PageArrived(fill_id, page(1, 3, 4)));
-    playback.update(resolve_failed(loading));
+    playback.send(Message::PageArrived(fill_id, page(1, 3, 4)));
+    playback.send(resolve_failed(loading));
 
     assert_eq!(play_order(&playback), vec![101, 102, 103, 104]);
 }
@@ -1160,10 +1171,10 @@ fn a_new_source_that_fails_to_play_brings_back_the_old_fill_from_where_it_got_to
         &mut playback,
         Message::Start(long_playlist(1, 2, Start::All)),
     ));
-    playback.update(Message::PageArrived(old, page(1, 3, 4)));
-    let loading = token(&playback.update(Message::Start(long_playlist(2, 2, Start::All))));
+    playback.send(Message::PageArrived(old, page(1, 3, 4)));
+    let loading = token(&playback.send(Message::Start(long_playlist(2, 2, Start::All))));
 
-    let effects = playback.update(resolve_failed(loading));
+    let effects = playback.send(resolve_failed(loading));
 
     let (refill, continuation) = fill(&effects);
     assert_ne!(refill, old);
@@ -1174,16 +1185,16 @@ fn a_new_source_that_fails_to_play_brings_back_the_old_fill_from_where_it_got_to
             offset: 4,
         }
     );
-    playback.update(Message::PageArrived(refill, page(1, 5, 5)));
+    playback.send(Message::PageArrived(refill, page(1, 5, 5)));
     assert_eq!(play_order(&playback), vec![101, 102, 103, 104, 105]);
 }
 
 #[test]
 fn a_new_source_that_fails_to_play_cancels_its_own_fill() {
     let mut playback = playing(album(1, 3, 0));
-    let loading = token(&playback.update(Message::Start(long_playlist(2, 2, Start::All))));
+    let loading = token(&playback.send(Message::Start(long_playlist(2, 2, Start::All))));
 
-    let effects = playback.update(resolve_failed(loading));
+    let effects = playback.send(resolve_failed(loading));
 
     assert_eq!(effects, vec![Effect::CancelFill]);
 }
@@ -1196,6 +1207,7 @@ fn shuffled_pages_never_go_ahead_of_what_plays_next() {
                 volume: 1.0,
                 shuffle: false,
                 repeat: Repeat::Off,
+                allow_explicit: true,
             },
             SmallRng::seed_from_u64(seed),
         ));
@@ -1207,7 +1219,7 @@ fn shuffled_pages_never_go_ahead_of_what_plays_next() {
         let stepped_back = current(&playback);
         and_play(&mut playback, Message::Previous);
 
-        playback.update(Message::PageArrived(fill_id, page(1, 4, 10)));
+        playback.send(Message::PageArrived(fill_id, page(1, 4, 10)));
 
         assert_eq!(
             playback.upcoming().next().map(|track| track.id),
@@ -1225,11 +1237,11 @@ fn tag(id: u64) -> Source {
 }
 
 fn add(playback: &mut Playback, id: u64) -> Vec<Effect> {
-    playback.update(Message::AddToQueue(track(id), tag(id / 100)))
+    playback.send(Message::AddToQueue(track(id), tag(id / 100)))
 }
 
 fn play_next(playback: &mut Playback, id: u64) -> Vec<Effect> {
-    playback.update(Message::PlayNext(track(id), tag(id / 100)))
+    playback.send(Message::PlayNext(track(id), tag(id / 100)))
 }
 
 /// The Manual queue, in order.
@@ -1299,7 +1311,7 @@ fn a_queued_entry_gets_track_gain_even_from_an_album() {
     let mut playback = playing(album(1, 3, 0));
     add(&mut playback, 901);
 
-    assert!(!album_gain(&playback.update(Message::Next)));
+    assert!(!album_gain(&playback.send(Message::Next)));
 }
 
 #[test]
@@ -1307,7 +1319,7 @@ fn next_on_the_last_track_plays_what_was_queued() {
     let mut playback = playing(album(1, 2, 1));
     add(&mut playback, 901);
 
-    let effects = playback.update(Message::Next);
+    let effects = playback.send(Message::Next);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 901, .. }]));
 }
@@ -1329,7 +1341,7 @@ fn shuffle_never_reorders_the_manual_queue() {
         add(&mut playback, id);
     }
 
-    playback.update(Message::ToggleShuffle);
+    playback.send(Message::ToggleShuffle);
 
     assert_eq!(queued(&playback), (901..=906).collect::<Vec<_>>());
 }
@@ -1361,8 +1373,8 @@ fn a_queued_entry_that_fails_to_play_goes_back_in_the_queue() {
     let mut playback = playing(album(1, 3, 0));
     add(&mut playback, 901);
 
-    let effects = playback.update(Message::Next);
-    playback.update(resolve_failed(token(&effects)));
+    let effects = playback.send(Message::Next);
+    playback.send(resolve_failed(token(&effects)));
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(queued(&playback), vec![901]);
@@ -1375,7 +1387,7 @@ fn previous_from_a_queued_entry_puts_it_back_at_the_front_of_the_queue() {
     add(&mut playback, 902);
     and_play(&mut playback, Message::Next);
 
-    let effects = playback.update(Message::Previous);
+    let effects = playback.send(Message::Previous);
 
     assert!(matches!(effects[..], [Effect::Play { track_id: 101, .. }]));
     assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
@@ -1422,10 +1434,10 @@ fn previous_twice_across_sources_keeps_the_track_it_passes() {
 #[test]
 fn a_track_queued_while_a_failing_play_loads_stays_queued() {
     let mut playback = playing(album(1, 3, 0));
-    let loading = token(&playback.update(Message::Next));
+    let loading = token(&playback.send(Message::Next));
 
     add(&mut playback, 901);
-    playback.update(resolve_failed(loading));
+    playback.send(resolve_failed(loading));
 
     assert_eq!(current(&playback), Some(101));
     assert_eq!(queued(&playback), vec![901]);
@@ -1454,4 +1466,480 @@ fn under_repeat_all_the_queue_plays_before_the_source_starts_over() {
     assert_eq!(current(&playback), Some(901));
     and_play(&mut playback, Message::TrackFinished);
     assert_eq!(current(&playback), Some(101));
+}
+
+// Failures and explicit content.
+
+/// A track TIDAL says it won't stream.
+fn unavailable(id: u64) -> Track {
+    Track {
+        available: false,
+        ..track(id)
+    }
+}
+
+fn explicit(id: u64) -> Track {
+    Track {
+        explicit: true,
+        ..track(id)
+    }
+}
+
+/// Album `id` of `tracks`, started as `start` says.
+fn album_of(id: u64, tracks: Vec<Track>, start: Start) -> PlayRequest {
+    PlayRequest {
+        source: source(SourceRef::Album(id)),
+        first_page: tracks,
+        start,
+        continuation: None,
+    }
+}
+
+/// Playback with explicit tracks not allowed.
+fn no_explicit() -> Playback {
+    let mut playback = new(1.0);
+    playback.send(Message::AllowExplicit(false));
+    playback
+}
+
+/// TIDAL will never have a stream for it.
+fn unplayable(token: PlayToken) -> Message {
+    let error = syzygy_tidal::Error::Api {
+        status: 404,
+        body: String::new(),
+    };
+    Message::Played(token, Err(PlayError::Resolve(Arc::new(error))))
+}
+
+/// TIDAL is rate-limiting, and said for how long when `secs` is some.
+fn rate_limited(token: PlayToken, secs: Option<u64>) -> Message {
+    let body = match secs {
+        Some(secs) => format!(r#"{{"status":429,"retryAfterSecs":{secs}}}"#),
+        None => String::new(),
+    };
+    let error = syzygy_tidal::Error::Api { status: 429, body };
+    Message::Played(token, Err(PlayError::Resolve(Arc::new(error))))
+}
+
+/// The notices among `effects`.
+fn notices(effects: &[Effect]) -> Vec<Notice> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Notify(notice) => Some(notice.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The id of the track the one Play among `effects` asks for.
+fn plays(effects: &[Effect]) -> u64 {
+    match the_play(effects) {
+        Effect::Play { track_id, .. } => *track_id,
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn moving_on_skips_an_unavailable_track_without_putting_it_in_history() {
+    let tracks = vec![track(101), unavailable(102), track(103)];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+
+    let effects = and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 103);
+    assert_eq!(notices(&effects), vec![]);
+    assert_eq!(history(&playback), vec![101]);
+}
+
+#[test]
+fn a_track_tidal_has_no_stream_for_is_skipped() {
+    let mut playback = playing(album(1, 3, 0));
+    let effects = playback.send(Message::TrackFinished);
+
+    let effects = playback.send(unplayable(token(&effects)));
+
+    assert_eq!(plays(&effects), 103);
+    assert_eq!(current(&playback), Some(103));
+    assert_eq!(history(&playback), vec![101]);
+}
+
+#[test]
+fn three_tracks_in_a_row_that_cant_play_stop_playback_with_a_notice() {
+    let tracks = vec![
+        track(101),
+        unavailable(102),
+        track(103),
+        track(104),
+        track(105),
+    ];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+    let effects = playback.send(Message::TrackFinished);
+    let effects = playback.send(unplayable(token(&effects)));
+
+    let effects = playback.send(unplayable(token(&effects)));
+
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Play { .. })));
+    assert_eq!(notices(&effects), vec![Notice::TooManyFailures]);
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(104));
+    assert_eq!(ids(playback.upcoming()), vec![105]);
+}
+
+#[test]
+fn playback_stops_on_the_third_unavailable_track_in_a_row_while_moving_on() {
+    let tracks = vec![
+        track(101),
+        unavailable(102),
+        unavailable(103),
+        unavailable(104),
+    ];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+
+    let effects = playback.send(Message::Next);
+
+    assert_eq!(
+        effects,
+        vec![Effect::Stop, Effect::Notify(Notice::TooManyFailures)]
+    );
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(104));
+}
+
+#[test]
+fn a_track_that_plays_starts_the_count_again() {
+    let tracks = vec![
+        track(101),
+        unavailable(102),
+        unavailable(103),
+        track(104),
+        unavailable(105),
+        unavailable(106),
+        track(107),
+    ];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+
+    and_play(&mut playback, Message::TrackFinished);
+    assert_eq!(current(&playback), Some(104));
+    let effects = and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 107);
+}
+
+#[test]
+fn next_starts_the_count_again() {
+    let tracks = vec![
+        track(101),
+        unavailable(102),
+        unavailable(103),
+        track(104),
+        unavailable(105),
+        track(106),
+    ];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+    playback.send(Message::TrackFinished);
+    assert_eq!(current(&playback), Some(104));
+
+    // Still loading 104, two failures counted.
+    let effects = playback.send(Message::Next);
+
+    assert_eq!(plays(&effects), 106);
+}
+
+#[test]
+fn nothing_after_it_can_play_is_like_running_out() {
+    let tracks = vec![track(101), track(102), unavailable(103)];
+    let mut playback = playing(album_of(1, tracks, Start::Track(1)));
+
+    assert_eq!(playback.send(Message::TrackFinished), vec![]);
+
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(102));
+    assert!(history(&playback).is_empty());
+}
+
+#[test]
+fn a_new_source_none_of_which_can_play_rolls_back_to_what_plays() {
+    let mut playback = playing(album(1, 3, 0));
+    let effects = playback.send(Message::Start(album(2, 2, 0)));
+    let effects = playback.send(unplayable(token(&effects)));
+
+    let effects = playback.send(unplayable(token(&effects)));
+
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Play { .. })));
+    assert_eq!(playback.status(), Status::Playing);
+    assert_eq!(current(&playback), Some(101));
+    assert_eq!(playing_from(&playback), Some(SourceRef::Album(1)));
+}
+
+#[test]
+fn choosing_an_unavailable_track_says_so_and_plays_nothing() {
+    let mut playback = playing(album(1, 3, 0));
+    let tracks = vec![track(201), unavailable(202)];
+
+    let effects = playback.send(Message::Start(album_of(2, tracks, Start::Track(1))));
+
+    assert_eq!(effects, vec![Effect::Notify(Notice::Unavailable)]);
+    assert_eq!(current(&playback), Some(101));
+}
+
+#[test]
+fn playing_a_source_skips_its_unavailable_first_track() {
+    let tracks = vec![unavailable(101), track(102)];
+
+    let effects = new(1.0).send(Message::Start(album_of(1, tracks, Start::All)));
+
+    assert_eq!(plays(&effects), 102);
+}
+
+#[test]
+fn an_unavailable_queued_entry_is_skipped() {
+    let mut playback = playing(album(1, 3, 0));
+    playback.send(Message::AddToQueue(unavailable(901), tag(9)));
+
+    let effects = and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 102);
+    assert!(queued(&playback).is_empty());
+}
+
+#[test]
+fn a_rate_limit_stops_on_the_track_and_waits_to_play_it() {
+    let mut playback = playing(album(1, 3, 0));
+    let next = token(&playback.send(Message::Next));
+
+    let effects = playback.send(rate_limited(next, Some(7)));
+
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Stop,
+            Effect::ResumeAfter {
+                token: next,
+                delay: Duration::from_secs(8),
+            },
+            Effect::Notify(Notice::RateLimited(8)),
+        ]
+    );
+    assert_eq!(playback.status(), Status::Stopped);
+    assert_eq!(current(&playback), Some(102));
+
+    let effects = playback.send(Message::Resume(next));
+    assert_eq!(plays(&effects), 102);
+}
+
+#[test]
+fn a_rate_limit_that_doesnt_say_how_long_waits_six_seconds() {
+    let mut playback = playing(album(1, 3, 0));
+    let next = token(&playback.send(Message::TrackFinished));
+
+    let effects = playback.send(rate_limited(next, None));
+
+    // The finished track left the engine with nothing to stop.
+    assert_eq!(
+        effects,
+        vec![
+            Effect::ResumeAfter {
+                token: next,
+                delay: Duration::from_secs(6),
+            },
+            Effect::Notify(Notice::RateLimited(6)),
+        ]
+    );
+}
+
+#[test]
+fn a_rate_limit_doesnt_resume_once_the_user_played_something() {
+    let mut playback = playing(album(1, 3, 0));
+    let next = token(&playback.send(Message::Next));
+    playback.send(rate_limited(next, Some(7)));
+
+    and_play(&mut playback, Message::Next);
+
+    assert_eq!(playback.send(Message::Resume(next)), vec![]);
+    assert_eq!(current(&playback), Some(103));
+}
+
+#[test]
+fn a_rate_limit_resume_after_the_user_pressed_play_is_dropped() {
+    let mut playback = playing(album(1, 3, 0));
+    let next = token(&playback.send(Message::Next));
+    playback.send(rate_limited(next, Some(7)));
+
+    let again = token(&playback.send(Message::TogglePlay));
+    playback.send(resolve_failed(again));
+
+    assert_eq!(playback.send(Message::Resume(next)), vec![]);
+}
+
+#[test]
+fn a_busy_device_is_reported_while_the_play_keeps_trying() {
+    let mut playback = new(1.0);
+    let first = token(&playback.send(Message::Start(album(1, 3, 0))));
+
+    assert_eq!(
+        playback.send(Message::DeviceBusy(first)),
+        vec![Effect::Notify(Notice::DeviceBusy)]
+    );
+    let second = token(&playback.send(Message::Next));
+    assert_eq!(playback.send(Message::DeviceBusy(first)), vec![]);
+    assert_eq!(
+        playback.send(Message::DeviceBusy(second)),
+        vec![Effect::Notify(Notice::DeviceBusy)]
+    );
+}
+
+#[test]
+fn audio_errors_are_reported() {
+    let mut playback = playing(album(1, 3, 0));
+    let next = token(&playback.send(Message::Next));
+
+    let effects = playback.send(audio_failed(next));
+    assert_eq!(
+        notices(&effects),
+        vec![Notice::AudioError("no sink".to_string())]
+    );
+
+    let effects = playback.send(Message::EngineFailed("device gone".to_string()));
+    assert_eq!(
+        notices(&effects),
+        vec![Notice::AudioError("device gone".to_string())]
+    );
+}
+
+#[test]
+fn starting_a_source_with_an_explicit_track_asks_first() {
+    let mut playback = no_explicit();
+    let tracks = vec![track(101), explicit(102)];
+
+    let outcome = playback.update(Message::Start(album_of(1, tracks, Start::All)));
+
+    assert!(matches!(outcome, Outcome::NeedsExplicitConsent(_)));
+    assert_eq!(current(&playback), None);
+}
+
+#[test]
+fn allowing_explicit_content_then_sending_what_waited_plays_it() {
+    let mut playback = no_explicit();
+    let tracks = vec![explicit(101), track(102)];
+    let Outcome::NeedsExplicitConsent(pending) =
+        playback.update(Message::Start(album_of(1, tracks, Start::All)))
+    else {
+        panic!("expected a consent question");
+    };
+
+    playback.send(Message::AllowExplicit(true));
+    let effects = playback.send(pending.into());
+
+    assert_eq!(plays(&effects), 101);
+}
+
+#[test]
+fn playing_without_them_skips_the_explicit_tracks() {
+    let mut playback = no_explicit();
+    let tracks = vec![explicit(101), track(102), explicit(103), track(104)];
+    let Outcome::NeedsExplicitConsent(pending) =
+        playback.update(Message::Start(album_of(1, tracks, Start::All)))
+    else {
+        panic!("expected a consent question");
+    };
+
+    let effects = and_play(&mut playback, Message::WithoutExplicit(pending));
+    assert_eq!(plays(&effects), 102);
+    let effects = and_play(&mut playback, Message::TrackFinished);
+    assert_eq!(plays(&effects), 104);
+}
+
+#[test]
+fn explicit_tracks_before_the_chosen_one_dont_ask() {
+    let mut playback = no_explicit();
+    let tracks = vec![explicit(101), track(102), track(103)];
+
+    let effects = playback.send(Message::Start(album_of(1, tracks, Start::Track(1))));
+
+    assert_eq!(plays(&effects), 102);
+}
+
+#[test]
+fn queueing_an_explicit_track_asks_first_and_without_them_queues_nothing() {
+    let mut playback = playing_with(no_explicit(), album(1, 3, 0));
+
+    let Outcome::NeedsExplicitConsent(pending) =
+        playback.update(Message::AddToQueue(explicit(901), tag(9)))
+    else {
+        panic!("expected a consent question");
+    };
+    assert_eq!(playback.send(Message::WithoutExplicit(pending)), vec![]);
+
+    assert!(queued(&playback).is_empty());
+    assert!(matches!(
+        playback.update(Message::PlayNext(explicit(901), tag(9))),
+        Outcome::NeedsExplicitConsent(_)
+    ));
+}
+
+#[test]
+fn explicit_tracks_reached_by_moving_on_are_skipped_silently_and_not_counted() {
+    let tracks = vec![
+        track(101),
+        unavailable(102),
+        unavailable(103),
+        explicit(104),
+        explicit(105),
+        track(106),
+    ];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+    playback.send(Message::AllowExplicit(false));
+
+    let effects = and_play(&mut playback, Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 106);
+    assert_eq!(notices(&effects), vec![]);
+}
+
+#[test]
+fn turning_explicit_content_off_removes_nothing() {
+    let tracks = vec![explicit(101), explicit(102), track(103)];
+    let mut playback = playing(album_of(1, tracks, Start::All));
+
+    playback.send(Message::AllowExplicit(false));
+
+    assert_eq!(play_order(&playback), vec![101, 102, 103]);
+    assert_eq!(playback.status(), Status::Playing);
+}
+
+#[test]
+fn a_run_of_skips_that_runs_out_doesnt_count_toward_the_next_one() {
+    let tracks = vec![track(101), track(102), unavailable(103), unavailable(104)];
+    let mut playback = playing(album_of(1, tracks, Start::Track(1)));
+    playback.send(Message::TrackFinished);
+    add(&mut playback, 901);
+
+    let effects = playback.send(Message::TogglePlay);
+    let effects = playback.send(unplayable(token(&effects)));
+
+    assert!(notices(&effects).is_empty());
+    assert_eq!(plays(&effects), 901);
+}
+
+#[test]
+fn a_next_that_stopped_playback_cancels_a_rate_limit_resume() {
+    let mut playback = playing(album(1, 2, 0));
+    let next = token(&playback.send(Message::Next));
+    playback.send(rate_limited(next, Some(7)));
+
+    playback.send(Message::Next);
+
+    assert_eq!(playback.send(Message::Resume(next)), vec![]);
+}
+
+#[test]
+fn repeat_one_moves_on_from_an_explicit_track_once_they_arent_allowed() {
+    let tracks = vec![explicit(101), track(102)];
+    let mut playback = playing_with(repeating(Repeat::One), album_of(1, tracks, Start::All));
+    playback.send(Message::AllowExplicit(false));
+
+    let effects = playback.send(Message::TrackFinished);
+
+    assert_eq!(plays(&effects), 102);
 }

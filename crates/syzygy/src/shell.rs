@@ -1,7 +1,8 @@
 //! The signed-in Shell: the sidebar, the header with its search, the
-//! current Page and the Back stack, and the toasts over them.
+//! current Page and the Back stack, and the modal and toasts over them.
 
 mod back_stack;
+mod consent;
 mod play_card;
 pub mod player_bar;
 pub mod search;
@@ -24,7 +25,7 @@ use crate::page::{
     self, Action, Context, Load, NowPlaying, Page, PageId, Route, Viewport, album, artist_tracks,
     artist_view_all, explore, favorites, feed, library, mix, playlist, search as search_page,
 };
-use crate::playback::{self, PlayRequest, Playback, Status};
+use crate::playback::{self, Notice, PlayRequest, Playback, Status};
 use crate::settings::Sort;
 use crate::style;
 use back_stack::{BackStack, Entry};
@@ -66,6 +67,8 @@ pub struct Shell {
     card_play: Option<task::Handle>,
     /// A track being read for its Track radio. Going anywhere aborts it.
     radio_read: Option<task::Handle>,
+    /// What waits on the explicit-consent modal, while it's open.
+    consent: Option<playback::Pending>,
 }
 
 /// The Page on screen and the reads it started. Dropping it aborts them.
@@ -82,6 +85,10 @@ struct Current {
 pub enum Message {
     Scrolled(PageId, Viewport),
     DismissToast(ToastId),
+    /// Escape: it closes the modal, or else the search dropdown.
+    Escape,
+    /// The explicit-consent modal was answered.
+    Consent(consent::Answer),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
@@ -122,6 +129,7 @@ impl Shell {
             viewport_height: UNKNOWN_HEIGHT,
             card_play: None,
             radio_read: None,
+            consent: None,
         };
         let task = shell.run_action(action, services, context);
         let read = shell.run_sidebar(read, services, context);
@@ -217,6 +225,26 @@ impl Shell {
                 }
             }
             Message::DismissToast(id) => self.toasts.dismiss(id),
+            Message::Escape => {
+                if self.consent.take().is_none() {
+                    let effect = self.search.update(search::Message::Escape);
+                    return self.run_search(effect, services, context);
+                }
+            }
+            Message::Consent(answer) => {
+                let Some(pending) = self.consent.take() else {
+                    return Task::none();
+                };
+                let to_playback = |message| Task::done(app::Message::Playback(message));
+                return match answer {
+                    consent::Answer::Allow => to_playback(playback::Message::AllowExplicit(true))
+                        .chain(to_playback(pending.into())),
+                    consent::Answer::Without => {
+                        to_playback(playback::Message::WithoutExplicit(pending))
+                    }
+                    consent::Answer::Dismiss => Task::none(),
+                };
+            }
             Message::Sidebar(message) => {
                 let effect = self.sidebar.update(message);
                 return self.run_sidebar(effect, services, context);
@@ -278,6 +306,33 @@ impl Shell {
             }
         }
         Task::none()
+    }
+
+    /// Playback chose explicit tracks while they aren't allowed: ask.
+    pub fn ask_explicit_consent(&mut self, pending: playback::Pending) -> Task<app::Message> {
+        self.consent = Some(pending);
+        Task::none()
+    }
+
+    /// Tell the user what playback has to say.
+    pub fn notify(&mut self, notice: Notice) -> Task<app::Message> {
+        let (kind, text) = match notice {
+            Notice::TooManyFailures => (
+                Kind::Error,
+                "Multiple tracks failed to play \u{2014} stopped".to_string(),
+            ),
+            Notice::Unavailable => (Kind::Info, "Track unavailable".to_string()),
+            Notice::RateLimited(secs) => (
+                Kind::Info,
+                format!("Too many requests \u{2014} resuming in {secs}s"),
+            ),
+            Notice::DeviceBusy => (
+                Kind::Info,
+                "The audio device is busy \u{2014} trying again".to_string(),
+            ),
+            Notice::AudioError(error) => (Kind::Error, cut(&error, AUDIO_ERROR_LENGTH)),
+        };
+        self.toast(kind, text)
     }
 
     /// Show a toast that dismisses itself.
@@ -372,6 +427,7 @@ impl Shell {
             }
             Action::Queue { track, next } => {
                 let title = short(&track.title);
+                let track_explicit = track.explicit;
                 let tag = page::queue_tag(&track);
                 let (message, toast) = if next {
                     (
@@ -384,7 +440,12 @@ impl Shell {
                         format!("Added \u{201c}{title}\u{201d} to the queue"),
                     )
                 };
-                let toast = self.toast(Kind::Info, toast);
+                // An explicit track that isn't allowed asks first instead.
+                let toast = if track_explicit && !context.settings.allow_explicit {
+                    Task::none()
+                } else {
+                    self.toast(Kind::Info, toast)
+                };
                 Task::batch([Task::done(app::Message::Playback(message)), toast])
             }
             Action::TrackRadio(track) => match track.track_radio.clone() {
@@ -534,7 +595,7 @@ impl Shell {
         let page = container(
             self.current
                 .page
-                .view(images, viewport, now_playing)
+                .view(images, viewport, now_playing, playback.allow_explicit())
                 .map(move |m| app::Message::Page(id, m)),
         )
         .max_width(MAX_PAGE_WIDTH)
@@ -573,11 +634,15 @@ impl Shell {
             row![sidebar, column![self.header(), stack![page].push(dropdown)]].height(Length::Fill),
         ]
         .push(player_bar);
+        let modal = self
+            .consent
+            .as_ref()
+            .map(|_| consent::view().map(|answer| app::Message::Shell(Message::Consent(answer))));
         let toasts = self
             .toasts
             .view()
             .map(|id| app::Message::Shell(Message::DismissToast(id)));
-        stack![main, toasts].into()
+        stack![main].push(modal).push(toasts).into()
     }
 
     /// Back and forward, search and the avatar.
@@ -645,6 +710,19 @@ impl Current {
             route: self.route.clone(),
             offset: self.offset,
         }
+    }
+}
+
+/// The most of an audio error a toast shows.
+const AUDIO_ERROR_LENGTH: usize = 80;
+
+/// `text`, cut to `max` characters with an ellipsis if it's longer.
+fn cut(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        let cut: String = text.chars().take(max - 1).collect();
+        format!("{cut}\u{2026}")
+    } else {
+        text.to_string()
     }
 }
 
@@ -819,4 +897,20 @@ fn home_feed(
             })
         })
         .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_audio_error_is_cut_to_80_characters() {
+        let error = "x".repeat(100);
+
+        let shown = cut(&error, AUDIO_ERROR_LENGTH);
+
+        assert_eq!(shown.chars().count(), 80);
+        assert!(shown.ends_with('\u{2026}'));
+        assert_eq!(cut("no sink", AUDIO_ERROR_LENGTH), "no sink");
+    }
 }

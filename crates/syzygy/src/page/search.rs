@@ -123,7 +123,12 @@ impl State {
         }
     }
 
-    pub fn view<'a>(&'a self, images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+    pub fn view<'a>(
+        &'a self,
+        images: &'a Images,
+        viewport: Viewport,
+        allow_explicit: bool,
+    ) -> Element<'a, Message> {
         let tabs = row(Tab::TABS.into_iter().map(|tab| {
             let style = if tab == self.tab {
                 style::selected_tab
@@ -148,9 +153,9 @@ impl State {
                 .into();
             }
             match self.tab {
-                Tab::All => all(results, images),
+                Tab::All => all(results, images, allow_explicit),
                 Tab::TopHits => top_hits(&results.top_hits, images),
-                Tab::Tracks => tracks(&results.tracks, images, viewport),
+                Tab::Tracks => tracks(&results.tracks, images, viewport, allow_explicit),
                 Tab::Playlists => grid(&results.playlists, "playlists", images),
                 Tab::Albums => grid(&results.albums, "albums", images),
                 Tab::Artists => grid(&results.artists, "artists", images),
@@ -166,7 +171,11 @@ impl State {
 }
 
 /// A few of each type, each under its title with a way to its tab.
-fn all<'a>(results: &'a SearchResults, images: &'a Images) -> Element<'a, Message> {
+fn all<'a>(
+    results: &'a SearchResults,
+    images: &'a Images,
+    allow_explicit: bool,
+) -> Element<'a, Message> {
     let section = |title: &'a str, tab: Tab, content: Element<'a, Message>| {
         let header = row![
             text(title).size(22),
@@ -190,7 +199,7 @@ fn all<'a>(results: &'a SearchResults, images: &'a Images) -> Element<'a, Messag
             .iter()
             .take(TRACKS_PREVIEW)
             .enumerate()
-            .map(|(i, track)| track_row(images, i, track));
+            .map(|(i, track)| track_row(images, i, track, allow_explicit));
         let list = Column::with_children(rows).into();
         sections.push(section("Tracks", Tab::Tracks, list));
     }
@@ -216,7 +225,12 @@ fn top_hits<'a>(hits: &'a [Hit], images: &'a Images) -> Element<'a, Message> {
     Element::from(hits).map(Message::Link)
 }
 
-fn tracks<'a>(tracks: &'a [Track], images: &'a Images, viewport: Viewport) -> Element<'a, Message> {
+fn tracks<'a>(
+    tracks: &'a [Track],
+    images: &'a Images,
+    viewport: Viewport,
+    allow_explicit: bool,
+) -> Element<'a, Message> {
     if tracks.is_empty() {
         return none_found("tracks");
     }
@@ -225,13 +239,19 @@ fn tracks<'a>(tracks: &'a [Track], images: &'a Images, viewport: Viewport) -> El
         LIST_TOP,
         viewport,
         track_list::header(COLUMNS),
-        |i| track_row(images, i, &tracks[i]),
+        |i| track_row(images, i, &tracks[i], allow_explicit),
     )
 }
 
 /// A track found, which plays the tracks found from there.
-fn track_row<'a>(images: &'a Images, index: usize, track: &'a Track) -> Element<'a, Message> {
-    let row = track_list::track(images, index + 1, track, COLUMNS).map(Message::Link);
+fn track_row<'a>(
+    images: &'a Images,
+    index: usize,
+    track: &'a Track,
+    allow_explicit: bool,
+) -> Element<'a, Message> {
+    let row =
+        track_list::track(images, index + 1, track, COLUMNS, allow_explicit).map(Message::Link);
     track_list::playable(row, Message::Play(index), false)
 }
 

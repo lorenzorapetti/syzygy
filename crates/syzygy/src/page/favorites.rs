@@ -185,6 +185,7 @@ impl State {
         images: &'a Images,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         let total = self
             .tracks
@@ -224,7 +225,7 @@ impl State {
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let position = self.shown[i];
                 let track = &tracks[position];
-                let row = track_list::track(images, position + 1, track, COLUMNS);
+                let row = track_list::track(images, position + 1, track, COLUMNS, allow_explicit);
                 track_list::playable_track(
                     row.map(Message::Link),
                     track,

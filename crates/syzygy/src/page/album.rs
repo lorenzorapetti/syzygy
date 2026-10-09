@@ -130,6 +130,7 @@ impl State {
         images: &'a Images,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         let hero = match (&self.album, &self.preview) {
             (Remote::Loaded(album), _) => Some(album_hero(album, images)),
@@ -139,7 +140,7 @@ impl State {
             _ => None,
         };
         let body = self.album.view(Message::Retry, |album| {
-            let row = |i| self.row(i, album, images, now_playing);
+            let row = |i| self.row(i, album, images, now_playing, allow_explicit);
             let list = track_list::view(
                 self.rows.len(),
                 LIST_TOP,
@@ -182,6 +183,7 @@ impl State {
         album: &'a Album,
         images: &'a Images,
         now_playing: Option<NowPlaying>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         match self.rows[i] {
             Row::Volume(volume) => track_list::heading(format!("Volume {volume}")),
@@ -197,7 +199,7 @@ impl State {
                     None if hovered => Mark::Hovered,
                     None => Mark::None,
                 };
-                let line = track_list::marked(images, number, track, COLUMNS, mark);
+                let line = track_list::marked(images, number, track, COLUMNS, allow_explicit, mark);
                 let row = track_list::playable(
                     line.map(Message::Link),
                     Message::Play(Start::Track(index)),

@@ -166,14 +166,16 @@ pub enum Mark {
 
 /// One track: its number, the cover if the list shows covers, the title
 /// over its artists, the album if shown, and how long it is. Right-clicked,
-/// it opens the track's menu.
+/// it opens the track's menu. Dimmed if it can't play: TIDAL won't stream
+/// it, or it's explicit and `allow_explicit` is off.
 pub fn track<'a>(
     images: &'a Images,
     number: usize,
     track: &'a Track,
     columns: Columns,
+    allow_explicit: bool,
 ) -> Element<'a, Link> {
-    marked(images, number, track, columns, Mark::None)
+    marked(images, number, track, columns, allow_explicit, Mark::None)
 }
 
 /// [`track`], with its number marked.
@@ -182,9 +184,11 @@ pub fn marked<'a>(
     number: usize,
     track: &'a Track,
     columns: Columns,
+    allow_explicit: bool,
     mark: Mark,
 ) -> Element<'a, Link> {
     let current = matches!(mark, Mark::Current { .. } | Mark::Playing(_));
+    let dimmed = !track.available || (track.explicit && !allow_explicit);
     let date_added = columns.date_added.then(|| {
         let date = track
             .date_added
@@ -206,6 +210,8 @@ pub fn marked<'a>(
             .size(14)
             .color(if current {
                 style::ACCENT
+            } else if dimmed {
+                style::TEXT_DISABLED
             } else {
                 style::TEXT_PRIMARY
             })
@@ -253,7 +259,11 @@ pub fn marked<'a>(
             .into(),
         Mark::None => text(number.to_string())
             .size(14)
-            .color(style::TEXT_MUTED)
+            .color(if dimmed {
+                style::TEXT_DISABLED
+            } else {
+                style::TEXT_MUTED
+            })
             .into(),
     };
     let line = row![container(lead).width(NUMBER_WIDTH), title]
@@ -460,6 +470,7 @@ mod tests {
             }),
             duration: 200,
             explicit: false,
+            available: true,
             volume: 1,
             date_added: None,
             track_radio: None,

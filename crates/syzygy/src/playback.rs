@@ -16,6 +16,11 @@
 //! A long source starts with the tracks a Page or card had and reads the
 //! rest in the background: a fill. Its pages join the play order as they
 //! arrive.
+//!
+//! Moving on skips what can't play: unavailable tracks, counted so that a
+//! broken source stops after [`MAX_FAILURES`] in a row, and explicit ones
+//! while they aren't allowed, silently. Choosing explicit tracks while
+//! they aren't allowed asks first: [`Outcome::NeedsExplicitConsent`].
 
 use rand::RngExt;
 use rand::rngs::SmallRng;
@@ -23,6 +28,7 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
 
 #[cfg(test)]
@@ -32,6 +38,10 @@ mod tests;
 const HISTORY: usize = 500;
 /// Past this many seconds in, Previous restarts the track.
 const RESTART_AFTER: f32 = 3.0;
+/// After this many tracks in a row can't play, playback stops.
+const MAX_FAILURES: u8 = 3;
+/// How long to wait out a rate limit that didn't say.
+const RATE_LIMIT_SECS: u64 = 5;
 
 pub struct Playback {
     listening: Listening,
@@ -41,6 +51,14 @@ pub struct Playback {
     /// tests.
     rng: SmallRng,
     status: Status,
+    /// Whether explicit tracks may play.
+    allow_explicit: bool,
+    /// Tracks in a row that couldn't play since one last did, or since the
+    /// user chose something.
+    failures: u8,
+    /// The play a rate limit stopped, to try again once the wait is over
+    /// unless the user did something first.
+    rate_limited: Option<PlayToken>,
     /// Seconds into the current track: from the engine while playing, the
     /// target while loading, where play starts again while stopped.
     position: f32,
@@ -233,6 +251,7 @@ pub struct Preferences {
     pub volume: f32,
     pub shuffle: bool,
     pub repeat: Repeat,
+    pub allow_explicit: bool,
 }
 
 /// Stamped on each play and echoed by its result, so a result for an older
@@ -274,14 +293,63 @@ pub enum Message {
     Position(f32),
     /// How a play went.
     Played(PlayToken, Result<(), PlayError>),
+    /// The play is waiting for a busy audio device, trying again.
+    DeviceBusy(PlayToken),
+    /// A rate limit's wait, after this play hit it, is over.
+    Resume(PlayToken),
     /// The playing track ended. The only way a track ends.
     TrackFinished,
-    /// The engine stopped on an error of its own.
-    EngineFailed,
+    /// The engine stopped on an error of its own, in its words.
+    EngineFailed(String),
     /// A fill read these tracks, the next ones in the source.
     PageArrived(FillId, Vec<Track>),
     /// A fill read the last of its source, or gave up.
     FillEnded(FillId),
+    /// Whether explicit tracks may play.
+    AllowExplicit(bool),
+    /// What waited for consent, to go ahead with explicit tracks skipped.
+    WithoutExplicit(Pending),
+}
+
+/// What [`Playback::update`] did.
+#[must_use]
+#[derive(Debug)]
+pub enum Outcome {
+    /// It changed what it had to and asks for these.
+    Effects(Vec<Effect>),
+    /// The message chose explicit tracks while they aren't allowed, so
+    /// nothing changed. Allowing them and sending the message again plays
+    /// them; [`Message::WithoutExplicit`] goes ahead without them.
+    NeedsExplicitConsent(Pending),
+}
+
+/// A message waiting for consent to explicit tracks.
+#[derive(Debug, Clone)]
+pub struct Pending(Box<Message>);
+
+impl From<Pending> for Message {
+    fn from(pending: Pending) -> Self {
+        *pending.0
+    }
+}
+
+/// Whether `message` chooses explicit tracks to play: a start whose tracks
+/// from the chosen one on include one, or queueing one.
+fn chooses_explicit(message: &Message) -> bool {
+    match message {
+        Message::Start(request) => {
+            let from = match request.start {
+                Start::Track(index) => index,
+                Start::All | Start::Shuffled => 0,
+            };
+            request
+                .first_page
+                .get(from..)
+                .is_some_and(|tracks| tracks.iter().any(|track| track.explicit))
+        }
+        Message::PlayNext(track, _) | Message::AddToQueue(track, _) => track.explicit,
+        _ => false,
+    }
 }
 
 /// Why a play failed.
@@ -327,6 +395,28 @@ pub enum Effect {
     },
     /// Stop reading the source.
     CancelFill,
+    /// Send [`Message::Resume`] with `token` once `delay` has passed.
+    ResumeAfter {
+        token: PlayToken,
+        delay: Duration,
+    },
+    /// Tell the user.
+    Notify(Notice),
+}
+
+/// What playback tells the user.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Notice {
+    /// [`MAX_FAILURES`] tracks in a row couldn't play, so playback stopped.
+    TooManyFailures,
+    /// The chosen track can't play.
+    Unavailable,
+    /// TIDAL is rate-limiting: playback resumes in this many seconds.
+    RateLimited(u64),
+    /// Another program has the audio device; the play keeps trying.
+    DeviceBusy,
+    /// The audio engine failed, in its words.
+    AudioError(String),
 }
 
 impl Playback {
@@ -337,6 +427,9 @@ impl Playback {
             repeat: preferences.repeat,
             rng,
             status: Status::Stopped,
+            allow_explicit: preferences.allow_explicit,
+            failures: 0,
+            rate_limited: None,
             position: 0.0,
             volume: preferences.volume.clamp(0.0, 1.0),
             pre_mute: 0.0,
@@ -348,7 +441,24 @@ impl Playback {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Vec<Effect> {
+    pub fn update(&mut self, message: Message) -> Outcome {
+        if !self.allow_explicit && chooses_explicit(&message) {
+            return Outcome::NeedsExplicitConsent(Pending(Box::new(message)));
+        }
+        Outcome::Effects(self.apply(message))
+    }
+
+    fn apply(&mut self, message: Message) -> Vec<Effect> {
+        if matches!(
+            message,
+            Message::Start(_)
+                | Message::TogglePlay
+                | Message::Next
+                | Message::Previous
+                | Message::Seek(_)
+        ) {
+            self.rate_limited = None;
+        }
         match message {
             Message::Start(request) => self.start(request),
             Message::TogglePlay => match self.status {
@@ -432,29 +542,32 @@ impl Playback {
                 if self.status != Status::Loading(token) {
                     return vec![];
                 }
-                let rollback = self.rollback.take();
-                match (result, rollback) {
-                    (Ok(()), _) => {
+                match result {
+                    Ok(()) => {
+                        self.rollback = None;
+                        self.failures = 0;
                         self.status = Status::Playing;
                         vec![]
                     }
-                    (Err(e), Some(rollback)) => {
+                    Err(e) => {
                         log::warn!("Could not play the track: {e}");
-                        let filling = self.fill_id();
-                        self.listening = rollback.listening;
-                        self.position = rollback.position;
-                        self.status = match e {
-                            PlayError::Resolve(_) => rollback.status,
-                            PlayError::Audio(_) => Status::Stopped,
-                        };
-                        self.refill(filling)
-                    }
-                    (Err(e), None) => {
-                        log::warn!("Could not play the track: {e}");
-                        self.status = Status::Stopped;
-                        vec![]
+                        self.play_failed(token, e)
                     }
                 }
+            }
+            Message::DeviceBusy(token) => {
+                if self.status != Status::Loading(token) {
+                    return vec![];
+                }
+                vec![Effect::Notify(Notice::DeviceBusy)]
+            }
+            Message::Resume(token) => {
+                if self.rate_limited.take() != Some(token) {
+                    return vec![];
+                }
+                self.snapshot();
+                let from = (self.position > 0.0).then_some(self.position);
+                self.play(from)
             }
             Message::TrackFinished => {
                 if let Status::Loading(_) = self.status {
@@ -467,19 +580,21 @@ impl Playback {
                 // The finished track is what a failed next one rolls back to.
                 self.status = Status::Stopped;
                 self.position = 0.0;
-                if self.repeat == Repeat::One {
+                let blocked = self
+                    .current()
+                    .is_some_and(|track| track.explicit && !self.allow_explicit);
+                if self.repeat == Repeat::One && !blocked {
                     self.snapshot();
                     return self.play(None);
                 }
+                let before = self.listening.clone();
                 self.snapshot();
-                if self.advance() {
-                    self.play(None)
-                } else {
+                self.move_on(before).unwrap_or_else(|| {
                     self.rollback = None;
                     vec![]
-                }
+                })
             }
-            Message::EngineFailed => {
+            Message::EngineFailed(error) => {
                 match self.status {
                     Status::Playing | Status::Paused => self.status = Status::Stopped,
                     Status::Loading(_) => {
@@ -488,7 +603,7 @@ impl Playback {
                     }
                     Status::Stopped => {}
                 }
-                vec![]
+                vec![Effect::Notify(Notice::AudioError(error))]
             }
             Message::PageArrived(id, tracks) => {
                 let (plays, rng) = self.filling(id);
@@ -503,7 +618,83 @@ impl Playback {
                 }
                 vec![]
             }
+            Message::AllowExplicit(allow) => {
+                self.allow_explicit = allow;
+                vec![]
+            }
+            Message::WithoutExplicit(pending) => match *pending.0 {
+                // Moving on skips them.
+                message @ Message::Start(_) => self.apply(message),
+                // Queued, it would only be skipped.
+                _ => vec![],
+            },
         }
+    }
+
+    /// The play loading now failed. A track that can't play is skipped,
+    /// and a rate limit waits and tries it again. Otherwise playback goes
+    /// back to what it was before the choice: still playing if TIDAL had
+    /// no stream, stopped if the engine had already let go of it.
+    fn play_failed(&mut self, token: PlayToken, error: PlayError) -> Vec<Effect> {
+        let Some(rollback) = self.rollback.take() else {
+            self.status = Status::Stopped;
+            return vec![];
+        };
+        let engine_busy = matches!(rollback.status, Status::Playing | Status::Paused);
+        match &error {
+            PlayError::Resolve(e) if e.is_terminal_unplayable() => {
+                if let Some(effects) = self.count_failure() {
+                    return effects;
+                }
+                // The track that failed never played: it leaves no History.
+                self.rollback = Some(rollback);
+                self.listening.current = None;
+                if self.advance()
+                    && let Some(effects) = self.play_or_skip()
+                {
+                    return effects;
+                }
+                self.failures = 0;
+                let rollback = self.rollback.take().expect("put back above");
+                let status = rollback.status;
+                self.roll_back(rollback, status)
+            }
+            PlayError::Resolve(e) if e.is_rate_limited() => {
+                // The track stays current, to play once the wait is over.
+                let secs = e.retry_after_secs().unwrap_or(RATE_LIMIT_SECS) + 1;
+                self.status = Status::Stopped;
+                self.rate_limited = Some(token);
+                let mut effects = if engine_busy {
+                    vec![Effect::Stop]
+                } else {
+                    vec![]
+                };
+                effects.push(Effect::ResumeAfter {
+                    token,
+                    delay: Duration::from_secs(secs),
+                });
+                effects.push(Effect::Notify(Notice::RateLimited(secs)));
+                effects
+            }
+            PlayError::Resolve(_) => {
+                let status = rollback.status;
+                self.roll_back(rollback, status)
+            }
+            PlayError::Audio(e) => {
+                let mut effects = self.roll_back(rollback, Status::Stopped);
+                effects.push(Effect::Notify(Notice::AudioError(e.to_string())));
+                effects
+            }
+        }
+    }
+
+    /// Go back to what played before the choice, in `status`.
+    fn roll_back(&mut self, rollback: Rollback, status: Status) -> Vec<Effect> {
+        let filling = self.fill_id();
+        self.listening = rollback.listening;
+        self.position = rollback.position;
+        self.status = status;
+        self.refill(filling)
     }
 
     /// The track playing, or that would play.
@@ -573,6 +764,10 @@ impl Playback {
         self.repeat
     }
 
+    pub fn allow_explicit(&self) -> bool {
+        self.allow_explicit
+    }
+
     fn start(&mut self, request: PlayRequest) -> Vec<Effect> {
         let len = request.first_page.len();
         let (mut order, shuffled) = match request.start {
@@ -583,12 +778,19 @@ impl Playback {
             ),
             _ => return vec![],
         };
+        if let Start::Track(index) = request.start
+            && !request.first_page[index].available
+        {
+            return vec![Effect::Notify(Notice::Unavailable)];
+        }
         match request.start {
             // The chosen track plays first whatever Shuffle says.
             Start::Track(_) if shuffled => order[1..].shuffle(&mut self.rng),
             _ if shuffled => order.shuffle(&mut self.rng),
             _ => {}
         }
+        self.failures = 0;
+        let before = self.listening.clone();
         self.snapshot();
         self.retire_current();
         // A new source starts afresh, as in sone.
@@ -607,8 +809,10 @@ impl Playback {
             shuffled,
             fill,
         });
-        self.advance();
-        let mut effects = self.play(None);
+        let Some(mut effects) = self.move_on(before) else {
+            self.nothing_moved();
+            return vec![];
+        };
         effects.extend(self.refill(filling));
         effects
     }
@@ -619,9 +823,11 @@ impl Playback {
         if self.listening.current.is_none() {
             return vec![];
         }
+        self.failures = 0;
+        let before = self.listening.clone();
         self.snapshot();
-        if self.advance() {
-            return self.play(None);
+        if let Some(effects) = self.move_on(before) {
+            return effects;
         }
         self.rollback = None;
         self.position = 0.0;
@@ -644,9 +850,14 @@ impl Playback {
             step: None,
         };
         if self.listening.current.is_none() {
+            let before = self.listening.clone();
             self.snapshot();
             self.listening.current = Some(entry);
-            return self.play(None);
+            return self.play_or_skip().unwrap_or_else(|| {
+                self.listening = before;
+                self.nothing_moved();
+                vec![]
+            });
         }
         // A play loading now may fail: what it rolls back to keeps the
         // entry too.
@@ -673,6 +884,7 @@ impl Playback {
         if self.position > RESTART_AFTER || self.listening.history.is_empty() {
             return self.restart();
         }
+        self.failures = 0;
         self.snapshot();
         let listening = &mut self.listening;
         let entry = listening.history.pop_back().expect("History isn't empty");
@@ -735,6 +947,69 @@ impl Playback {
             }),
         });
         true
+    }
+
+    /// Move on, and play what comes next that can. When nothing can, the
+    /// state goes back to `before` and it's None.
+    fn move_on(&mut self, before: Listening) -> Option<Vec<Effect>> {
+        if self.advance()
+            && let Some(effects) = self.play_or_skip()
+        {
+            return Some(effects);
+        }
+        self.failures = 0;
+        self.listening = before;
+        None
+    }
+
+    /// Play the current track, which playback moved on to, or skip past it
+    /// while it can't play: silently if it's explicit and they aren't
+    /// allowed, counting toward [`MAX_FAILURES`] if it's unavailable. None,
+    /// with the state part changed, when nothing after it can play.
+    fn play_or_skip(&mut self) -> Option<Vec<Effect>> {
+        loop {
+            let track = &self.listening.current.as_ref()?.track;
+            let blocked = track.explicit && !self.allow_explicit;
+            if !blocked && track.available {
+                return Some(self.play(None));
+            }
+            if !blocked && let Some(effects) = self.count_failure() {
+                return Some(effects);
+            }
+            // Skipped, it never played: it leaves no History.
+            self.listening.current = None;
+            if !self.advance() {
+                self.failures = 0;
+                return None;
+            }
+        }
+    }
+
+    /// The current track couldn't play: one more in a row. At
+    /// [`MAX_FAILURES`] playback stops on it, and the user is told.
+    fn count_failure(&mut self) -> Option<Vec<Effect>> {
+        self.failures += 1;
+        if self.failures < MAX_FAILURES {
+            return None;
+        }
+        self.failures = 0;
+        self.rollback = None;
+        self.position = 0.0;
+        let mut effects = match self.status {
+            Status::Stopped => vec![],
+            _ => vec![Effect::Stop],
+        };
+        self.status = Status::Stopped;
+        effects.push(Effect::Notify(Notice::TooManyFailures));
+        Some(effects)
+    }
+
+    /// Nothing could play, so the choice changed nothing: no rollback, unless
+    /// an earlier choice is still loading.
+    fn nothing_moved(&mut self) {
+        if !matches!(self.status, Status::Loading(_)) {
+            self.rollback = None;
+        }
     }
 
     /// Repeat all: a new round of the whole source, reshuffled if Shuffle is

@@ -234,6 +234,7 @@ impl State {
         images: &'a Images,
         viewport: Viewport,
         now_playing: Option<NowPlaying<'a>>,
+        allow_explicit: bool,
     ) -> Element<'a, Message> {
         let hero = match (&self.playlist, &self.preview) {
             (Remote::Loaded(playlist), _) => Some(self.hero(playlist, images)),
@@ -275,7 +276,7 @@ impl State {
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let position = self.shown[i];
                 let track = &tracks[position];
-                let row = track_list::track(images, position + 1, track, columns);
+                let row = track_list::track(images, position + 1, track, columns, allow_explicit);
                 track_list::playable_track(
                     row.map(Message::Link),
                     track,
@@ -290,7 +291,11 @@ impl State {
                 .push(list)
                 .push(nothing_matches)
                 .push(self.tracks.end(Message::EndInView, Message::RetryMore))
-                .push(all_loaded.then(|| self.recommendations(images)).flatten())
+                .push(
+                    all_loaded
+                        .then(|| self.recommendations(images, allow_explicit))
+                        .flatten(),
+                )
                 .spacing(SPACING)
                 .into()
         });
@@ -355,7 +360,11 @@ impl State {
     }
 
     /// Ten of the recommendations, and Refresh for the next ten.
-    fn recommendations<'a>(&'a self, images: &'a Images) -> Option<Element<'a, Message>> {
+    fn recommendations<'a>(
+        &'a self,
+        images: &'a Images,
+        allow_explicit: bool,
+    ) -> Option<Element<'a, Message>> {
         let shown = self.recommendations.shown();
         if shown.is_empty() {
             return None;
@@ -365,10 +374,9 @@ impl State {
             album: true,
             date_added: false,
         };
-        let rows = shown
-            .iter()
-            .enumerate()
-            .map(|(i, track)| track_list::track(images, i + 1, track, columns).map(Message::Link));
+        let rows = shown.iter().enumerate().map(|(i, track)| {
+            track_list::track(images, i + 1, track, columns, allow_explicit).map(Message::Link)
+        });
         let refresh = button(
             row![
                 icon(Icon::RefreshCw, 16.0, style::TEXT_PRIMARY),
@@ -500,6 +508,7 @@ mod tests {
             }),
             duration: 200,
             explicit: false,
+            available: true,
             volume: 1,
             date_added: None,
             track_radio: None,

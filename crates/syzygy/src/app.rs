@@ -1,5 +1,7 @@
 //! The iced application: state, messages, `update`, `view`.
 
+use futures::SinkExt;
+use futures::channel::mpsc;
 use iced::keyboard::{self, key};
 use iced::widget::{column, container, text};
 use iced::{Element, Event, Length, Subscription, Task, Theme, event, mouse, task, window};
@@ -132,6 +134,7 @@ pub fn boot(paths: Paths) -> (State, Task<Message>) {
             volume: settings.volume,
             shuffle: settings.shuffle,
             repeat: settings.repeat,
+            allow_explicit: settings.allow_explicit,
         },
         rand::make_rng(),
     );
@@ -299,7 +302,9 @@ impl App {
                 let mute = matches!(message, playback::Message::ToggleMute);
                 let modes = matches!(
                     message,
-                    playback::Message::ToggleShuffle | playback::Message::CycleRepeat
+                    playback::Message::ToggleShuffle
+                        | playback::Message::CycleRepeat
+                        | playback::Message::AllowExplicit(_)
                 );
                 let task = self.update_playback(message);
                 let save = if mute {
@@ -376,13 +381,17 @@ impl App {
     }
 
     fn update_playback(&mut self, message: playback::Message) -> Task<Message> {
-        let effects = self.playback.update(message);
-        Task::batch(
-            effects
-                .into_iter()
-                .map(|effect| self.run_playback(effect))
-                .collect::<Vec<_>>(),
-        )
+        match self.playback.update(message) {
+            playback::Outcome::Effects(effects) => Task::batch(
+                effects
+                    .into_iter()
+                    .map(|effect| self.run_playback(effect))
+                    .collect::<Vec<_>>(),
+            ),
+            playback::Outcome::NeedsExplicitConsent(pending) => {
+                self.in_shell(|shell, _, _| shell.ask_explicit_consent(pending))
+            }
+        }
     }
 
     /// Turn what playback asks for into calls on the engine.
@@ -399,7 +408,7 @@ impl App {
                 let player = player.clone();
                 let quality = self.settings.max_quality;
                 let normalize = self.settings.volume_normalization;
-                let play = async move {
+                let play = async move |busy: &mut mpsc::Sender<playback::Message>| {
                     let stream = tidal
                         .resolve_stream(track_id, quality)
                         .await
@@ -416,12 +425,27 @@ impl App {
                         let gain = syzygy_audio::compute_norm_gain(replay_gain, peak);
                         player.set_normalization_gain(gain).await.map_err(audio)?;
                     }
-                    player.play_url(stream.uri, from).await.map_err(audio)
+                    // Another program, or PipeWire letting go of it, can
+                    // hold the device for a moment: keep trying a while.
+                    let mut tries = 0;
+                    loop {
+                        match player.play_url(stream.uri.clone(), from).await {
+                            Err(syzygy_audio::Error::DeviceBusy) if tries < DEVICE_TRIES => {
+                                if tries == 0 {
+                                    let _ = busy.send(playback::Message::DeviceBusy(token)).await;
+                                }
+                                tries += 1;
+                                tokio::time::sleep(DEVICE_RETRY).await;
+                            }
+                            result => return result.map_err(audio),
+                        }
+                    }
                 };
-                let (task, handle) = Task::perform(play, move |result| {
-                    Message::Playback(playback::Message::Played(token, result))
-                })
-                .abortable();
+                let messages = iced::stream::channel(1, async move |mut output| {
+                    let result = play(&mut output).await;
+                    let _ = output.send(playback::Message::Played(token, result)).await;
+                });
+                let (task, handle) = Task::run(messages, Message::Playback).abortable();
                 self.play_task = Some(handle.abort_on_drop());
                 task
             }
@@ -456,6 +480,12 @@ impl App {
                 self.fill_task = None;
                 Task::none()
             }
+            playback::Effect::ResumeAfter { token, delay } => {
+                Task::perform(tokio::time::sleep(delay), move |()| {
+                    Message::Playback(playback::Message::Resume(token))
+                })
+            }
+            playback::Effect::Notify(notice) => self.in_shell(|shell, _, _| shell.notify(notice)),
         }
     }
 
@@ -465,8 +495,9 @@ impl App {
                 self.update_playback(playback::Message::TrackFinished)
             }
             syzygy_audio::Event::Failed { kind, message } => {
-                log::warn!("Audio failed ({kind:?}): {}", message.unwrap_or_default());
-                self.update_playback(playback::Message::EngineFailed)
+                let message = message.unwrap_or_else(|| format!("{kind:?}"));
+                log::warn!("Audio failed ({kind:?}): {message}");
+                self.update_playback(playback::Message::EngineFailed(message))
             }
             // Nothing is armed for a gapless advance yet.
             syzygy_audio::Event::TrackAdvanced { track_id, .. } => {
@@ -497,10 +528,11 @@ impl App {
         self.save_settings()
     }
 
-    /// Remember Shuffle and Repeat mode.
+    /// Remember Shuffle, Repeat mode and whether explicit tracks may play.
     fn save_modes(&mut self) -> Task<Message> {
         self.settings.shuffle = self.playback.shuffle();
         self.settings.repeat = self.playback.repeat();
+        self.settings.allow_explicit = self.playback.allow_explicit();
         self.save_settings()
     }
 
@@ -658,6 +690,10 @@ impl App {
 
 /// How often the position is read while playing.
 const TICK: Duration = Duration::from_millis(250);
+/// How many more times a play tries a busy audio device, and how long it
+/// waits before each: 5 s in all, as sone.
+const DEVICE_TRIES: u32 = 10;
+const DEVICE_RETRY: Duration = Duration::from_millis(500);
 
 /// A call on the engine whose only answer worth having is a failure, which
 /// is logged.
@@ -694,7 +730,7 @@ fn shell_events(event: Event, status: event::Status, _window: window::Id) -> Opt
         Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(key::Named::Escape),
             ..
-        }) => search(shell::search::Message::Escape),
+        }) => Some(Message::Shell(shell::Message::Escape)),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Back)) => Some(Message::Back),
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Forward)) => Some(Message::Forward),
         Event::Keyboard(keyboard::Event::KeyPressed {
