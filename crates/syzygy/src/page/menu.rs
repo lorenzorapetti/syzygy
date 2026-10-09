@@ -288,7 +288,7 @@ fn panel(_theme: &Theme) -> container::Style {
 }
 
 /// Its content, with a left click on it taken as a right click: a context
-/// menu that opens like a button.
+/// menu that opens like a button, when the click is released.
 struct LeftClick<'a> {
     content: Element<'a, Link>,
 }
@@ -361,11 +361,15 @@ impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
         shell: &mut Shell<'_, Link>,
         viewport: &Rectangle,
     ) {
-        let left = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
-        let event = if *event == left && cursor.is_over(layout.bounds()) {
-            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
-        } else {
-            event
+        // The menu opens as the click ends, not as it starts: an open menu
+        // closes on a left button's release, which would be this click's.
+        let over = cursor.is_over(layout.bounds());
+        let event = match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if over => return,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if over => {
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+            }
+            _ => event,
         };
         self.content.as_widget_mut().update(
             &mut tree.children[0],
