@@ -11,3 +11,7 @@
 - [ ] Play, pause, stop, next, previous, seek, set position, volume, Shuffle and loop go through the same playback messages as the UI
 - [ ] `Raise` maps to `window::gain_focus`. `Quit` maps to `Message::Quit`
 - [ ] Seam 1 tests cover MPRIS diffs going out only on change
+
+## Comments
+
+Ticket 41 adds the desktop file `com.lorenzorapetti.syzygy.desktop`. Set the MPRIS `DesktopEntry` property to `com.lorenzorapetti.syzygy`, passed in by the binary like the bus name and `Identity`. If 41 isn't done yet, add the `DESKTOP_ENTRY` constant to `identity.rs` here.
