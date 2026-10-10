@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Syzygy
+GenericName=Music Player
+Comment=A desktop TIDAL client
+Exec=syzygy
+Icon=com.lorenzorapetti.syzygy
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=TIDAL;Music;Streaming;

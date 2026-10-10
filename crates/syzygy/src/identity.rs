@@ -1,6 +1,7 @@
 //! Who syzygy is on this machine. Engine crates hardcode none of this; the
 //! binary passes it in, so syzygy never touches sone's data.
 
+use iced::window;
 use std::path::PathBuf;
 use syzygy_store::{KeySource, KeyringEntry};
 
@@ -12,8 +13,18 @@ pub const APP_ID: &str = "com.lorenzorapetti.syzygy";
 pub const DESKTOP_ENTRY: &str = APP_ID;
 /// MPRIS's bus name is `org.mpris.MediaPlayer2.` and this.
 pub const MPRIS_BUS_NAME: &str = "syzygy";
+/// The icon's 256 px render, the same one installed to the icon theme.
+const WINDOW_ICON_PNG: &[u8] =
+    include_bytes!("../assets/icons/256x256/com.lorenzorapetti.syzygy.png");
 const KEYRING_SERVICE: &str = "syzygy";
 const KEYRING_ENTRY: &str = "master-key";
+
+/// The window's icon. A bad one is logged, and the window opens without it.
+pub fn window_icon() -> Option<window::Icon> {
+    window::icon::from_file_data(WINDOW_ICON_PNG, Some(image::ImageFormat::Png))
+        .inspect_err(|e| log::warn!("Could not load the window icon: {e}"))
+        .ok()
+}
 
 /// Where syzygy keeps its files.
 #[derive(Debug, Clone)]
@@ -73,5 +84,15 @@ impl Paths {
             }),
             key_file: self.config_dir.join("syzygy.key"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_icon_decodes() {
+        assert!(window_icon().is_some());
     }
 }

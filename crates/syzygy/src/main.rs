@@ -19,7 +19,7 @@ mod style;
 
 use iced::window;
 
-use identity::{APP_ID, Paths};
+use identity::{APP_ID, Paths, window_icon};
 
 fn main() -> iced::Result {
     // Before anything starts a thread.
@@ -37,6 +37,7 @@ fn main() -> iced::Result {
         .window(window::Settings {
             // Closing goes through `Message::Quit`, which saves before exiting.
             exit_on_close_request: false,
+            icon: window_icon(),
             platform_specific: window::settings::PlatformSpecific {
                 application_id: APP_ID.to_string(),
                 ..Default::default()
