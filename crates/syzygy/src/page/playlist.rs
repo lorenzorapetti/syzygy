@@ -72,6 +72,8 @@ pub enum Message {
     },
     /// Show the next recommendations.
     MoreRecommendations,
+    /// Add a recommended track to this playlist, an Own playlist.
+    AddRecommendation(Track),
     Link(Link),
     /// Play the loaded tracks, in the order shown, from a track by its
     /// place in the list or all of them.
@@ -154,6 +156,17 @@ impl State {
                 Some(offset) => Action::Load(recommendations(&self.uuid, offset)),
                 None => Action::None,
             },
+            Message::AddRecommendation(track) => {
+                let Some(playlist) = self.playlist.loaded().filter(|_| self.is_own()) else {
+                    return Action::None;
+                };
+                // It's no longer recommended, unless it doesn't go in.
+                self.recommendations.take(track.id);
+                Action::Library(crate::library::Message::AddRecommendation(
+                    playlist.clone(),
+                    track,
+                ))
+            }
             Message::Link(link) => link.follow(),
             Message::Play(start) => {
                 let tracks: Vec<Track> = self
@@ -248,6 +261,14 @@ impl State {
             }
         }
         self.refilter(library);
+    }
+
+    /// A track recommended for the playlist with this uuid didn't go in:
+    /// it's recommended again.
+    pub fn not_added(&mut self, uuid: &str, track: Track) {
+        if uuid == self.uuid {
+            self.recommendations.put_back(track);
+        }
     }
 
     fn load_rest_if_filtering(&mut self) -> Action {
@@ -485,11 +506,24 @@ impl State {
             album: true,
             date_added: false,
         };
+        // TIDAL only lets the user add to their Own playlists. sone
+        // offers it on every playlist.
+        let own = self.is_own();
         let rows = shown.iter().enumerate().map(|(i, track)| {
             let liked = library.liked(track);
-            track_list::track(images, i + 1, track, columns, allow_explicit, liked)
-                .map(Message::Link)
+            let row = track_list::track(images, i + 1, track, columns, allow_explicit, liked)
+                .map(Message::Link);
+            if own {
+                track_list::with_add(row, Message::AddRecommendation(track.clone()))
+            } else {
+                row
+            }
         });
+        let header = if own {
+            track_list::header_with_add(columns)
+        } else {
+            track_list::header(columns)
+        };
         let refresh = button(
             row![
                 icon(Icon::RefreshCw, 16.0, style::TEXT_PRIMARY),
@@ -503,7 +537,7 @@ impl State {
         .on_press_maybe((!self.recommendations.loading).then_some(Message::MoreRecommendations));
         let section = column![
             text("Recommended Tracks").size(18),
-            column![track_list::header(columns)].extend(rows),
+            column![header].extend(rows),
             container(refresh).align_right(Length::Fill),
         ]
         .spacing(16);
@@ -558,6 +592,27 @@ impl Recommendations {
         let start = (self.page * RECOMMENDATIONS_SHOWN).min(self.batch.len());
         let end = (start + RECOMMENDATIONS_SHOWN).min(self.batch.len());
         &self.batch[start..end]
+    }
+
+    /// Take the track with this id out: the ones after it move up.
+    fn take(&mut self, id: u64) {
+        self.batch.retain(|track| track.id != id);
+        // The last of the last ten went: the ten before show.
+        if self.page > 0 && self.page * RECOMMENDATIONS_SHOWN >= self.batch.len() {
+            self.page -= 1;
+        }
+    }
+
+    /// Recommend a track taken out again, after the others, unless it's
+    /// there already.
+    fn put_back(&mut self, track: Track) {
+        if !self
+            .batch
+            .iter()
+            .any(|recommended| recommended.id == track.id)
+        {
+            self.batch.push(track);
+        }
     }
 
     /// Show the next ten. The offset to read from when that needs a new
@@ -668,6 +723,41 @@ mod tests {
         assert_eq!(recommendations.arrived(50, Ok(Vec::new())), Some(0));
         // What was showing stays until the start arrives.
         assert_eq!(recommendations.shown().len(), 10);
+    }
+
+    #[test]
+    fn a_taken_recommendation_makes_way_for_the_next() {
+        let mut recommendations = Recommendations::default();
+        recommendations.arrived(0, Ok(batch(15)));
+
+        recommendations.take(3);
+
+        let shown: Vec<u64> = recommendations.shown().iter().map(|t| t.id).collect();
+        assert_eq!(shown, vec![0, 1, 2, 4, 5, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn taking_the_last_shown_shows_the_ten_before() {
+        let mut recommendations = Recommendations::default();
+        recommendations.arrived(0, Ok(batch(11)));
+        recommendations.next();
+
+        recommendations.take(10);
+
+        assert_eq!(recommendations.shown().len(), 10);
+    }
+
+    #[test]
+    fn a_recommendation_put_back_goes_last_and_only_once() {
+        let mut recommendations = Recommendations::default();
+        recommendations.arrived(0, Ok(batch(5)));
+        recommendations.take(2);
+
+        recommendations.put_back(track(2, "T", "A", "B"));
+        recommendations.put_back(track(2, "T", "A", "B"));
+
+        let shown: Vec<u64> = recommendations.shown().iter().map(|t| t.id).collect();
+        assert_eq!(shown, vec![0, 1, 3, 4, 2]);
     }
 
     #[test]

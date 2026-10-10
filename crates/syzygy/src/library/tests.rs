@@ -1052,6 +1052,109 @@ fn a_new_playlists_one_track_refused_as_a_dupe_still_says_the_track_didnt_go_in(
     assert!(informed(&effects).is_empty());
 }
 
+// Adding a recommendation to the playlist on screen.
+
+fn not_added(effects: &[Effect]) -> Vec<(String, u64)> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::NotAdded { uuid, track } => Some((uuid.clone(), track.id)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_recommendation_goes_into_the_playlist_on_screen_as_one_track() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let server = playlists(std::slice::from_ref(&playlist));
+
+    let effects = library.update(Message::AddRecommendation(playlist, track(5)));
+
+    assert_eq!(offered(&library, &server), vec![("Mix".to_string(), 11)]);
+    let (id, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::AddTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            track: 5,
+        }
+    );
+
+    let effects = library.update(Message::Done(id, Ok(())));
+    assert_eq!(
+        informed(&effects),
+        vec!["Added \u{201c}Track 5\u{201d} to playlist"]
+    );
+    assert!(effects.contains(&Effect::Refresh(vec![
+        "folders".to_string(),
+        "playlist:p-1".to_string(),
+    ])));
+    assert!(not_added(&effects).is_empty());
+}
+
+#[test]
+fn a_refused_recommendation_is_dropped_and_goes_back() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let effects = library.update(Message::AddRecommendation(playlist.clone(), track(5)));
+    let (id, _) = mutation(&effects);
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(toasts(&effects), vec!["Failed to add track"]);
+    assert_eq!(not_added(&effects), vec![("p-1".to_string(), 5)]);
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 10)]
+    );
+}
+
+#[test]
+fn a_recommendation_already_in_the_playlist_stays_out_of_the_recommendations() {
+    let mut library = library(&[], &[]);
+    let effects = library.update(Message::AddRecommendation(own("p-1", "Mix"), track(5)));
+    let (id, _) = mutation(&effects);
+
+    let effects = library.update(Message::Done(id, Err(duplicate())));
+
+    assert_eq!(informed(&effects), vec!["Track already in this playlist"]);
+    assert!(toasts(&effects).is_empty());
+    assert!(not_added(&effects).is_empty());
+}
+
+#[test]
+fn recommendations_queued_behind_a_refused_add_go_back_too() {
+    let mut library = library(&[], &[]);
+    let playlist = own("p-1", "Mix");
+    let effects = library.update(Message::AddRecommendation(playlist.clone(), track(5)));
+    let (id, _) = mutation(&effects);
+    library.update(Message::AddRecommendation(playlist.clone(), track(6)));
+    library.update(Message::AddTracks(playlist, tracks(&[7])));
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(toasts(&effects), vec!["Failed to add track"]);
+    assert_eq!(
+        not_added(&effects),
+        vec![("p-1".to_string(), 5), ("p-1".to_string(), 6)]
+    );
+}
+
+#[test]
+fn recommendations_go_only_into_own_playlists_and_stay_recommended_otherwise() {
+    let mut library = library(&[], &[]);
+    let theirs = PlaylistFields::new().playlist("p-1".to_string(), USER + 1);
+
+    let effects = library.update(Message::AddRecommendation(theirs, track(5)));
+
+    assert_eq!(mutations(&effects), 0);
+    // It's recommended again.
+    assert_eq!(not_added(&effects), vec![("p-1".to_string(), 5)]);
+}
+
 // Removing tracks from Own playlists.
 
 /// A track as an Own playlist lists it: when it was added tells apart two

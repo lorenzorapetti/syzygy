@@ -873,6 +873,10 @@ impl Shell {
                         .removed(&uuid, &track, index, &self.library);
                     Task::none()
                 }
+                library::Effect::NotAdded { uuid, track } => {
+                    self.current.page.not_added(&uuid, track);
+                    Task::none()
+                }
                 library::Effect::SourceDeleted(source) => Task::done(app::Message::Playback(
                     playback::Message::SourceDeleted(source),
                 )),

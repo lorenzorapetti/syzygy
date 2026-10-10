@@ -258,6 +258,21 @@ fn same_entry(a: &Track, b: &Track) -> bool {
     a.id == b.id && a.date_added == b.date_added
 }
 
+/// A recommended track that didn't go in, as the effect that recommends
+/// it again.
+fn not_added(pending: &Pending) -> Option<Effect> {
+    match &pending.edit {
+        Edit::Add(adding) if adding.origin == Origin::Recommended => {
+            let track = adding.single()?;
+            Some(Effect::NotAdded {
+                uuid: adding.playlist().uuid.clone(),
+                track: track.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Where `track` is among `rows`: at `index` when it's there, or else the
 /// first row that's the same entry.
 pub fn locate(rows: &[&Track], track: &Track, index: Option<usize>) -> Option<usize> {
@@ -272,8 +287,19 @@ pub struct Adding {
     /// The playlist as an [`Item::Playlist`], counting the tracks.
     item: Item,
     tracks: Vec<Track>,
-    /// The playlist was made for them, just before.
-    new_playlist: bool,
+    origin: Origin,
+}
+
+/// Where tracks going into a playlist were added from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// "Add to playlist".
+    Picked,
+    /// "Create new" in "Add to playlist": the playlist was made for them,
+    /// just before.
+    NewPlaylist,
+    /// The playlist's own Page, from its recommendations.
+    Recommended,
 }
 
 impl Adding {
@@ -420,15 +446,16 @@ impl Edit {
             }
             Edit::Add(adding) => {
                 let playlist = short(&adding.playlist().title);
-                match (adding.new_playlist, adding.single()) {
-                    (true, _) => {
+                match (adding.origin, adding.single()) {
+                    (Origin::NewPlaylist, _) => {
                         format!("Created \u{201c}{playlist}\u{201d}, but couldn't add the tracks")
                     }
-                    (false, Some(track)) => format!(
+                    (Origin::Recommended, _) => "Failed to add track".to_string(),
+                    (Origin::Picked, Some(track)) => format!(
                         "Couldn't add \u{201c}{}\u{201d} to \u{201c}{playlist}\u{201d}",
                         short(&track.title)
                     ),
-                    (false, None) => {
+                    (Origin::Picked, None) => {
                         format!("Couldn't add the tracks to \u{201c}{playlist}\u{201d}")
                     }
                 }
@@ -643,6 +670,9 @@ pub enum Message {
     DeletePlaylist(Playlist),
     /// Add tracks to an Own playlist.
     AddTracks(Playlist, Vec<Track>),
+    /// Add one of the tracks recommended for an Own playlist to it, from
+    /// its Page. If it doesn't go in, it's recommended again.
+    AddRecommendation(Playlist, Track),
     /// Take a track out of an Own playlist.
     RemoveTrack(Removal),
     /// An edit's mutation came back.
@@ -705,6 +735,9 @@ pub enum Effect {
         track: Track,
         index: usize,
     },
+    /// A recommended track didn't go into the playlist with this uuid: its
+    /// Page recommends it again.
+    NotAdded { uuid: String, track: Track },
     /// TIDAL deleted a playlist: playback stops reading it, should it be
     /// the Playback source.
     SourceDeleted(SourceRef),
@@ -900,7 +933,14 @@ impl Library {
                 if !self.editable(&playlist) || tracks.is_empty() {
                     return vec![];
                 }
-                self.add(playlist, tracks, false)
+                self.add(playlist, tracks, Origin::Picked)
+            }
+            Message::AddRecommendation(playlist, track) => {
+                if !self.editable(&playlist) {
+                    let uuid = playlist.uuid;
+                    return vec![Effect::NotAdded { uuid, track }];
+                }
+                self.add(playlist, vec![track], Origin::Recommended)
             }
             Message::RemoveTrack(Removal {
                 playlist,
@@ -942,7 +982,9 @@ impl Library {
                 let mut effects = self.landed(id, None);
                 match then {
                     Then::Add(tracks) if tracks.is_empty() => {}
-                    Then::Add(tracks) => effects.extend(self.add(made, tracks, true)),
+                    Then::Add(tracks) => {
+                        effects.extend(self.add(made, tracks, Origin::NewPlaylist));
+                    }
                     Then::Move(folder) => {
                         let placed = Placed {
                             playlist: made,
@@ -1037,7 +1079,7 @@ impl Library {
     }
 
     /// Put tracks in a playlist: it counts them at once.
-    fn add(&mut self, playlist: Playlist, tracks: Vec<Track>, new_playlist: bool) -> Vec<Effect> {
+    fn add(&mut self, playlist: Playlist, tracks: Vec<Track>, origin: Origin) -> Vec<Effect> {
         let shown = self.playlist(&playlist);
         let counted = Playlist {
             tracks: shown.tracks + tracks.len() as u32,
@@ -1047,7 +1089,7 @@ impl Library {
         let mut effects = self.push(Edit::Add(Adding {
             item: Item::Playlist(counted),
             tracks,
-            new_playlist,
+            origin,
         }));
         effects.push(Effect::Recent(uuid));
         effects
@@ -1210,28 +1252,39 @@ impl Library {
     /// TIDAL refused an edit: it's dropped, with the edits waiting behind
     /// it, and the user is told once.
     fn failed(&mut self, id: EditId, error: &syzygy_catalog::Error) -> Vec<Effect> {
-        let Some(failed) = self.drop_edit(id) else {
+        let Some((failed, behind)) = self.drop_edit(id) else {
             return vec![];
         };
         log::warn!("TIDAL refused {:?}: {error}", failed.edit);
         // A playlist just made has no tracks to clash with.
         let duplicate = matches!(&failed.edit, Edit::Add(adding)
-            if adding.single().is_some() && !adding.new_playlist)
+            if adding.single().is_some() && adding.origin != Origin::NewPlaylist)
             && error.is_duplicate();
-        if duplicate {
-            return vec![Effect::Inform("Track already in this playlist".to_string())];
-        }
-        vec![Effect::Toast(failed.edit.failure())]
+        let told = if duplicate {
+            Effect::Inform("Track already in this playlist".to_string())
+        } else {
+            Effect::Toast(failed.edit.failure())
+        };
+        // A duplicate is in the playlist, so it isn't recommended again.
+        let goes_back = (!duplicate).then_some(failed);
+        let mut effects = vec![told];
+        effects.extend(goes_back.iter().chain(&behind).filter_map(not_added));
+        effects
     }
 
-    /// Take an edit out, with the edits waiting behind it.
-    fn drop_edit(&mut self, id: EditId) -> Option<Pending> {
+    /// Take an edit out, with the edits waiting behind it, which are
+    /// returned after it.
+    fn drop_edit(&mut self, id: EditId) -> Option<(Pending, Vec<Pending>)> {
         let index = self.pending.iter().position(|pending| pending.id == id)?;
         let dropped = self.pending.remove(index);
         let target = dropped.edit.target();
-        self.pending
-            .retain(|pending| pending.edit.target() != target || pending.state != Progress::Queued);
-        Some(dropped)
+        let (behind, kept) = std::mem::take(&mut self.pending)
+            .into_iter()
+            .partition(|pending| {
+                pending.edit.target() == target && pending.state == Progress::Queued
+            });
+        self.pending = kept;
+        Some((dropped, behind))
     }
 
     /// A sorted removal's playlist came in its own order: the removal goes
@@ -1266,8 +1319,10 @@ impl Library {
             ),
         };
         log::warn!("Not removing {:?}: {refusal}", removing.track);
-        self.drop_edit(id);
-        vec![Effect::Toast(refusal)]
+        let behind = self.drop_edit(id).map(|(_, behind)| behind);
+        let mut effects = vec![Effect::Toast(refusal)];
+        effects.extend(behind.iter().flatten().filter_map(not_added));
+        effects
     }
 
     /// Run the first edit waiting on `target`.

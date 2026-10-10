@@ -526,6 +526,14 @@ impl Page {
         }
     }
 
+    /// A track recommended for the playlist didn't go in: a Page showing
+    /// the playlist recommends it again.
+    pub fn not_added(&mut self, uuid: &str, track: Track) {
+        if let Page::Playlist(state) = self {
+            state.not_added(uuid, track);
+        }
+    }
+
     /// An edit landed: what's read under `tags` is stale, so a Page that
     /// lists it reads it again.
     pub fn refresh(&mut self, tags: &[String]) -> Action {

@@ -26,6 +26,9 @@ const DATE_WIDTH: f32 = 110.0;
 const TIME_WIDTH: f32 = 56.0;
 /// The heart before the time.
 const HEART_WIDTH: f32 = 32.0;
+/// The button after the time that adds a recommended track to the
+/// playlist on screen.
+const ADD_WIDTH: f32 = 32.0;
 
 /// What a list shows besides each track's title and artists.
 #[derive(Debug, Clone, Copy)]
@@ -211,6 +214,29 @@ pub fn own<'a>(
         liked,
     );
     menu::with_menu(row, move || menu::own_track(track, liked, &removal))
+}
+
+/// A recommended track's `row`, ended by a button that sends `add`, which
+/// adds the track to the playlist on screen. Its header is
+/// [`header_with_add`].
+pub fn with_add<'a, Message: Clone + 'a>(
+    row: Element<'a, Message>,
+    add: Message,
+) -> Element<'a, Message> {
+    let add = button(container(icon(Icon::ListPlus, 18.0, style::TEXT_MUTED)).center(ADD_WIDTH))
+        .padding(0)
+        .style(style::icon_button)
+        .on_press(add);
+    row![container(row).width(Length::Fill), add]
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// The column titles over rows [`with_add`] ends.
+pub fn header_with_add<'a, Message: Clone + 'a>(columns: Columns) -> Element<'a, Message> {
+    row![container(header(columns)).width(Length::Fill)]
+        .push(space().width(ADD_WIDTH))
+        .into()
 }
 
 /// [`track`], with its number marked.
