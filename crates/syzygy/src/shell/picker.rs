@@ -142,10 +142,7 @@ impl Picker {
             .on_press(Message::Close)
             .on_right_press(Message::Close);
         let at = self.at;
-        let popover = responsive(move |window| {
-            let (x, y) = place(at, window);
-            pin(opaque(self.panel(library, recent))).x(x).y(y).into()
-        });
+        let popover = responsive(move |window| beside(at, window, self.panel(library, recent)));
         stack![outside, popover].into()
     }
 
@@ -224,19 +221,50 @@ impl Picker {
     }
 }
 
+/// Where a popover's edge goes vertically: its top this far from the
+/// window's, or its bottom this far from the window's.
+#[derive(Debug, PartialEq)]
+pub(super) enum Edge {
+    Top(f32),
+    Bottom(f32),
+}
+
 /// Where the popover goes: to the right of `at`, or to its left where the
-/// window ends, with its top by `at`'s and kept in the window.
-pub(super) fn place(at: Rectangle, window: Size) -> (f32, f32) {
+/// window ends. Its top is by `at`'s when the tallest it gets fits below
+/// that, or else its bottom is by `at`'s, so a short one isn't left far
+/// above what opened it.
+pub(super) fn place(at: Rectangle, window: Size) -> (f32, Edge) {
     let right = at.x + at.width + GAP;
     let x = if right + WIDTH <= window.width - MARGIN {
         right
     } else {
         (at.x - GAP - WIDTH).max(MARGIN)
     };
-    let y = (at.y - MARGIN)
-        .min(window.height - HEIGHT - MARGIN)
-        .max(MARGIN);
-    (x, y)
+    let top = (at.y - MARGIN).max(MARGIN);
+    let edge = if top + HEIGHT <= window.height - MARGIN {
+        Edge::Top(top)
+    } else {
+        let bottom = at.y + at.height + MARGIN;
+        Edge::Bottom((window.height - bottom).max(MARGIN))
+    };
+    (x, edge)
+}
+
+/// `panel` placed beside `at` in a `window`, taking the clicks on it.
+pub(super) fn beside<'a, M: 'a>(
+    at: Rectangle,
+    window: Size,
+    panel: Element<'a, M>,
+) -> Element<'a, M> {
+    let panel = opaque(panel);
+    match place(at, window) {
+        (x, Edge::Top(y)) => pin(panel).x(x).y(y).into(),
+        (x, Edge::Bottom(y)) => container(panel)
+            .padding(iced::Padding::ZERO.left(x).bottom(y))
+            .width(Length::Fill)
+            .align_bottom(Length::Fill)
+            .into(),
+    }
 }
 
 /// The recent playlists, in the order they were last added to and at most
@@ -349,14 +377,15 @@ mod tests {
     }
 
     #[test]
-    fn the_popover_opens_to_the_right_unless_the_window_ends_there() {
+    fn the_popover_opens_right_and_down_unless_the_window_ends_there() {
         let window = Size::new(1200.0, 800.0);
         let item = Rectangle::new(iced::Point::new(100.0, 200.0), Size::new(240.0, 40.0));
-        assert_eq!(place(item, window), (344.0, 192.0));
+        assert_eq!(place(item, window), (344.0, Edge::Top(192.0)));
 
         let late = Rectangle::new(iced::Point::new(900.0, 700.0), Size::new(240.0, 40.0));
-        let (x, y) = place(late, window);
-        assert_eq!(x, 900.0 - GAP - WIDTH);
-        assert_eq!(y, 800.0 - HEIGHT - MARGIN);
+        assert_eq!(
+            place(late, window),
+            (900.0 - GAP - WIDTH, Edge::Bottom(800.0 - 740.0 - MARGIN))
+        );
     }
 }

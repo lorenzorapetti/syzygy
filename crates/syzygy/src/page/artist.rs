@@ -9,7 +9,7 @@ use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Artist, Read};
 
 use super::cards::{self, Rows};
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Hover, Mark};
 use super::{
     Action, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, header_actions, hero, link,
     play_buttons, top_tracks,
@@ -33,6 +33,8 @@ pub struct State {
     preview: Option<Preview>,
     artist: Remote<Artist>,
     cards: Rows,
+    /// The top track the pointer is over, by its place.
+    hover: Hover,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,10 @@ pub enum Message {
     /// Play the top tracks, from one by its place or all of them.
     Play(Start),
     TogglePlay,
+    /// The pointer came over the row with this key.
+    Hovered(usize),
+    /// The pointer left the row with this key.
+    Left(usize),
     Retry,
 }
 
@@ -53,6 +59,7 @@ impl State {
             preview,
             artist: Remote::Loading,
             cards: Rows::default(),
+            hover: Hover::default(),
         };
         (state, Action::Load(load(id)))
     }
@@ -90,11 +97,32 @@ impl State {
                 None => Action::None,
             },
             Message::TogglePlay => Action::TogglePlay,
+            Message::Hovered(key) => {
+                self.hover.entered(key);
+                Action::None
+            }
+            Message::Left(key) => {
+                self.hover.left(key);
+                Action::None
+            }
             Message::Retry => {
                 self.artist = Remote::Loading;
                 Action::Load(load(self.id))
             }
         }
+    }
+
+    /// Whether the top tracks shown here have the track.
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.artist
+            .loaded()
+            .and_then(top_tracks)
+            .is_some_and(|(_, tracks)| {
+                tracks
+                    .iter()
+                    .take(TRACKS_SHOWN)
+                    .any(|track| track.id == track_id)
+            })
     }
 
     pub fn view<'a>(
@@ -182,15 +210,28 @@ impl State {
                     .enumerate()
                     .map(|(i, track)| {
                         let liked = library.liked(track);
-                        let row =
-                            track_list::track(images, i + 1, track, COLUMNS, allow_explicit, liked)
-                                .map(Message::Link);
+                        let mark = match playable {
+                            Some(now_playing) => Mark::of(track, now_playing, self.hover.over(i)),
+                            None => Mark::None,
+                        };
+                        let row = track_list::marked(
+                            images,
+                            i + 1,
+                            track,
+                            COLUMNS,
+                            allow_explicit,
+                            mark,
+                            liked,
+                        )
+                        .map(Message::Link);
                         match playable {
-                            Some(now_playing) => track_list::playable_track(
+                            Some(_) => track_list::playable_track(
                                 row,
-                                track,
-                                now_playing,
+                                mark,
                                 Message::Play(Start::Track(i)),
+                                i,
+                                Message::Hovered,
+                                Message::Left,
                             ),
                             None => row,
                         }

@@ -8,7 +8,7 @@ use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
 
 use super::paged::List;
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Hover, Mark};
 use super::{
     Action, Context, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, Viewport, count,
     duration, header_actions, hero, menu, play_buttons,
@@ -44,6 +44,8 @@ pub struct State {
     /// The places in `rows` the filter lets through.
     shown: Vec<usize>,
     recommendations: Recommendations,
+    /// The track the pointer is over, by its place in `rows`.
+    hover: Hover,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +81,10 @@ pub enum Message {
     /// place in the list or all of them.
     Play(Start),
     TogglePlay,
+    /// The pointer came over the row with this key.
+    Hovered(usize),
+    /// The pointer left the row with this key.
+    Left(usize),
     Retry,
 }
 
@@ -101,6 +107,7 @@ impl State {
             rows: Vec::new(),
             shown: Vec::new(),
             recommendations: Recommendations::default(),
+            hover: Hover::default(),
         };
         (state, action)
     }
@@ -194,6 +201,14 @@ impl State {
                 Action::Play(request)
             }
             Message::TogglePlay => Action::TogglePlay,
+            Message::Hovered(key) => {
+                self.hover.entered(key);
+                Action::None
+            }
+            Message::Left(key) => {
+                self.hover.left(key);
+                Action::None
+            }
             Message::Retry => {
                 self.reset_tracks();
                 let tracks = Action::Load(tracks(&self.uuid, self.sort));
@@ -310,6 +325,11 @@ impl State {
             .is_some_and(|playlist| playlist.is_own(self.user_id))
     }
 
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        let tracks = self.tracks.items();
+        self.rows.iter().any(|&row| tracks[row].id == track_id)
+    }
+
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
@@ -384,6 +404,7 @@ impl State {
                 let track = &tracks[self.rows[place]];
                 let liked = library.liked(track);
                 let number = place + 1;
+                let mark = Mark::of(track, now_playing, self.hover.over(place));
                 let row = match own {
                     Some(playlist) => {
                         let removal = Removal {
@@ -400,19 +421,28 @@ impl State {
                             track,
                             columns,
                             allow_explicit,
+                            mark,
                             liked,
                             removal,
                         )
                     }
-                    None => {
-                        track_list::track(images, number, track, columns, allow_explicit, liked)
-                    }
+                    None => track_list::marked(
+                        images,
+                        number,
+                        track,
+                        columns,
+                        allow_explicit,
+                        mark,
+                        liked,
+                    ),
                 };
                 track_list::playable_track(
                     row.map(Message::Link),
-                    track,
-                    now_playing,
+                    mark,
                     Message::Play(Start::Track(place)),
+                    place,
+                    Message::Hovered,
+                    Message::Left,
                 )
             });
             let nothing_matches = (self.shown.is_empty() && !self.filter.trim().is_empty())

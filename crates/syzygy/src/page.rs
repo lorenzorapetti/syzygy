@@ -558,6 +558,11 @@ impl Page {
     pub fn shows_track(&self, track_id: u64) -> bool {
         match self {
             Page::Album(state) => state.shows_track(track_id),
+            Page::Artist(state) => state.shows_track(track_id),
+            Page::ArtistTracks(state) => state.shows_track(track_id),
+            Page::Mix(state) => state.shows_track(track_id),
+            Page::Playlist(state) => state.shows_track(track_id),
+            Page::Favorites(state) => state.shows_track(track_id),
             _ => false,
         }
     }

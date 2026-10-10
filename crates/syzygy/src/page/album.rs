@@ -1,13 +1,13 @@
 //! The Album Page: the album's tracks, by volume when it has more than one,
 //! then "More by …" and the other sections TIDAL sends with it.
 
-use iced::widget::{Column, column, mouse_area, row, text};
+use iced::widget::{Column, column, row, text};
 use iced::{Alignment, Element};
 use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Album, Read};
 
 use super::cards::{self, Rows};
-use super::track_list::{self, Columns, Mark};
+use super::track_list::{self, Columns, Hover, Mark};
 use super::{
     Action, Link, Load, NowPlaying, PADDING, PLAY_BUTTONS_HEIGHT, Preview, Remote, Viewport,
     album_tracks, artists, count, duration, header_actions, hero, play_buttons,
@@ -35,7 +35,7 @@ pub struct State {
     rows: Vec<Row>,
     cards: Rows,
     /// The track the pointer is over, by its place in the album.
-    hovered: Option<usize>,
+    hover: Hover,
 }
 
 enum Row {
@@ -67,7 +67,7 @@ impl State {
             album: Remote::Loading,
             rows: Vec::new(),
             cards: Rows::default(),
-            hovered: None,
+            hover: Hover::default(),
         };
         (state, Action::Load(Load::Album(id)))
     }
@@ -104,14 +104,11 @@ impl State {
             },
             Message::TogglePlay => Action::TogglePlay,
             Message::Hovered(index) => {
-                self.hovered = Some(index);
+                self.hover.entered(index);
                 Action::None
             }
-            // Only the row it left: the next row's arrival may come first.
             Message::Left(index) => {
-                if self.hovered == Some(index) {
-                    self.hovered = None;
-                }
+                self.hover.left(index);
                 Action::None
             }
             Message::Retry => {
@@ -215,16 +212,7 @@ impl State {
             Row::Volume(volume) => track_list::heading(format!("Volume {volume}")),
             Row::Track(index, number) => {
                 let track = &album.tracks[index];
-                let now = now_playing.filter(|now| now.track_id == track.id);
-                let hovered = self.hovered == Some(index);
-                let mark = match now {
-                    Some(NowPlaying {
-                        playing: Some(at), ..
-                    }) => Mark::Playing(at),
-                    Some(_) => Mark::Current { hovered },
-                    None if hovered => Mark::Hovered,
-                    None => Mark::None,
-                };
+                let mark = Mark::of(track, now_playing, self.hover.over(index));
                 let line = track_list::marked(
                     images,
                     number,
@@ -234,15 +222,14 @@ impl State {
                     mark,
                     library.liked(track),
                 );
-                let row = track_list::playable(
+                track_list::playable_track(
                     line.map(Message::Link),
+                    mark,
                     Message::Play(Start::Track(index)),
-                    now.is_some(),
-                );
-                mouse_area(row)
-                    .on_enter(Message::Hovered(index))
-                    .on_exit(Message::Left(index))
-                    .into()
+                    index,
+                    Message::Hovered,
+                    Message::Left,
+                )
             }
         }
     }

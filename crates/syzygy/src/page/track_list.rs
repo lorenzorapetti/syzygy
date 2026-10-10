@@ -2,7 +2,7 @@
 //! spacers standing in for the rest, so a list of thousands scrolls as
 //! smoothly as a short one. Covers are asked for only by rows that are built.
 
-use iced::widget::{Row, button, column, container, row, space, text};
+use iced::widget::{Row, button, column, container, mouse_area, row, space, text};
 use iced::{Alignment, Element, Length, Theme};
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -169,6 +169,47 @@ pub enum Mark {
     Playing(f32),
 }
 
+impl Mark {
+    /// `track`'s mark: whether it's the current track, playing or not, and
+    /// whether the pointer is over its row.
+    pub fn of(track: &Track, now_playing: Option<NowPlaying>, hovered: bool) -> Self {
+        match now_playing.filter(|now| now.track_id == track.id) {
+            Some(NowPlaying {
+                playing: Some(at), ..
+            }) => Mark::Playing(at),
+            Some(_) => Mark::Current { hovered },
+            None if hovered => Mark::Hovered,
+            None => Mark::None,
+        }
+    }
+
+    pub fn is_current(self) -> bool {
+        matches!(self, Mark::Current { .. } | Mark::Playing(_))
+    }
+}
+
+/// The row the pointer is over, by a key its Page picks, for the rows'
+/// marks.
+#[derive(Debug, Default)]
+pub struct Hover(Option<usize>);
+
+impl Hover {
+    pub fn entered(&mut self, key: usize) {
+        self.0 = Some(key);
+    }
+
+    /// Only the row it left: the next row's arrival may come first.
+    pub fn left(&mut self, key: usize) {
+        if self.0 == Some(key) {
+            self.0 = None;
+        }
+    }
+
+    pub fn over(&self, key: usize) -> bool {
+        self.0 == Some(key)
+    }
+}
+
 /// One track: its number, the cover if the list shows covers, the title
 /// over its artists, the album if shown, its heart and how long it is.
 /// Right-clicked, it opens the track's menu. Dimmed if it can't play: TIDAL
@@ -193,26 +234,20 @@ pub fn track<'a>(
     )
 }
 
-/// [`track`] in one of the user's Own playlists, whose menu can take it
+/// [`marked`] in one of the user's Own playlists, whose menu can take it
 /// out.
+#[allow(clippy::too_many_arguments)]
 pub fn own<'a>(
     images: &'a Images,
     number: usize,
     track: &'a Track,
     columns: Columns,
     allow_explicit: bool,
+    mark: Mark,
     liked: Option<bool>,
     removal: Removal,
 ) -> Element<'a, Link> {
-    let row = line(
-        images,
-        number,
-        track,
-        columns,
-        allow_explicit,
-        Mark::None,
-        liked,
-    );
+    let row = line(images, number, track, columns, allow_explicit, mark, liked);
     menu::with_menu(row, move || menu::own_track(track, liked, &removal))
 }
 
@@ -263,7 +298,7 @@ fn line<'a>(
     mark: Mark,
     liked: Option<bool>,
 ) -> Element<'a, Link> {
-    let current = matches!(mark, Mark::Current { .. } | Mark::Playing(_));
+    let current = mark.is_current();
     let dimmed = !track.available || (track.explicit && !allow_explicit);
     let date_added = columns.date_added.then(|| {
         let date = track
@@ -423,15 +458,21 @@ pub fn playable<'a, Message: Clone + 'a>(
         .into()
 }
 
-/// [`playable`] for `track`'s row, lit while it's the current track.
+/// [`playable`] for a track's row, marked `mark` and lit while it's the
+/// current track. It sends `entered` and `left` with `key` as the pointer
+/// comes over it and leaves, for its Page's [`Hover`].
 pub fn playable_track<'a, Message: Clone + 'a>(
     row: Element<'a, Message>,
-    track: &Track,
-    now_playing: Option<NowPlaying>,
+    mark: Mark,
     on_play: Message,
+    key: usize,
+    entered: fn(usize) -> Message,
+    left: fn(usize) -> Message,
 ) -> Element<'a, Message> {
-    let current = now_playing.is_some_and(|now| now.track_id == track.id);
-    playable(row, on_play, current)
+    mouse_area(playable(row, on_play, mark.is_current()))
+        .on_enter(entered(key))
+        .on_exit(left(key))
+        .into()
 }
 
 /// A heading that takes a row's place, as "Volume 2".

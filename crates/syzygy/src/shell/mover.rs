@@ -6,14 +6,14 @@
 //! user's edits show in it as everywhere else.
 
 use iced::widget::{
-    Column, button, column, container, mouse_area, opaque, pin, responsive, row, scrollable, space,
+    Column, button, column, container, mouse_area, responsive, row, scrollable, space,
     stack, text,
 };
 use iced::{Alignment, Element, Length, Rectangle};
 use syzygy_catalog::library::{Folder, Item};
 use syzygy_catalog::{Kind, Read, Shelf};
 
-use super::picker::{heading, note, place};
+use super::picker::{beside, heading, note};
 use crate::icons::{Icon, icon};
 use crate::library::{self, Ask, Library, Listing, Placed};
 use crate::page::menu;
@@ -120,10 +120,7 @@ impl Mover {
             .on_press(Message::Close)
             .on_right_press(Message::Close);
         let at = self.at;
-        let popover = responsive(move |window| {
-            let (x, y) = place(at, window);
-            pin(opaque(self.panel(library, recent))).x(x).y(y).into()
-        });
+        let popover = responsive(move |window| beside(at, window, self.panel(library, recent)));
         stack![outside, popover].into()
     }
 
