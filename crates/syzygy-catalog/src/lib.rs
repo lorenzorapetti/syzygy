@@ -45,7 +45,7 @@ pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
 pub use lyrics::Lyrics;
 pub use mix::Mix;
 pub use paged::Paged;
-pub use playlist::{Direction, Playlist, PlaylistFields, TrackOrder, TrackSort};
+pub use playlist::{Added, Direction, Playlist, PlaylistFields, TrackOrder, TrackSort};
 pub use profile::Profile;
 pub use search::{Hit, SearchResults, Suggestion, Suggestions};
 pub use swr::Read;
@@ -541,6 +541,93 @@ impl Catalog {
         }
     }
 
+    /// Every Own playlist of `user_id`'s, wherever its Folder, last
+    /// updated first: what "Add to playlist" offers. The pages after the
+    /// first are read at once.
+    pub fn own_playlists(&self, user_id: u64) -> BoxStream<'static, Read<Vec<Playlist>>> {
+        let tidal = self.tidal.clone();
+        let entry = serde_entry(
+            format!("own-playlists:{user_id}"),
+            vec![favorites::user_tag(user_id)],
+        );
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(own_playlists(&tidal, user_id).await?)
+        })
+        .boxed()
+    }
+
+    /// Add one track to an Own playlist. TIDAL refuses it if the playlist
+    /// has it already ([`Error::is_duplicate`]). The playlist's reads and
+    /// the user's lists are stale after.
+    pub fn add_track(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        track_id: u64,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .add_track_to_playlist(&uuid, track_id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Add tracks to an Own playlist, skipping those it has already. What
+    /// was added is the playlist's count before and after, read from
+    /// TIDAL. The playlist's reads and the user's lists are stale after.
+    pub fn add_tracks(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        track_ids: Vec<u64>,
+    ) -> impl Future<Output = Result<Added, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let count = async || -> Result<u32, syzygy_tidal::Error> {
+                let details = tidal.get_playlist_details(&uuid).await?;
+                let playlist = playlist::from_details(&details).ok_or_else(|| {
+                    syzygy_tidal::Error::Parse(format!("Not a playlist: {details}"))
+                })?;
+                Ok(playlist.tracks)
+            };
+            let added = async {
+                let before = count().await?;
+                tidal.add_tracks_to_playlist(&uuid, &track_ids).await?;
+                let after = count().await?;
+                Ok::<_, syzygy_tidal::Error>(Added {
+                    asked: track_ids.len(),
+                    new: after.saturating_sub(before) as usize,
+                    tracks: after,
+                })
+            }
+            .await;
+            // The add may have landed even if the count after it failed.
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            added.map_err(|e| Arc::new(Error::from(e)))
+        }
+    }
+
+    /// Forget what's cached of a playlist and the user's lists, so they're
+    /// read again: TIDAL makes a playlist's cover a while after its tracks
+    /// change.
+    pub fn forget_playlist(
+        &self,
+        user_id: u64,
+        uuid: &str,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move { invalidate_playlist(&cache, user_id, &uuid).await }
+    }
+
     /// One track, to play on its own. Not cached: it's read once per play.
     pub fn track(
         &self,
@@ -754,6 +841,44 @@ async fn invalidate_playlist(cache: &DiskCache, user_id: u64, uuid: &str) {
     cache.invalidate_tag(&favorites::user_tag(user_id)).await;
 }
 
+/// How many Own playlists a read asks for at a time, as in sone.
+const OWN_PLAYLISTS_PAGE: u32 = 500;
+
+/// Every Own playlist, last updated first: the first page, then the rest
+/// at once from where TIDAL's pages end.
+async fn own_playlists(
+    tidal: &TidalClient,
+    user_id: u64,
+) -> Result<Vec<Playlist>, syzygy_tidal::Error> {
+    let page = async |offset| {
+        tidal
+            .get_all_playlists(user_id, offset, OWN_PLAYLISTS_PAGE, "DATE_UPDATED", "DESC")
+            .await
+    };
+    let first = page(0).await?;
+    let offsets = rest_offsets(first.items.len() as u32, first.total_number_of_items);
+    let rest = futures::future::try_join_all(offsets.into_iter().map(page)).await?;
+    Ok(std::iter::once(first)
+        .chain(rest)
+        .flat_map(|page| page.items)
+        .map(playlist::from_tidal)
+        .filter(|playlist| playlist.is_own(Some(user_id)))
+        .collect())
+}
+
+/// Where the pages after a first one of `size` items start, until
+/// `total`. The first page's size is the one TIDAL keeps to, which may be
+/// fewer than were asked for.
+fn rest_offsets(size: u32, total: u32) -> Vec<u32> {
+    if size == 0 {
+        return vec![];
+    }
+    (1..)
+        .map(|n| n * size)
+        .take_while(|&offset| offset < total)
+        .collect()
+}
+
 /// `PAGE_SIZE` of a playlist's tracks from `offset`, sorted by TIDAL.
 async fn playlist_page(
     tidal: &TidalClient,
@@ -881,5 +1006,18 @@ fn json_entry(key: String, tags: Vec<String>) -> Entry<Value> {
         tags,
         encode: |value| serde_json::to_vec(value).ok(),
         decode: |bytes| serde_json::from_slice(bytes).ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rest_of_the_own_playlists_is_read_in_pages_of_the_first_ones_size() {
+        assert_eq!(rest_offsets(500, 1200), vec![500, 1000]);
+        assert_eq!(rest_offsets(100, 300), vec![100, 200]);
+        assert_eq!(rest_offsets(500, 500), Vec::<u32>::new());
+        assert_eq!(rest_offsets(0, 300), Vec::<u32>::new());
     }
 }

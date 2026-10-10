@@ -9,7 +9,7 @@ use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme, f
 use super::drawer::Tab;
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
-use crate::library::{Favorite, Library};
+use crate::library::{Favorite, Library, Tracks};
 use crate::page::{self, Link};
 use crate::playback::{self, Playback, Repeat, Status};
 use crate::style;
@@ -235,7 +235,13 @@ fn now_playing<'a>(
         .style(style::bare_button)
         .on_press_maybe(route.map(Link::Open));
     let heart = page::menu::heart(Favorite::track(track), library.liked(track), 18.0);
-    let line = row![cover, container(details).clip(true), heart]
+    let add = button(container(icon(Icon::ListMusic, 18.0, style::TEXT_SECONDARY)).center(34.0))
+        .padding(0)
+        .style(style::icon_button)
+        .on_press(());
+    let tracks = Tracks::These(vec![track.clone()]);
+    let add = page::menu::anchor(add, Link::add_to_playlist(tracks));
+    let line = row![cover, container(details).clip(true), heart, add]
         .spacing(12)
         .align_y(Alignment::Center);
     Element::from(line).map(Message::Link)

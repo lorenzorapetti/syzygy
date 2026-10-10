@@ -274,7 +274,7 @@ impl Sidebar {
         let new_playlist = button(icon(Icon::Plus, 16.0, style::TEXT_SECONDARY))
             .padding(4)
             .style(style::icon_button)
-            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist))));
+            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist(vec![])))));
         let header = row![
             icon(Icon::Library, 20.0, style::TEXT_SECONDARY),
             text("Your Library").size(13).color(style::TEXT_SECONDARY),

@@ -44,10 +44,15 @@ pub struct Settings {
     pub library_sorts: BTreeMap<Kind, LibrarySort>,
     /// The last searches, newest first.
     pub search_history: Vec<String>,
+    /// The uuids of the playlists tracks last went into, newest first.
+    pub recent_playlists: Vec<String>,
 }
 
 /// How many searches the history keeps.
 const SEARCH_HISTORY: usize = 10;
+
+/// How many recent playlists "Add to playlist" offers first, as in sone.
+pub const RECENT_PLAYLISTS: usize = 8;
 
 /// An order the user picked for one of their lists.
 #[derive(Debug, Clone, PartialEq)]
@@ -87,6 +92,7 @@ impl Default for Settings {
             loved_tracks_sort: None,
             library_sorts: BTreeMap::new(),
             search_history: Vec::new(),
+            recent_playlists: Vec::new(),
         }
     }
 }
@@ -140,11 +146,20 @@ impl Settings {
     }
 
     /// Drop what belongs to the account rather than to the machine: the
-    /// sorts of its playlists, Loved tracks and Library. Preferences stay.
+    /// sorts of its playlists, Loved tracks and Library, and its recent
+    /// playlists. Preferences stay.
     pub fn forget_account(&mut self) {
         self.track_sorts.clear();
         self.loved_tracks_sort = None;
         self.library_sorts.clear();
+        self.recent_playlists.clear();
+    }
+
+    /// Put a playlist at the front of the recent ones, once.
+    pub fn remember_playlist(&mut self, uuid: &str) {
+        self.recent_playlists.retain(|recent| recent != uuid);
+        self.recent_playlists.insert(0, uuid.to_string());
+        self.recent_playlists.truncate(RECENT_PLAYLISTS);
     }
 
     /// Put a search at the front of the history, once whatever its case
@@ -356,6 +371,7 @@ mod tests {
             ..Settings::default()
         };
         settings.remember_search("björk");
+        settings.remember_playlist("u-1");
         settings.save_sort(Sort::Playlist("u-1".into(), Some(by_title())));
         settings.save_sort(Sort::LovedTracks(Some(by_title())));
         settings.save_sort(Sort::Library(
@@ -375,8 +391,23 @@ mod tests {
                 track_sorts: BTreeMap::new(),
                 loved_tracks_sort: None,
                 library_sorts: BTreeMap::new(),
+                recent_playlists: Vec::new(),
                 ..kept
             }
+        );
+    }
+
+    #[test]
+    fn the_recent_playlists_are_the_last_eight_newest_first_each_once() {
+        let mut settings = Settings::default();
+        for n in 0..10 {
+            settings.remember_playlist(&format!("u-{n}"));
+        }
+        settings.remember_playlist("u-5");
+
+        assert_eq!(
+            settings.recent_playlists,
+            ["u-5", "u-9", "u-8", "u-7", "u-6", "u-4", "u-3", "u-2"]
         );
     }
 

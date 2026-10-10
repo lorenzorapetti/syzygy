@@ -7,6 +7,7 @@ mod consent;
 mod dialog;
 pub mod drawer;
 mod maximized;
+mod picker;
 mod play_card;
 pub mod player_bar;
 pub mod search;
@@ -40,6 +41,7 @@ use crate::style;
 use back_stack::{BackStack, Entry};
 use dialog::Dialog;
 use drawer::Drawer;
+use picker::Picker;
 use player_bar::PlayerBar;
 use search::Search;
 use settings_modal::{Hardware, SettingsModal};
@@ -54,6 +56,9 @@ const HEADER_SPACING: f32 = 8.0;
 const STEP_SIZE: f32 = 32.0;
 /// Pages stop growing past this on wide windows.
 const MAX_PAGE_WIDTH: f32 = 1520.0;
+/// How long TIDAL takes to make a playlist's cover after its tracks
+/// change, as sone waits.
+const COVER_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 /// The scrollable every Page draws in.
 const PAGE_SCROLL: iced::widget::Id = iced::widget::Id::new("page");
 /// How tall the Page's viewport is taken to be until it's reported:
@@ -88,6 +93,8 @@ pub struct Shell {
     settings: Option<SettingsModal>,
     /// The Library's dialog, while one is open.
     dialog: Option<Dialog>,
+    /// The "Add to playlist" popover, while it's open.
+    picker: Option<Picker>,
     /// The user's Library: their Favorites, their root playlists and
     /// Folders, and their pending edits.
     library: Library,
@@ -116,6 +123,7 @@ pub enum Message {
     OpenSettings,
     Settings(settings_modal::Message),
     Dialog(dialog::Message),
+    Picker(picker::Message),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
@@ -137,6 +145,9 @@ pub enum Message {
         result: Result<Option<PlayRequest>, Arc<syzygy_catalog::Error>>,
     },
     Library(library::Message),
+    /// What's read under these tags is stale, a while after an edit
+    /// landed.
+    Reread(Vec<String>),
 }
 
 impl Shell {
@@ -170,6 +181,7 @@ impl Shell {
             consent: None,
             settings: None,
             dialog: None,
+            picker: None,
             library,
         };
         let task = shell.run_action(action, services, context);
@@ -279,6 +291,7 @@ impl Shell {
                 let closed = self.consent.take().is_some()
                     || self.settings.take().is_some()
                     || self.dialog.take().is_some()
+                    || self.picker.take().is_some()
                     || std::mem::take(&mut self.maximized)
                     || self.drawer.close();
                 if !closed {
@@ -333,6 +346,23 @@ impl Shell {
                     dialog::Outcome::Library(message) => {
                         self.dialog = None;
                         return self.update_library(*message, services, context);
+                    }
+                }
+            }
+            Message::Picker(message) => {
+                let Some(picker) = &mut self.picker else {
+                    return Task::none();
+                };
+                match picker.update(message) {
+                    picker::Outcome::None => {}
+                    picker::Outcome::Close => self.picker = None,
+                    picker::Outcome::Library(message) => {
+                        self.picker = None;
+                        return self.update_library(*message, services, context);
+                    }
+                    picker::Outcome::Failed(text) => {
+                        self.picker = None;
+                        return self.toast(Kind::Error, text);
                     }
                 }
             }
@@ -409,6 +439,7 @@ impl Shell {
                 };
             }
             Message::Library(message) => return self.update_library(message, services, context),
+            Message::Reread(tags) => return self.reread(&tags, services, context),
             Message::CardQueued { next, result } => {
                 return match result {
                     Ok(Some(request)) => self.queue(
@@ -465,6 +496,7 @@ impl Shell {
         self.maximized = false;
         self.settings = None;
         self.dialog = None;
+        self.picker = None;
     }
 
     /// Playback chose explicit tracks while they aren't allowed: ask.
@@ -727,6 +759,19 @@ impl Shell {
                         library::Mutation::DeletePlaylist { user_id, uuid } => {
                             Task::perform(services.catalog.delete_playlist(user_id, &uuid), done)
                         }
+                        library::Mutation::AddTrack {
+                            user_id,
+                            uuid,
+                            track,
+                        } => Task::perform(services.catalog.add_track(user_id, &uuid, track), done),
+                        library::Mutation::AddTracks {
+                            user_id,
+                            uuid,
+                            tracks,
+                        } => Task::perform(
+                            services.catalog.add_tracks(user_id, &uuid, tracks),
+                            move |result| to_library(library::Message::Added(edit, result)),
+                        ),
                     }
                 }
                 library::Effect::ReadFavorites { user_id, stamp } => {
@@ -734,17 +779,28 @@ impl Shell {
                         to_library(library::Message::FavoriteIds(stamp, read))
                     })
                 }
-                library::Effect::Refresh(tags) => {
-                    let mut reads = Vec::new();
-                    for effect in self.sidebar.refresh(&tags, &mut self.library) {
-                        reads.push(self.run_sidebar(effect, services, context));
-                    }
-                    let action = self.current.page.refresh(&tags);
-                    reads.push(self.run_action(action, services, context));
-                    Task::batch(reads)
-                }
+                library::Effect::Refresh(tags) => self.reread(&tags, services, context),
                 library::Effect::Toast(text) => self.toast(Kind::Error, text),
+                library::Effect::Inform(text) => self.toast(Kind::Info, text),
+                library::Effect::Recent(uuid) => Task::done(app::Message::RecentPlaylist(uuid)),
+                library::Effect::Cover(uuid) => match self.user_id {
+                    Some(user_id) => {
+                        let forget = services.catalog.forget_playlist(user_id, &uuid);
+                        Task::perform(
+                            async move {
+                                tokio::time::sleep(COVER_DELAY).await;
+                                forget.await;
+                            },
+                            move |()| {
+                                app::Message::Shell(Message::Reread(library::playlist_tags(&uuid)))
+                            },
+                        )
+                    }
+                    None => Task::none(),
+                },
+                library::Effect::Pick { tracks, at } => self.open_picker(tracks, at, services),
                 library::Effect::Ask(ask) => {
+                    self.picker = None;
                     self.dialog = Some(Dialog::new(ask, &self.library));
                     Task::none()
                 }
@@ -756,6 +812,60 @@ impl Shell {
             tasks.push(task);
         }
         Task::batch(tasks)
+    }
+
+    /// Open "Add to playlist" beside `at`, reading the Own playlists and
+    /// a card's tracks.
+    fn open_picker(
+        &mut self,
+        tracks: library::Tracks,
+        at: iced::Rectangle,
+        services: &Services,
+    ) -> Task<app::Message> {
+        let Some(user_id) = self.user_id else {
+            return Task::none();
+        };
+        let to_picker = |message| app::Message::Shell(Message::Picker(message));
+        let (mut picker, card) = match tracks {
+            library::Tracks::These(tracks) => (Picker::new(Some(tracks), at), None),
+            library::Tracks::Card(card) => (Picker::new(None, at), Some(card)),
+        };
+        let (playlists, handle) = Task::run(services.catalog.own_playlists(user_id), move |read| {
+            to_picker(picker::Message::Playlists(read))
+        })
+        .abortable();
+        picker.reading(handle);
+        let tracks = match card {
+            Some(card) => {
+                let (task, handle) = Task::perform(
+                    play_card::tracks(card, &services.catalog, Some(user_id)),
+                    move |result| to_picker(picker::Message::Tracks(result)),
+                )
+                .abortable();
+                picker.reading(handle);
+                task
+            }
+            None => Task::none(),
+        };
+        self.picker = Some(picker);
+        Task::batch([playlists, tracks, Picker::focus()])
+    }
+
+    /// What's read under `tags` is stale: the lists on screen read it
+    /// again.
+    fn reread(
+        &mut self,
+        tags: &[String],
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let mut reads = Vec::new();
+        for effect in self.sidebar.refresh(tags, &mut self.library) {
+            reads.push(self.run_sidebar(effect, services, context));
+        }
+        let action = self.current.page.refresh(tags);
+        reads.push(self.run_action(action, services, context));
+        Task::batch(reads)
     }
 
     /// A playlist is gone: its Pages leave back and forward, and if it's
@@ -1036,7 +1146,17 @@ impl Shell {
             .toasts
             .view()
             .map(|id| app::Message::Shell(Message::DismissToast(id)));
-        stack![main].push(maximized).push(modal).push(toasts).into()
+        let picker = self.picker.as_ref().map(|picker| {
+            picker
+                .view(&self.library, &settings.recent_playlists)
+                .map(|message| app::Message::Shell(Message::Picker(message)))
+        });
+        stack![main]
+            .push(maximized)
+            .push(picker)
+            .push(modal)
+            .push(toasts)
+            .into()
     }
 
     /// Back and forward, search and the avatar.

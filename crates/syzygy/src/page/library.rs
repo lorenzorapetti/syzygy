@@ -199,7 +199,7 @@ impl State {
             )
             .padding([8, 16])
             .style(style::pill_button)
-            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist))))
+            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist(vec![])))))
         });
         let header = column![
             row![text(title).size(32), space::horizontal()]

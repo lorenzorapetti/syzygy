@@ -58,8 +58,12 @@ impl Playlist {
 /// A playlist from its details, `None` if it isn't one.
 pub(crate) fn from_details(details: &Value) -> Option<Playlist> {
     let raw: TidalPlaylistRaw = serde_json::from_value(details.clone()).ok()?;
-    let playlist = TidalPlaylist::from(raw);
-    Some(Playlist {
+    Some(from_tidal(TidalPlaylist::from(raw)))
+}
+
+/// A playlist as one of TIDAL's lists gives it.
+pub(crate) fn from_tidal(playlist: TidalPlaylist) -> Playlist {
+    Playlist {
         uuid: playlist.uuid,
         title: playlist.title,
         description: playlist
@@ -76,7 +80,25 @@ pub(crate) fn from_details(details: &Value) -> Option<Playlist> {
         videos: playlist.number_of_videos.unwrap_or(0),
         duration: playlist.duration.unwrap_or(0),
         public: playlist.access_type.as_deref() == Some("PUBLIC"),
-    })
+    }
+}
+
+/// Tracks added to a playlist, as TIDAL counted them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Added {
+    /// How many were to be added.
+    pub asked: usize,
+    /// How many the playlist didn't have already.
+    pub new: usize,
+    /// How many tracks the playlist has now.
+    pub tracks: u32,
+}
+
+impl Added {
+    /// How many it had already, which TIDAL skipped.
+    pub fn skipped(&self) -> usize {
+        self.asked.saturating_sub(self.new)
+    }
 }
 
 /// What the user sets on an Own playlist: its title, its description

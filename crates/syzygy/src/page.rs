@@ -358,9 +358,17 @@ pub enum Link {
     Favorite(Box<Favorite>, bool),
     /// Open one of the Library's dialogs.
     Ask(Box<crate::library::Ask>),
+    /// "Add to playlist", from the menu item or button on screen at the
+    /// rectangle.
+    AddToPlaylist(Box<crate::library::Tracks>, iced::Rectangle),
 }
 
 impl Link {
+    /// "Add to playlist" for `tracks`, from where its item or button is.
+    pub fn add_to_playlist(tracks: crate::library::Tracks) -> impl Fn(iced::Rectangle) -> Link {
+        move |at| Link::AddToPlaylist(Box::new(tracks.clone()), at)
+    }
+
     pub fn follow(self) -> Action {
         match self {
             Link::CoverWanted(url) => Action::FetchImages(vec![url]),
@@ -375,6 +383,10 @@ impl Link {
                 Action::Library(crate::library::Message::Favorite(*favorite, on))
             }
             Link::Ask(ask) => Action::Library(crate::library::Message::Ask(*ask)),
+            Link::AddToPlaylist(tracks, at) => Action::Library(crate::library::Message::Pick {
+                tracks: *tracks,
+                at,
+            }),
         }
     }
 }

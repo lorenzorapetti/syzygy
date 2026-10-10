@@ -497,7 +497,7 @@ fn a_new_playlist_shows_first_straight_away_and_cant_be_opened_yet() {
     let mut library = library(&[], &[]);
     let server = playlists(&[own("p-1", "Old")]);
 
-    let effects = library.update(Message::CreatePlaylist(fields("New")));
+    let effects = library.update(Message::CreatePlaylist(fields("New"), vec![]));
 
     assert_eq!(root_titles(&library, &server), vec!["New", "Old"]);
     let shown = library.apply(&server, Listing::Shelf(&root_shelf()));
@@ -518,7 +518,7 @@ fn a_new_playlist_shows_first_straight_away_and_cant_be_opened_yet() {
 #[test]
 fn a_made_playlist_is_the_one_tidal_made_until_a_later_read_lists_it() {
     let mut library = library(&[], &[]);
-    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"))));
+    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"), vec![])));
 
     let effects = library.update(Message::Created(id, Ok(own("p-9", "New"))));
 
@@ -538,7 +538,7 @@ fn a_made_playlist_is_the_one_tidal_made_until_a_later_read_lists_it() {
 #[test]
 fn a_new_playlist_goes_only_to_the_top_level_of_the_playlists() {
     let mut library = library(&[], &[]);
-    library.update(Message::CreatePlaylist(fields("New")));
+    library.update(Message::CreatePlaylist(fields("New"), vec![]));
 
     let folder = Shelf {
         folder: Some("f-1".to_string()),
@@ -554,7 +554,7 @@ fn a_new_playlist_goes_only_to_the_top_level_of_the_playlists() {
 #[test]
 fn a_playlist_tidal_wont_make_goes_away_with_a_toast() {
     let mut library = library(&[], &[]);
-    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"))));
+    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"), vec![])));
 
     let effects = library.update(Message::Created(id, Err(failure())));
 
@@ -646,8 +646,8 @@ fn the_dialogs_open_for_own_playlists() {
     let mine = own("p-1", "Mine");
 
     assert_eq!(
-        library.update(Message::Ask(Ask::NewPlaylist)),
-        vec![Effect::Ask(Ask::NewPlaylist)]
+        library.update(Message::Ask(Ask::NewPlaylist(vec![]))),
+        vec![Effect::Ask(Ask::NewPlaylist(vec![]))]
     );
     assert_eq!(
         library.update(Message::Ask(Ask::DeletePlaylist(mine.clone()))),
@@ -658,7 +658,7 @@ fn the_dialogs_open_for_own_playlists() {
 #[test]
 fn a_placeholder_cant_be_edited_or_deleted() {
     let mut library = library(&[], &[]);
-    library.update(Message::CreatePlaylist(fields("New")));
+    library.update(Message::CreatePlaylist(fields("New"), vec![]));
     let shown = library.apply::<Item>(&[], Listing::Shelf(&root_shelf()));
     let Item::Playlist(placeholder) = shown[0].clone() else {
         panic!("a playlist");
@@ -747,4 +747,307 @@ fn a_deletion_waits_for_an_edit_of_the_same_playlist() {
     let effects = library.update(Message::Done(edit, Ok(())));
     let (_, next) = mutation(&effects);
     assert!(matches!(next, Mutation::DeletePlaylist { .. }));
+}
+
+// Adding tracks to Own playlists.
+
+fn own_with(uuid: &str, title: &str, tracks: u32) -> Playlist {
+    Playlist {
+        tracks,
+        ..own(uuid, title)
+    }
+}
+
+fn informed(effects: &[Effect]) -> Vec<String> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Inform(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn tracks(ids: &[u64]) -> Vec<Track> {
+    ids.iter().copied().map(track).collect()
+}
+
+/// The playlists "Add to playlist" offers, as `(title, tracks)`.
+fn offered(library: &Library, server: &[Item]) -> Vec<(String, u32)> {
+    library
+        .apply(server, Listing::Own)
+        .iter()
+        .filter_map(|item| match item {
+            Item::Playlist(playlist) => Some((playlist.title.clone(), playlist.tracks)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn duplicate() -> Arc<syzygy_catalog::Error> {
+    Arc::new(syzygy_catalog::Error::Tidal(syzygy_tidal::Error::Api {
+        status: 409,
+        body: String::new(),
+    }))
+}
+
+#[test]
+fn one_track_goes_in_as_it_is_and_the_playlist_counts_it_at_once() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let server = playlists(std::slice::from_ref(&playlist));
+
+    let effects = library.update(Message::AddTracks(playlist, tracks(&[5])));
+
+    assert_eq!(offered(&library, &server), vec![("Mix".to_string(), 11)]);
+    let (_, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::AddTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            track: 5,
+        }
+    );
+    assert!(effects.contains(&Effect::Recent("p-1".to_string())));
+}
+
+#[test]
+fn a_track_already_in_the_playlist_is_told_and_rolled_back() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let (id, _) = mutation(&library.update(Message::AddTracks(playlist.clone(), tracks(&[5]))));
+
+    let effects = library.update(Message::Done(id, Err(duplicate())));
+
+    assert_eq!(informed(&effects), vec!["Track already in this playlist"]);
+    assert!(toasts(&effects).is_empty());
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 10)]
+    );
+}
+
+#[test]
+fn an_added_track_is_told_and_its_playlist_read_again_now_and_for_its_cover() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let (id, _) = mutation(&library.update(Message::AddTracks(playlist, tracks(&[5]))));
+
+    let effects = library.update(Message::Done(id, Ok(())));
+
+    assert_eq!(
+        informed(&effects),
+        vec!["Added \u{201c}Track 5\u{201d} to playlist"]
+    );
+    assert!(effects.contains(&Effect::Refresh(vec![
+        "folders".to_string(),
+        "playlist:p-1".to_string(),
+    ])));
+    assert!(effects.contains(&Effect::Cover("p-1".to_string())));
+}
+
+#[test]
+fn a_refused_track_says_so() {
+    let mut library = library(&[], &[]);
+    let (id, _) = mutation(&library.update(Message::AddTracks(own("p-1", "Mix"), tracks(&[5]))));
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't add \u{201c}Track 5\u{201d} to \u{201c}Mix\u{201d}"]
+    );
+}
+
+#[test]
+fn a_selection_skips_duplicates_and_says_how_many_were_there() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let server = playlists(std::slice::from_ref(&playlist));
+    let effects = library.update(Message::AddTracks(playlist, tracks(&[1, 2, 3])));
+    let (id, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::AddTracks {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            tracks: vec![1, 2, 3],
+        }
+    );
+    assert_eq!(offered(&library, &server), vec![("Mix".to_string(), 13)]);
+
+    let added = syzygy_catalog::Added {
+        asked: 3,
+        new: 1,
+        tracks: 11,
+    };
+    let effects = library.update(Message::Added(id, Ok(added)));
+
+    assert_eq!(informed(&effects), vec!["Added 1 (2 already in playlist)"]);
+    // TIDAL's count, not the one guessed.
+    assert_eq!(offered(&library, &server), vec![("Mix".to_string(), 11)]);
+    assert!(effects.contains(&Effect::Cover("p-1".to_string())));
+}
+
+#[test]
+fn a_selection_all_new_says_how_many_went_in() {
+    let mut library = library(&[], &[]);
+    let effects = library.update(Message::AddTracks(own("p-1", "Mix"), tracks(&[1, 2])));
+    let (id, _) = mutation(&effects);
+
+    let added = syzygy_catalog::Added {
+        asked: 2,
+        new: 2,
+        tracks: 2,
+    };
+    let effects = library.update(Message::Added(id, Ok(added)));
+
+    assert_eq!(
+        informed(&effects),
+        vec!["Added 2 tracks to \u{201c}Mix\u{201d}"]
+    );
+}
+
+#[test]
+fn tracks_go_only_into_own_playlists_that_tidal_has_made() {
+    let mut library = library(&[], &[]);
+    let theirs = PlaylistFields::new().playlist("p-1".to_string(), USER + 1);
+    assert!(
+        library
+            .update(Message::AddTracks(theirs, tracks(&[1])))
+            .is_empty()
+    );
+
+    library.update(Message::CreatePlaylist(fields("New"), vec![]));
+    let shown = library.apply::<Item>(&[], Listing::Own);
+    let Item::Playlist(placeholder) = shown[0].clone() else {
+        panic!("a playlist");
+    };
+    assert!(
+        library
+            .update(Message::AddTracks(placeholder, tracks(&[1])))
+            .is_empty()
+    );
+    assert!(
+        library
+            .update(Message::AddTracks(own("p-2", "Mine"), vec![]))
+            .is_empty()
+    );
+}
+
+#[test]
+fn adds_to_one_playlist_run_in_order() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 10);
+    let (first, _) = mutation(&library.update(Message::AddTracks(playlist.clone(), tracks(&[1]))));
+
+    let effects = library.update(Message::AddTracks(playlist.clone(), tracks(&[2])));
+    assert_eq!(mutations(&effects), 0);
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 12)]
+    );
+
+    let (_, next) = mutation(&library.update(Message::Done(first, Ok(()))));
+    assert!(matches!(next, Mutation::AddTrack { track: 2, .. }));
+}
+
+#[test]
+fn a_new_playlist_with_tracks_is_made_then_filled() {
+    let mut library = library(&[], &[]);
+    let effects = library.update(Message::CreatePlaylist(fields("New"), tracks(&[1, 2])));
+    let (id, create) = mutation(&effects);
+    assert!(matches!(create, Mutation::CreatePlaylist { .. }));
+    assert_eq!(offered(&library, &[]), vec![("New".to_string(), 2)]);
+
+    let effects = library.update(Message::Created(id, Ok(own("p-9", "New"))));
+
+    let (_, add) = mutation(&effects);
+    assert_eq!(
+        add,
+        Mutation::AddTracks {
+            user_id: USER,
+            uuid: "p-9".to_string(),
+            tracks: vec![1, 2],
+        }
+    );
+    assert!(effects.contains(&Effect::Recent("p-9".to_string())));
+    // Still listed first while TIDAL's lists don't have it.
+    assert_eq!(root_titles(&library, &[]), vec!["New"]);
+    assert_eq!(offered(&library, &[]), vec![("New".to_string(), 2)]);
+}
+
+#[test]
+fn a_new_playlist_whose_tracks_dont_go_in_is_kept_with_a_toast() {
+    let mut library = library(&[], &[]);
+    let (id, _) =
+        mutation(&library.update(Message::CreatePlaylist(fields("New"), tracks(&[1, 2]))));
+    let (add, _) = mutation(&library.update(Message::Created(id, Ok(own("p-9", "New")))));
+
+    let effects = library.update(Message::Added(add, Err(failure())));
+
+    assert_eq!(
+        toasts(&effects),
+        vec!["Created \u{201c}New\u{201d}, but couldn't add the tracks"]
+    );
+    assert_eq!(offered(&library, &[]), vec![("New".to_string(), 0)]);
+    assert_eq!(mutations(&effects), 0);
+}
+
+#[test]
+fn the_own_playlists_show_the_users_edits_but_not_their_likes() {
+    let mut library = library(&[], &[]);
+    let server = playlists(&[own("p-1", "Kept"), own("p-2", "Gone"), own("p-3", "Old")]);
+    library.update(Message::DeletePlaylist(own("p-2", "Gone")));
+    library.update(Message::EditPlaylist(own("p-3", "Old"), fields("Renamed")));
+    library.update(Message::CreatePlaylist(fields("New"), vec![]));
+    let theirs = PlaylistFields::new().playlist("p-4".to_string(), USER + 1);
+    library.update(Message::Favorite(Favorite::playlist(&theirs), true));
+    library.update(Message::Favorite(
+        Favorite::playlist(&own("p-1", "Kept")),
+        false,
+    ));
+
+    let titles: Vec<String> = offered(&library, &server)
+        .into_iter()
+        .map(|(title, _)| title)
+        .collect();
+
+    assert_eq!(titles, vec!["New", "Kept", "Renamed"]);
+}
+
+#[test]
+fn the_picker_opens_once_tidal_has_said_who_the_user_is() {
+    let at = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(240.0, 40.0));
+    let pick = || Message::Pick {
+        tracks: Tracks::These(tracks(&[1])),
+        at,
+    };
+    let (mut unknown, _) = Library::new(None, &Settings::default());
+    assert!(unknown.update(pick()).is_empty());
+
+    let mut library = library(&[], &[]);
+    assert_eq!(
+        library.update(pick()),
+        vec![Effect::Pick {
+            tracks: Tracks::These(tracks(&[1])),
+            at,
+        }]
+    );
+}
+
+#[test]
+fn a_new_playlists_one_track_refused_as_a_dupe_still_says_the_track_didnt_go_in() {
+    let mut library = library(&[], &[]);
+    let (id, _) = mutation(&library.update(Message::CreatePlaylist(fields("New"), tracks(&[1]))));
+    let (add, _) = mutation(&library.update(Message::Created(id, Ok(own("p-9", "New")))));
+
+    let effects = library.update(Message::Done(add, Err(duplicate())));
+
+    assert_eq!(
+        toasts(&effects),
+        vec!["Created \u{201c}New\u{201d}, but couldn't add the tracks"]
+    );
+    assert!(informed(&effects).is_empty());
 }

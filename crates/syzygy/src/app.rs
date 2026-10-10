@@ -120,6 +120,8 @@ pub enum Message {
     Searched(String),
     /// Take a search out of the history.
     ForgetSearch(String),
+    /// Tracks went into this playlist: it's the most recent one.
+    RecentPlaylist(String),
     Playback(playback::Message),
     /// The volume slider was let go: remember the volume.
     SaveVolume,
@@ -401,6 +403,10 @@ impl App {
             }
             Message::ForgetSearch(query) => {
                 self.settings.forget_search(&query);
+                self.save_settings()
+            }
+            Message::RecentPlaylist(uuid) => {
+                self.settings.remember_playlist(&uuid);
                 self.save_settings()
             }
             Message::Frame(at) => {

@@ -7,7 +7,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element};
 use syzygy_catalog::playlist::DESCRIPTION_LIMIT;
-use syzygy_catalog::{Playlist, PlaylistFields};
+use syzygy_catalog::{Playlist, PlaylistFields, Track};
 
 use crate::library::{self, Ask, Library};
 use crate::style;
@@ -15,10 +15,12 @@ use crate::style;
 const WIDTH: f32 = 440.0;
 
 pub enum Dialog {
-    /// A new playlist's fields, or an Own playlist's being edited.
+    /// A new playlist's fields, or an Own playlist's being edited. A new
+    /// one gets `tracks`.
     Playlist {
         editing: Option<Playlist>,
         fields: PlaylistFields,
+        tracks: Vec<Track>,
     },
     /// Whether to delete an Own playlist.
     Delete(Playlist),
@@ -47,13 +49,15 @@ impl Dialog {
     /// from the playlist as the user last edited it.
     pub fn new(ask: Ask, library: &Library) -> Self {
         match ask {
-            Ask::NewPlaylist => Dialog::Playlist {
+            Ask::NewPlaylist(tracks) => Dialog::Playlist {
                 editing: None,
                 fields: PlaylistFields::new(),
+                tracks,
             },
             Ask::EditPlaylist(editing) => Dialog::Playlist {
                 fields: PlaylistFields::of(library.playlist(&editing)),
                 editing: Some(editing),
+                tracks: vec![],
             },
             Ask::DeletePlaylist(playlist) => Dialog::Delete(playlist),
         }
@@ -74,14 +78,21 @@ impl Dialog {
                 fields.public = public;
                 Outcome::None
             }
-            (Dialog::Playlist { editing, fields }, Message::Submit) => {
+            (
+                Dialog::Playlist {
+                    editing,
+                    fields,
+                    tracks,
+                },
+                Message::Submit,
+            ) => {
                 if fields.title.trim().is_empty() {
                     return Outcome::None;
                 }
                 let fields = fields.trimmed();
                 Outcome::Library(Box::new(match editing.take() {
                     Some(playlist) => library::Message::EditPlaylist(playlist, fields),
-                    None => library::Message::CreatePlaylist(fields),
+                    None => library::Message::CreatePlaylist(fields, std::mem::take(tracks)),
                 }))
             }
             (Dialog::Delete(playlist), Message::Submit) => {
@@ -95,7 +106,9 @@ impl Dialog {
     /// its clicks. A click outside closes it.
     pub fn view(&self) -> Element<'_, Message> {
         let card = match self {
-            Dialog::Playlist { editing, fields } => form(editing.is_some(), fields),
+            Dialog::Playlist {
+                editing, fields, ..
+            } => form(editing.is_some(), fields),
             Dialog::Delete(playlist) => confirm_delete(playlist),
         };
         let card = container(card)

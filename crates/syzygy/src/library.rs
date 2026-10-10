@@ -20,6 +20,11 @@
 //! one is gone at once, and its Pages with it; playback hears of it once
 //! TIDAL has deleted it, since a fill can't be taken back.
 //!
+//! Tracks are added to Own playlists the same way: the playlist counts
+//! them at once, and TIDAL's count replaces that guess when the add comes
+//! back. One track is refused if the playlist has it already; a selection
+//! skips what it has and the user is told how many that was.
+//!
 //! [`Library::update`] is pure: it changes the state and returns
 //! [`Effect`]s for the Shell to run.
 
@@ -30,7 +35,7 @@ use std::sync::Arc;
 use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::library::Item;
 use syzygy_catalog::{
-    FavoriteId, FavoriteIds, LibrarySort, Playlist, PlaylistFields, Read, Shelf, Track,
+    Added, FavoriteId, FavoriteIds, LibrarySort, Playlist, PlaylistFields, Read, Shelf, Track,
 };
 
 use crate::page::paged::List;
@@ -111,12 +116,70 @@ pub enum Edit {
     /// Like or unlike; follow or unfollow an artist.
     Favorite(Favorite, bool),
     /// A new Own playlist, as an [`Item::Playlist`]: a placeholder until
-    /// TIDAL has made it, then the one TIDAL made.
-    Create(Item),
+    /// TIDAL has made it, then the one TIDAL made. The tracks go in once
+    /// it's made, as an edit of their own.
+    Create(Item, Vec<Track>),
     /// An Own playlist with new fields, as an [`Item::Playlist`].
     Change(Item),
     /// An Own playlist deleted.
     Delete(Playlist),
+    /// Tracks added to an Own playlist.
+    Add(Adding),
+}
+
+/// Tracks going into an Own playlist.
+#[derive(Debug, Clone)]
+pub struct Adding {
+    /// The playlist as an [`Item::Playlist`], counting the tracks.
+    item: Item,
+    tracks: Vec<Track>,
+    /// The playlist was made for them, just before.
+    new_playlist: bool,
+}
+
+impl Adding {
+    /// One track, which TIDAL refuses if the playlist has it already. A
+    /// selection skips what it has.
+    fn single(&self) -> Option<&Track> {
+        match self.tracks.as_slice() {
+            [track] => Some(track),
+            _ => None,
+        }
+    }
+
+    /// TIDAL counted the tracks: its count replaces the guess.
+    fn counted(&mut self, added: &Added) {
+        if let Item::Playlist(playlist) = &mut self.item {
+            playlist.tracks = added.tracks;
+        }
+    }
+
+    fn playlist(&self) -> &Playlist {
+        match &self.item {
+            Item::Playlist(playlist) => playlist,
+            Item::Folder(_) | Item::Card(_) => unreachable!("tracks go into a playlist"),
+        }
+    }
+
+    /// What the user is told once they're in.
+    fn told(&self, added: Option<&Added>) -> String {
+        let playlist = short(&self.playlist().title);
+        match (self.single(), added) {
+            (Some(track), _) => {
+                format!("Added \u{201c}{}\u{201d} to playlist", short(&track.title))
+            }
+            (_, Some(added)) if added.skipped() > 0 => format!(
+                "Added {} ({} already in playlist)",
+                added.new,
+                added.skipped()
+            ),
+            (None, added) => {
+                let new = added.map_or(self.tracks.len(), |added| added.new);
+                let noun = if new == 1 { "track" } else { "tracks" };
+                format!("Added {new} {noun} to \u{201c}{playlist}\u{201d}")
+            }
+        }
+    }
 }
 
 impl Edit {
@@ -124,8 +187,11 @@ impl Edit {
     fn target(&self) -> FavoriteId {
         match self {
             Edit::Favorite(favorite, _) => favorite.id(),
-            Edit::Create(item) | Edit::Change(item) => FavoriteId::Playlist(uuid(item).to_string()),
+            Edit::Create(item, _) | Edit::Change(item) => {
+                FavoriteId::Playlist(uuid(item).to_string())
+            }
             Edit::Delete(playlist) => FavoriteId::Playlist(playlist.uuid.clone()),
+            Edit::Add(adding) => FavoriteId::Playlist(adding.playlist().uuid.clone()),
         }
     }
 
@@ -133,16 +199,18 @@ impl Edit {
     fn tags(&self) -> Vec<String> {
         match self {
             Edit::Favorite(favorite, _) => vec![favorite.id().tag().to_string()],
-            Edit::Create(_) => vec![FOLDERS.to_string()],
+            Edit::Create(..) => vec![FOLDERS.to_string()],
             Edit::Change(item) => playlist_tags(uuid(item)),
             Edit::Delete(playlist) => playlist_tags(&playlist.uuid),
+            Edit::Add(adding) => playlist_tags(&adding.playlist().uuid),
         }
     }
 
     /// The playlist it shows in place of the listed one.
     fn shows(&self) -> Option<&Item> {
         match self {
-            Edit::Create(item) | Edit::Change(item) => Some(item),
+            Edit::Create(item, _) | Edit::Change(item) => Some(item),
+            Edit::Add(adding) => Some(&adding.item),
             Edit::Favorite(..) | Edit::Delete(_) => None,
         }
     }
@@ -166,10 +234,25 @@ impl Edit {
                     }
                 }
             }
-            Edit::Create(item) => format!("Couldn't create \u{201c}{}\u{201d}", title(item)),
+            Edit::Create(item, _) => format!("Couldn't create \u{201c}{}\u{201d}", title(item)),
             Edit::Change(item) => format!("Couldn't save \u{201c}{}\u{201d}", title(item)),
             Edit::Delete(playlist) => {
                 format!("Couldn't delete \u{201c}{}\u{201d}", short(&playlist.title))
+            }
+            Edit::Add(adding) => {
+                let playlist = short(&adding.playlist().title);
+                match (adding.new_playlist, adding.single()) {
+                    (true, _) => {
+                        format!("Created \u{201c}{playlist}\u{201d}, but couldn't add the tracks")
+                    }
+                    (false, Some(track)) => format!(
+                        "Couldn't add \u{201c}{}\u{201d} to \u{201c}{playlist}\u{201d}",
+                        short(&track.title)
+                    ),
+                    (false, None) => {
+                        format!("Couldn't add the tracks to \u{201c}{playlist}\u{201d}")
+                    }
+                }
             }
         }
     }
@@ -193,7 +276,7 @@ fn title(item: &Item) -> String {
 
 /// The tags of the reads an edit of a playlist makes stale: the root
 /// playlists and the Folders, and the playlist's own.
-fn playlist_tags(uuid: &str) -> Vec<String> {
+pub fn playlist_tags(uuid: &str) -> Vec<String> {
     vec![FOLDERS.to_string(), syzygy_catalog::playlist_tag(uuid)]
 }
 
@@ -208,12 +291,20 @@ pub fn is_placeholder(playlist: &Playlist) -> bool {
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ask {
-    /// The form for a new playlist.
-    NewPlaylist,
+    /// The form for a new playlist, which these tracks go into.
+    NewPlaylist(Vec<Track>),
     /// The form for an Own playlist's title, description and access.
     EditPlaylist(Playlist),
     /// Whether to delete an Own playlist.
     DeletePlaylist(Playlist),
+}
+
+/// Tracks for a playlist, as a menu has them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Tracks {
+    These(Vec<Track>),
+    /// All of what a card leads to, read when they're wanted.
+    Card(Card),
 }
 
 #[derive(Debug)]
@@ -254,6 +345,20 @@ pub enum Mutation {
     },
     /// Delete an Own playlist.
     DeletePlaylist { user_id: u64, uuid: String },
+    /// Add one track to an Own playlist, refused if it's there already
+    /// (`onDupes=FAIL`).
+    AddTrack {
+        user_id: u64,
+        uuid: String,
+        track: u64,
+    },
+    /// Add tracks to an Own playlist, skipping those it has
+    /// (`onDupes=SKIP`). Its result comes back as [`Message::Added`].
+    AddTracks {
+        user_id: u64,
+        uuid: String,
+        tracks: Vec<u64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -264,16 +369,23 @@ pub enum Message {
     Favorite(Favorite, bool),
     /// Open a dialog: for a new playlist, or to edit or delete an Own one.
     Ask(Ask),
-    /// Make a playlist with these fields.
-    CreatePlaylist(PlaylistFields),
+    /// Open "Add to playlist" for these tracks, in a popover beside `at`:
+    /// the menu item or button that asked, on screen.
+    Pick { tracks: Tracks, at: iced::Rectangle },
+    /// Make a playlist with these fields, and put these tracks in it.
+    CreatePlaylist(PlaylistFields, Vec<Track>),
     /// Set an Own playlist's fields.
     EditPlaylist(Playlist, PlaylistFields),
     /// Delete an Own playlist, as the user confirmed.
     DeletePlaylist(Playlist),
+    /// Add tracks to an Own playlist.
+    AddTracks(Playlist, Vec<Track>),
     /// An edit's mutation came back.
     Done(EditId, Result<(), Arc<syzygy_catalog::Error>>),
     /// A new playlist's mutation came back with the playlist TIDAL made.
     Created(EditId, Result<Playlist, Arc<syzygy_catalog::Error>>),
+    /// Tracks went into a playlist, as TIDAL counted them.
+    Added(EditId, Result<Added, Arc<syzygy_catalog::Error>>),
     /// A read of the Favorite ids, started at the stamp.
     FavoriteIds(Stamp, Read<FavoriteIds>),
     /// A read of these tags, started at the stamp, brought TIDAL's answer.
@@ -293,8 +405,18 @@ pub enum Effect {
     Refresh(Vec<String>),
     /// Tell the user an edit didn't happen.
     Toast(String),
+    /// Tell the user how an edit went, when there's more to say than that
+    /// it showed.
+    Inform(String),
+    /// Tracks are going into this playlist: it's one of the recent ones.
+    Recent(String),
+    /// Tracks went into this playlist: TIDAL makes its cover a while
+    /// later, so its reads are read again then.
+    Cover(String),
     /// Open a dialog.
     Ask(Ask),
+    /// Open "Add to playlist".
+    Pick { tracks: Tracks, at: iced::Rectangle },
     /// The playlist with this uuid is gone: its Pages go too.
     Deleted(String),
     /// TIDAL deleted a playlist: playback stops reading it, should it be
@@ -390,7 +512,7 @@ impl Library {
             }
             Message::Ask(ask) => {
                 let allowed = match &ask {
-                    Ask::NewPlaylist => self.user_id.is_some(),
+                    Ask::NewPlaylist(_) => self.user_id.is_some(),
                     Ask::EditPlaylist(playlist) | Ask::DeletePlaylist(playlist) => {
                         self.editable(playlist)
                     }
@@ -401,13 +523,20 @@ impl Library {
                     vec![]
                 }
             }
-            Message::CreatePlaylist(fields) => {
+            Message::Pick { tracks, at } => match self.user_id {
+                Some(_) => vec![Effect::Pick { tracks, at }],
+                None => vec![],
+            },
+            Message::CreatePlaylist(fields, tracks) => {
                 let Some(user_id) = self.user_id else {
                     return vec![];
                 };
                 let uuid = format!("{PLACEHOLDER}{}", self.next_edit);
-                let placeholder = fields.playlist(uuid, user_id);
-                self.push(Edit::Create(Item::Playlist(placeholder)))
+                let placeholder = Playlist {
+                    tracks: tracks.len() as u32,
+                    ..fields.playlist(uuid, user_id)
+                };
+                self.push(Edit::Create(Item::Playlist(placeholder), tracks))
             }
             Message::EditPlaylist(playlist, fields) => {
                 if !self.editable(&playlist) {
@@ -425,16 +554,34 @@ impl Library {
                 effects.push(Effect::Deleted(uuid));
                 effects
             }
-            Message::Done(id, Ok(())) => self.landed(id),
-            Message::Done(id, Err(e)) | Message::Created(id, Err(e)) => self.failed(id, &e),
+            Message::AddTracks(playlist, tracks) => {
+                if !self.editable(&playlist) || tracks.is_empty() {
+                    return vec![];
+                }
+                self.add(playlist, tracks, false)
+            }
+            Message::Done(id, Ok(())) => self.landed(id, None),
+            Message::Done(id, Err(e))
+            | Message::Created(id, Err(e))
+            | Message::Added(id, Err(e)) => self.failed(id, &e),
             Message::Created(id, Ok(made)) => {
                 // From now on it's the playlist TIDAL made, which can be
                 // opened.
-                if let Some(pending) = self.pending.iter_mut().find(|pending| pending.id == id) {
-                    pending.edit = Edit::Create(Item::Playlist(made));
+                let Some(pending) = self.pending.iter_mut().find(|pending| pending.id == id) else {
+                    return vec![];
+                };
+                let Edit::Create(_, tracks) = &mut pending.edit else {
+                    return vec![];
+                };
+                let tracks = std::mem::take(tracks);
+                pending.edit = Edit::Create(Item::Playlist(made.clone()), vec![]);
+                let mut effects = self.landed(id, None);
+                if !tracks.is_empty() {
+                    effects.extend(self.add(made, tracks, true));
                 }
-                self.landed(id)
+                effects
             }
+            Message::Added(id, Ok(added)) => self.landed(id, Some(added)),
             Message::FavoriteIds(stamp, read) => {
                 // They settle no edit: a landed edit is in them already,
                 // and the lists still need it until their own reads catch
@@ -465,6 +612,23 @@ impl Library {
     /// playlists that TIDAL has made.
     fn editable(&self, playlist: &Playlist) -> bool {
         playlist.is_own(self.user_id) && !is_placeholder(playlist)
+    }
+
+    /// Put tracks in a playlist: it counts them at once.
+    fn add(&mut self, playlist: Playlist, tracks: Vec<Track>, new_playlist: bool) -> Vec<Effect> {
+        let shown = self.playlist(&playlist);
+        let counted = Playlist {
+            tracks: shown.tracks + tracks.len() as u32,
+            ..shown.clone()
+        };
+        let uuid = playlist.uuid.clone();
+        let mut effects = self.push(Edit::Add(Adding {
+            item: Item::Playlist(counted),
+            tracks,
+            new_playlist,
+        }));
+        effects.push(Effect::Recent(uuid));
+        effects
     }
 
     /// Show the edit now, and run it unless one of its target is before it.
@@ -498,7 +662,7 @@ impl Library {
                 id: favorite.id(),
                 on: *on,
             },
-            Edit::Create(Item::Playlist(playlist)) => Mutation::CreatePlaylist {
+            Edit::Create(Item::Playlist(playlist), _) => Mutation::CreatePlaylist {
                 user_id,
                 fields: PlaylistFields::of(playlist),
             },
@@ -507,23 +671,48 @@ impl Library {
                 uuid: playlist.uuid.clone(),
                 fields: PlaylistFields::of(playlist),
             },
-            Edit::Create(_) | Edit::Change(_) => return vec![],
+            Edit::Create(..) | Edit::Change(_) => return vec![],
             Edit::Delete(playlist) => Mutation::DeletePlaylist {
                 user_id,
                 uuid: playlist.uuid.clone(),
             },
+            Edit::Add(adding) => {
+                let uuid = adding.playlist().uuid.clone();
+                match adding.single() {
+                    Some(track) => Mutation::AddTrack {
+                        user_id,
+                        uuid,
+                        track: track.id,
+                    },
+                    None => Mutation::AddTracks {
+                        user_id,
+                        uuid,
+                        tracks: adding.tracks.iter().map(|track| track.id).collect(),
+                    },
+                }
+            }
         };
         vec![Effect::Mutate(id, mutation)]
     }
 
     /// TIDAL took an edit: its reads are read again, and the next edit of
-    /// its target runs.
-    fn landed(&mut self, id: EditId) -> Vec<Effect> {
+    /// its target runs. Tracks `added` to a playlist are as TIDAL counted
+    /// them.
+    fn landed(&mut self, id: EditId, added: Option<Added>) -> Vec<Effect> {
         let at = self.tick();
         let Some(pending) = self.pending.iter_mut().find(|pending| pending.id == id) else {
             return vec![];
         };
         pending.state = Progress::Landed(at);
+        let told = match &mut pending.edit {
+            Edit::Add(adding) => {
+                if let Some(added) = &added {
+                    adding.counted(added);
+                }
+                Some(adding.told(added.as_ref()))
+            }
+            _ => None,
+        };
         let (target, tags) = (pending.edit.target(), pending.edit.tags());
         // TIDAL has it now, so the id sets do too: a later read that lacks
         // it would have to be from before.
@@ -543,6 +732,10 @@ impl Library {
         let mut effects = self.next(&target);
         effects.push(Effect::Refresh(tags));
         effects.extend(deleted.map(Effect::SourceDeleted));
+        if let (Some(told), FavoriteId::Playlist(uuid)) = (told, target) {
+            effects.push(Effect::Inform(told));
+            effects.push(Effect::Cover(uuid));
+        }
         effects
     }
 
@@ -557,6 +750,13 @@ impl Library {
         let target = failed.edit.target();
         self.pending
             .retain(|pending| pending.edit.target() != target || pending.state != Progress::Queued);
+        // A playlist just made has no tracks to clash with.
+        let duplicate = matches!(&failed.edit, Edit::Add(adding)
+            if adding.single().is_some() && !adding.new_playlist)
+            && error.is_duplicate();
+        if duplicate {
+            return vec![Effect::Inform("Track already in this playlist".to_string())];
+        }
         vec![Effect::Toast(failed.edit.failure())]
     }
 
@@ -629,15 +829,24 @@ pub enum Listing<'a> {
     Loved,
     /// A Library shelf: a type at the top level, or a Folder's playlists.
     Shelf(&'a Shelf),
+    /// Every Own playlist, wherever its Folder: what tracks can be added
+    /// to. Likes don't change it.
+    Own,
 }
 
 impl Listing<'_> {
+    /// Whether the edit changes what the list shows.
+    fn shows(&self, edit: &Edit) -> bool {
+        !matches!((self, edit), (Listing::Own, Edit::Favorite(..)))
+    }
+
     /// Whether a like of this Favorite adds it to the list. A liked
     /// playlist goes to the top level, not into a Folder.
     fn adds(&self, id: &FavoriteId) -> bool {
         match self {
             Listing::Loved => matches!(id, FavoriteId::Track(_)),
             Listing::Shelf(shelf) => shelf.folder.is_none() && shelf.lists(id),
+            Listing::Own => matches!(id, FavoriteId::Playlist(_)),
         }
     }
 }
@@ -702,7 +911,7 @@ pub fn apply<'a, T: Listed>(
 ) -> Vec<&'a T> {
     // Each target's last edit, latest first.
     let mut last: Vec<(FavoriteId, &'a Edit)> = Vec::new();
-    for pending in pending.iter().rev() {
+    for pending in pending.iter().rev().filter(|p| listing.shows(&p.edit)) {
         let id = pending.edit.target();
         if !last.iter().any(|(seen, _)| *seen == id) {
             last.push((id, &pending.edit));
@@ -716,7 +925,7 @@ pub fn apply<'a, T: Listed>(
     let created = |id: &FavoriteId| {
         pending
             .iter()
-            .any(|pending| matches!(pending.edit, Edit::Create(_)) && pending.edit.target() == *id)
+            .any(|pending| matches!(pending.edit, Edit::Create(..)) && pending.edit.target() == *id)
     };
     let listed = |id: &FavoriteId| {
         server
@@ -728,7 +937,9 @@ pub fn apply<'a, T: Listed>(
         .filter(|(id, _)| listing.adds(id) && !listed(id))
         .filter_map(|(id, edit)| match edit {
             Edit::Favorite(favorite, true) => T::liked(favorite),
-            Edit::Create(item) | Edit::Change(item) if created(id) => T::edited(item),
+            Edit::Create(..) | Edit::Change(_) | Edit::Add(_) if created(id) => {
+                edit.shows().and_then(T::edited)
+            }
             _ => None,
         });
     let kept = server.iter().filter_map(|item| {
