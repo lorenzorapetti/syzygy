@@ -459,7 +459,7 @@ fn noun(kind: Kind, n: usize) -> String {
     }
 }
 
-fn order_label(order: LibraryOrder) -> &'static str {
+pub fn order_label(order: LibraryOrder) -> &'static str {
     match order {
         LibraryOrder::DateAdded => "Date added",
         LibraryOrder::LastUpdated => "Last updated",

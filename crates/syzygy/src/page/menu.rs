@@ -93,6 +93,17 @@ pub fn more<'a>(sections: impl Fn() -> Vec<Vec<Item>> + 'a) -> Element<'a, Link>
     })
 }
 
+/// `trigger`, opening the menu `panel` builds on a left click, as a
+/// dropdown.
+pub fn dropdown<'a, Message: Clone + 'a>(
+    trigger: impl Into<Element<'a, Message>>,
+    panel: impl Fn() -> Element<'a, Message> + 'a,
+) -> Element<'a, Message> {
+    Element::new(LeftClick {
+        content: ContextMenu::new(trigger, panel).style(backdrop).into(),
+    })
+}
+
 /// A Favorite's heart, or an artist's follow button: lit while it's a
 /// Favorite, and disabled while `liked` is unknown.
 pub fn heart<'a>(favorite: Favorite, liked: Option<bool>, size: f32) -> Element<'a, Link> {
@@ -404,11 +415,11 @@ pub fn panel(_theme: &Theme) -> container::Style {
 
 /// Its content, with a left click on it taken as a right click: a context
 /// menu that opens like a button, when the click is released.
-struct LeftClick<'a> {
-    content: Element<'a, Link>,
+struct LeftClick<'a, Message> {
+    content: Element<'a, Message>,
 }
 
-impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
+impl<Message> Widget<Message, Theme, iced::Renderer> for LeftClick<'_, Message> {
     fn size(&self) -> Size<Length> {
         self.content.as_widget().size()
     }
@@ -473,7 +484,7 @@ impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Link>,
+        shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
         // The menu opens as the click ends, not as it starts: an open menu
@@ -520,7 +531,7 @@ impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
         renderer: &iced::Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Link, Theme, iced::Renderer>> {
+    ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,

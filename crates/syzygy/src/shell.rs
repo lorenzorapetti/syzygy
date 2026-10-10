@@ -1096,6 +1096,9 @@ impl Shell {
                     })
                 },
             ),
+            sidebar::Effect::Sort(sort) => {
+                self.run_action(Action::SaveSort(sort), services, context)
+            }
             sidebar::Effect::Link(link) => self.run_action(link.follow(), services, context),
         }
     }
