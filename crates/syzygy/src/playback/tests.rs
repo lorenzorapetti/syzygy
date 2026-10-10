@@ -4057,3 +4057,65 @@ fn a_reset_forgets_the_deleted_playlists() {
 
     assert!(!playback.is_deleted(&playlist_ref(1)));
 }
+
+// What TIDAL served.
+
+fn format(bit_depth: u32) -> Format {
+    Format {
+        quality: Some(Quality::HiResLossless),
+        bit_depth: Some(bit_depth),
+        sample_rate: Some(96_000),
+        codec: Some("FLAC".to_string()),
+    }
+}
+
+#[test]
+fn the_format_served_is_the_current_tracks() {
+    let mut playback = new(1.0);
+    let effects = playback.send(Message::Start(album(1, 3, 0)));
+    assert_eq!(playback.format(), None, "not until TIDAL says");
+
+    playback.send(Message::Served(101, format(24)));
+    playback.send(played(token(&effects)));
+
+    assert_eq!(playback.format(), Some(&format(24)));
+}
+
+#[test]
+fn the_format_served_for_the_armed_track_shows_once_it_takes_over() {
+    let mut playback = new(1.0);
+    let effects = playback.send(Message::Start(album(1, 3, 0)));
+    playback.send(Message::Served(101, format(24)));
+    let effects = playback.send(played(token(&effects)));
+
+    playback.send(Message::Served(102, format(16)));
+    assert_eq!(playback.format(), Some(&format(24)), "101 still plays");
+    playback.send(Message::TrackAdvanced(armed_entry(&effects)));
+
+    assert_eq!(playback.format(), Some(&format(16)));
+}
+
+#[test]
+fn a_restore_keeps_the_format_served_for_the_current_track() {
+    let mut playback = new(1.0);
+    let effects = playback.send(Message::Start(album(1, 3, 0)));
+    playback.send(Message::Served(101, format(24)));
+    playback.send(played(token(&effects)));
+
+    let (restored, _) = relaunched(&playback);
+
+    assert_eq!(restored.format(), Some(&format(24)));
+}
+
+#[test]
+fn a_snapshot_saved_before_formats_were_kept_restores_without_one() {
+    let playback = playing(album(1, 3, 0));
+    let mut json = serde_json::to_value(playback.to_snapshot()).unwrap();
+    json.as_object_mut().unwrap().remove("format");
+    let mut restored = new(1.0);
+
+    let _ = restored.restore(serde_json::from_value(json).unwrap());
+
+    assert_eq!(current(&restored), Some(101));
+    assert_eq!(restored.format(), None);
+}

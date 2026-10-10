@@ -54,6 +54,7 @@ use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
 use syzygy_mpris as mpris;
 use syzygy_report as report;
+use syzygy_tidal::Quality;
 
 mod controls;
 mod reporting;
@@ -126,6 +127,19 @@ pub struct Playback {
     reported: Option<reporting::Reported>,
     /// Playlists the user deleted: "Playing from" no longer leads to them.
     deleted: Vec<SourceRef>,
+    /// What TIDAL served for the current track and for the one fetched
+    /// after it, by track id.
+    served: Vec<(u64, Format)>,
+}
+
+/// What TIDAL served for a track: its tier, and the depth and rate of its
+/// samples where TIDAL says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Format {
+    pub quality: Option<Quality>,
+    pub bit_depth: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub codec: Option<String>,
 }
 
 /// Where listening is: the source, the Manual queue, the current track and
@@ -578,6 +592,8 @@ pub enum Message {
     TrackAdvanced(EntryId),
     /// The engine stopped on an error of its own, in its words.
     EngineFailed(String),
+    /// TIDAL served this for the track: one playing or about to.
+    Served(u64, Format),
     /// A fill read these tracks, the next ones in the source.
     PageArrived(FillId, Vec<Track>),
     /// A fill read the last of its source, or gave up.
@@ -706,6 +722,7 @@ fn changes_listening(message: &Message) -> bool {
         // What's on disk is the app's to keep or delete.
         Message::Reset
         | Message::Position(_)
+        | Message::Served(..)
         | Message::DeviceBusy(_)
         | Message::SetVolume(_)
         | Message::ToggleMute
@@ -851,6 +868,7 @@ impl Playback {
             mpris: mpris::View::default(),
             reported: None,
             deleted: Vec::new(),
+            served: Vec::new(),
         };
         playback.mpris = playback.mpris_now();
         playback
@@ -1165,6 +1183,14 @@ impl Playback {
                     None => vec![],
                 }
             }
+            Message::Served(track_id, format) => {
+                // Only the current track's is still worth keeping.
+                let current = self.current().map(|track| track.id);
+                self.served
+                    .retain(|&(id, _)| Some(id) == current && id != track_id);
+                self.served.push((track_id, format));
+                vec![]
+            }
             Message::Reset => self.reset(),
             Message::SourceDeleted(deleted) => self.source_deleted(deleted),
         }
@@ -1383,6 +1409,15 @@ impl Playback {
     /// The track playing, or that would play.
     pub fn current(&self) -> Option<&Track> {
         self.listening.current.as_ref().map(|entry| &entry.track)
+    }
+
+    /// What TIDAL served for the current track, once it said.
+    pub fn format(&self) -> Option<&Format> {
+        let id = self.current()?.id;
+        self.served
+            .iter()
+            .find(|(served, _)| *served == id)
+            .map(|(_, format)| format)
     }
 
     /// Where the current track comes from.

@@ -1,13 +1,13 @@
 //! Where listening is, as `queue.json` keeps it between launches: the
 //! Playback source with its play order and unread rest, the Manual queue,
-//! History, the current track and the position. Shuffle, Repeat mode and the
+//! History, the current track, what TIDAL served for it and the position. Shuffle, Repeat mode and the
 //! other preferences live in `Settings`.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use syzygy_catalog::Track;
 
-use super::{Continuation, Source};
+use super::{Continuation, Format, Source};
 use super::{Effect, Fill, Item, Listening, Playback, SourcePlay, Status, Step};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -19,6 +19,9 @@ pub struct Snapshot {
     pub(super) history: Vec<SavedEntry>,
     /// Seconds into the current track.
     pub(super) position: f32,
+    /// What TIDAL last served for the current track.
+    #[serde(default)]
+    pub(super) format: Option<Format>,
 }
 
 /// The Playback source and where playback was in it.
@@ -74,6 +77,7 @@ impl Playback {
             current: listening.current.as_ref().map(save),
             history: listening.history.iter().map(save).collect(),
             position: self.position,
+            format: self.format().cloned(),
         }
     }
 
@@ -133,6 +137,10 @@ impl Playback {
             manual: snapshot.manual.into_iter().map(&mut restore).collect(),
             current: snapshot.current.map(&mut restore),
             history: snapshot.history.into_iter().map(&mut restore).collect(),
+        };
+        self.served = match (&self.listening.current, snapshot.format) {
+            (Some(current), Some(format)) => vec![(current.track.id, format)],
+            _ => Vec::new(),
         };
         self.status = Status::Stopped;
         self.position = match &self.listening.current {

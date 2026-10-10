@@ -1,17 +1,19 @@
 //! The 90px player bar along the bottom, split 30/40/30: what's playing
 //! and where from on the left, the transport over the seek bar in the
-//! middle, the drawer and maximize toggles and the volume on the right.
+//! middle, what TIDAL served, the drawer and maximize toggles and the
+//! volume on the right.
 
 use iced::widget::slider::{Handle, HandleShape, Rail};
 use iced::widget::{Space, button, column, container, row, slider, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Font, Length, Theme, font};
+use syzygy_tidal::Quality;
 
 use super::drawer::Tab;
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::library::{Favorite, Library, Tracks};
 use crate::page::{self, Link};
-use crate::playback::{self, Playback, Repeat, Status};
+use crate::playback::{self, Format, Playback, Repeat, Status};
 use crate::style;
 
 const HEIGHT: f32 = 90.0;
@@ -26,6 +28,10 @@ const TIME_WIDTH: f32 = 40.0;
 const VOLUME_WIDTH: f32 = 100.0;
 const SEMIBOLD: Font = Font {
     weight: font::Weight::Semibold,
+    ..Font::DEFAULT
+};
+const BLACK: Font = Font {
+    weight: font::Weight::Black,
     ..Font::DEFAULT
 };
 
@@ -109,9 +115,14 @@ impl PlayerBar {
                 .width(Length::FillPortion(4))
                 .center_x(Length::Fill),
             container(
-                row![space::horizontal(), toggles(drawer), volume(playback)]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
+                row![
+                    space::horizontal(),
+                    served(playback.format()),
+                    toggles(drawer),
+                    volume(playback)
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
             )
             .width(Length::FillPortion(3))
             .align_right(Length::Fill),
@@ -266,6 +277,66 @@ fn mode<'a>(glyph: Icon, on: bool, message: Message) -> Element<'a, Message> {
         .style(style::icon_button)
         .on_press(message)
         .into()
+}
+
+/// What TIDAL served for the current track, as sone shows it: the bit
+/// depth, sample rate and codec over the tier. Nothing until TIDAL says.
+fn served<'a>(format: Option<&Format>) -> Element<'a, Message> {
+    let Some(format) = format else {
+        return space().into();
+    };
+    let mut detail = Vec::new();
+    if let Some(depth) = format.bit_depth {
+        detail.push(format!("{depth}-BIT"));
+    }
+    if let Some(rate) = format.sample_rate {
+        detail.push(sample_rate(rate));
+    }
+    detail.extend(format.codec.clone());
+    let (label, background, color) = match format.quality {
+        Some(Quality::HiResLossless | Quality::HiRes) => {
+            ("HI-RES LOSSLESS", style::ACCENT, style::TEXT_PRIMARY)
+        }
+        Some(Quality::Lossless) => (
+            "LOSSLESS",
+            style::ACCENT.scale_alpha(0.7),
+            style::TEXT_PRIMARY,
+        ),
+        Some(Quality::High) => ("HIGH", style::BG_BUTTON_HOVER, style::TEXT_PRIMARY),
+        None if detail.is_empty() => return space().into(),
+        None => {
+            return text(detail.join(" "))
+                .size(9)
+                .color(style::TEXT_MUTED)
+                .into();
+        }
+    };
+    let pill = container(text(label).size(9).font(BLACK).color(color))
+        .padding([2, 8])
+        .style(move |_theme| container::Style {
+            background: Some(background.into()),
+            border: style::rounded(4.0),
+            ..container::Style::default()
+        });
+    let detail = (!detail.is_empty()).then(|| {
+        text(detail.join(" "))
+            .size(9)
+            .color(style::TEXT_MUTED)
+            .wrapping(text::Wrapping::None)
+    });
+    column![detail, pill]
+        .spacing(2)
+        .align_x(Alignment::Center)
+        .into()
+}
+
+/// 44100 as 44.1kHz, 96000 as 96kHz.
+fn sample_rate(rate: u32) -> String {
+    match rate {
+        0..1000 => format!("{rate}Hz"),
+        _ if rate.is_multiple_of(1000) => format!("{}kHz", rate / 1000),
+        _ => format!("{:.1}kHz", f64::from(rate) / 1000.0),
+    }
 }
 
 /// The drawer's Lyrics and Play queue, each lit while it shows, and the
