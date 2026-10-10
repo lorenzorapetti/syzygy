@@ -16,19 +16,19 @@ jobs:
       matrix:
         include:
           - system: x86_64-linux
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - system: aarch64-linux
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     name: build (${{ matrix.system }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: cachix/install-nix-action@v31
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: cachix/cachix-action@v16
+      - uses: cachix/cachix-action@v17
         with:
           name: syzygy
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
