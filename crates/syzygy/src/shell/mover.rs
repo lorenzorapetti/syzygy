@@ -6,8 +6,7 @@
 //! user's edits show in it as everywhere else.
 
 use iced::widget::{
-    Column, button, column, container, mouse_area, responsive, row, scrollable, space,
-    stack, text,
+    Column, button, column, container, mouse_area, responsive, row, scrollable, space, stack, text,
 };
 use iced::{Alignment, Element, Length, Rectangle};
 use syzygy_catalog::library::{Folder, Item};
