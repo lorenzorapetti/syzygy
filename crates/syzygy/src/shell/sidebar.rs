@@ -16,8 +16,8 @@ use syzygy_catalog::{Kind, LibrarySort, Paged, Read, Shelf};
 use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
 use crate::images::Images;
-use crate::library::{Ask, Library, Listing, Shelved, is_placeholder};
-use crate::page::library::{folder_route, label, playlist_menu, playlist_route};
+use crate::library::{Ask, Library, Listing, Shelved, is_placeholder, is_placeholder_folder};
+use crate::page::library::{folder_menu, folder_route, label, playlist_menu, playlist_route};
 use crate::page::paged::List;
 use crate::page::{Link, Remote, Route, cards, folder_art, loved_art, menu, rounded_cover};
 use crate::settings::Settings;
@@ -375,13 +375,25 @@ impl Sidebar {
     ) -> Element<'a, Message> {
         let art = |cover, radius| rounded_cover(images, cover, ART_SIZE, radius);
         let row = match item {
-            Item::Folder(folder) => entry(
+            // A new Folder TIDAL hasn't made yet leads nowhere.
+            Item::Folder(folder) if is_placeholder_folder(folder) => entry(
                 folder_art(ART_SIZE, ART_RADIUS),
-                &folder.name,
+                folder.name.clone(),
                 folder.subtitle(),
-                Some(folder_route(folder)),
+                None,
                 current,
             ),
+            Item::Folder(folder) => {
+                let shown = library.folder(folder);
+                let row = entry(
+                    folder_art(ART_SIZE, ART_RADIUS),
+                    shown.name.clone(),
+                    shown.subtitle(),
+                    Some(folder_route(&shown)),
+                    current,
+                );
+                folder_menu(row, folder, library)
+            }
             // A new playlist TIDAL hasn't made yet leads nowhere.
             Item::Playlist(playlist) if is_placeholder(playlist) => entry(
                 art(None, ART_RADIUS),
@@ -398,7 +410,7 @@ impl Sidebar {
                     Some(playlist_route(playlist)),
                     current,
                 );
-                playlist_menu(row, playlist, self.user_id, library)
+                playlist_menu(row, playlist, None, self.user_id, library)
             }
             Item::Card(card) => {
                 let radius = match card.target {
@@ -458,7 +470,7 @@ fn dot(_theme: &Theme) -> container::Style {
 /// One row: the art, the title over a line about it, leading to `route`.
 fn entry<'a>(
     art: Element<'a, Link>,
-    title: &'a str,
+    title: impl text::IntoFragment<'a>,
     subtitle: String,
     route: Option<Route>,
     current: &Route,

@@ -541,6 +541,108 @@ impl Catalog {
         }
     }
 
+    /// Every Folder at the top level of `user_id`'s playlists, by name:
+    /// where "Move to folder" offers to move a playlist. TIDAL's pages are
+    /// read to the end.
+    pub fn root_folders(&self, user_id: u64) -> BoxStream<'static, Read<Vec<library::Folder>>> {
+        let tidal = self.tidal.clone();
+        let entry = serde_entry(
+            format!("root-folders:{user_id}"),
+            vec![library::FOLDERS.to_string(), favorites::user_tag(user_id)],
+        );
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(root_folders(&tidal).await?)
+        })
+        .boxed()
+    }
+
+    /// Make a Folder at the top level, with `playlist` moved into it in the
+    /// same call. The user's lists are stale after.
+    pub fn create_folder(
+        &self,
+        user_id: u64,
+        name: &str,
+        playlist: Option<String>,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let name = name.to_string();
+        async move {
+            let trns = playlist
+                .as_deref()
+                .map(library::playlist_trn)
+                .unwrap_or_default();
+            tidal
+                .create_playlist_folder(library::ROOT, &name, &trns)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Give a Folder a new name. The user's lists are stale after.
+    pub fn rename_folder(
+        &self,
+        user_id: u64,
+        id: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let (trn, name) = (library::folder_trn(id), name.to_string());
+        async move {
+            tidal
+                .rename_playlist_folder(&trn, &name)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Delete a Folder, which should be empty. The user's lists are stale
+    /// after.
+    pub fn delete_folder(
+        &self,
+        user_id: u64,
+        id: &str,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let trn = library::folder_trn(id);
+        async move {
+            tidal
+                .delete_playlist_folder(&trn)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Move a playlist into a Folder, or to the top level (`None`). The
+    /// user's lists are stale after.
+    pub fn move_to_folder(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        folder: Option<String>,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let trn = library::playlist_trn(uuid);
+        async move {
+            let folder = folder.as_deref().unwrap_or(library::ROOT);
+            tidal
+                .move_playlist_to_folder(folder, &trn)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
     /// Every Own playlist of `user_id`'s, wherever its Folder, last
     /// updated first: what "Add to playlist" offers. The pages after the
     /// first are read at once.
@@ -878,6 +980,39 @@ pub fn playlist_tag(uuid: &str) -> String {
 async fn invalidate_playlist(cache: &DiskCache, user_id: u64, uuid: &str) {
     cache.invalidate_tag(&playlist_tag(uuid)).await;
     cache.invalidate_tag(&favorites::user_tag(user_id)).await;
+}
+
+/// The Folders changed: the playlists and Folders as read, and every list
+/// of the user's.
+async fn invalidate_folders(cache: &DiskCache, user_id: u64) {
+    cache.invalidate_tag(library::FOLDERS).await;
+    cache.invalidate_tag(&favorites::user_tag(user_id)).await;
+}
+
+/// More pages of the top level than anyone's Folders fill: a stop should
+/// TIDAL keep sending cursors.
+const MAX_FOLDER_PAGES: usize = 40;
+
+/// Every Folder at the top level, by name, read a page at a time from
+/// TIDAL's cursor.
+async fn root_folders(tidal: &TidalClient) -> Result<Vec<library::Folder>, syzygy_tidal::Error> {
+    let mut folders = Vec::new();
+    let mut cursor = String::new();
+    for _ in 0..MAX_FOLDER_PAGES {
+        let page = tidal
+            .get_playlist_folders(library::ROOT, "", 0, PAGE_SIZE, "NAME", "ASC", &cursor)
+            .await?;
+        let page = library::folder_page(&page);
+        folders.extend(page.items.into_iter().filter_map(|item| match item {
+            library::Item::Folder(folder) => Some(folder),
+            _ => None,
+        }));
+        match page.cursor {
+            Some(next) if page.has_more => cursor = next,
+            _ => break,
+        }
+    }
+    Ok(folders)
 }
 
 /// How many Own playlists a read asks for at a time, as in sone.

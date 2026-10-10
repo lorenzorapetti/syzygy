@@ -226,7 +226,7 @@ impl Picker {
 
 /// Where the popover goes: to the right of `at`, or to its left where the
 /// window ends, with its top by `at`'s and kept in the window.
-fn place(at: Rectangle, window: Size) -> (f32, f32) {
+pub(super) fn place(at: Rectangle, window: Size) -> (f32, f32) {
     let right = at.x + at.width + GAP;
     let x = if right + WIDTH <= window.width - MARGIN {
         right
@@ -289,13 +289,13 @@ fn pick_row(playlist: &Playlist, ready: bool) -> Element<'_, Message> {
         .into()
 }
 
-fn heading(label: &str) -> Element<'_, Message> {
+pub(super) fn heading<'a, M: 'a>(label: &'a str) -> Element<'a, M> {
     container(text(label).size(11).color(style::TEXT_DISABLED))
         .padding([6, 16])
         .into()
 }
 
-fn note(says: &str) -> Element<'_, Message> {
+pub(super) fn note<'a, M: 'a>(says: &'a str) -> Element<'a, M> {
     container(text(says).size(13).color(style::TEXT_MUTED))
         .padding([10, 16])
         .into()

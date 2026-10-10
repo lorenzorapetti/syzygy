@@ -1,8 +1,8 @@
 //! The menus tracks and cards open on right-click, and a Page header's
 //! "…" button that opens its item's card menu on a left click. A menu is
-//! built from sections of items, so later Library items (moving to a
-//! Folder) slot in as sections of their own. "Add to playlist" opens the
-//! Shell's picker beside the item, so it knows where on screen it is.
+//! built from sections of items. "Add to playlist" and "Move to folder"
+//! open the Shell's popovers beside the item, so it knows where on screen
+//! it is.
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer};
@@ -12,11 +12,12 @@ use iced::{
 };
 use iced_aw::ContextMenu;
 use syzygy_catalog::home_feed::{Card, Target};
+use syzygy_catalog::library::Folder;
 use syzygy_catalog::{Playlist, Track};
 
 use super::{Link, Preview, Route, cards};
 use crate::icons::{Icon, filled, icon};
-use crate::library::{Ask, Favorite, Removal, Tracks};
+use crate::library::{Ask, Favorite, Placed, Removal, Tracks};
 use crate::style;
 
 const WIDTH: f32 = 240.0;
@@ -31,6 +32,8 @@ pub struct Item {
     link: Option<Link>,
     /// Drawn filled in the accent, as a Favorite's heart.
     lit: bool,
+    /// Under the label: why it's disabled.
+    hint: Option<&'static str>,
     /// Its link is made from where the item is on screen, and it opens
     /// what comes next beside it.
     anchored: Option<Box<dyn Fn(Rectangle) -> Link>>,
@@ -43,6 +46,7 @@ impl Item {
             label,
             link,
             lit: false,
+            hint: None,
             anchored: None,
         }
     }
@@ -53,6 +57,14 @@ fn add_to_playlist(tracks: Tracks) -> Item {
     Item {
         anchored: Some(Box::new(Link::add_to_playlist(tracks))),
         ..Item::new(Icon::ListMusic, "Add to playlist", None)
+    }
+}
+
+/// "Move to folder ▸": the Folders an Own playlist can go to.
+fn move_to_folder(placed: Placed) -> Item {
+    Item {
+        anchored: Some(Box::new(Link::move_to_folder(placed))),
+        ..Item::new(Icon::FolderInput, "Move to folder", None)
     }
 }
 
@@ -177,24 +189,68 @@ pub fn card(card: &Card, liked: Option<bool>) -> Vec<Vec<Item>> {
 }
 
 /// An Own playlist's menu: playing it, adding its tracks to another,
-/// editing it and deleting it. It isn't a Favorite, so it has no like.
-pub fn own_playlist(card: &Card, playlist: &Playlist) -> Vec<Vec<Item>> {
+/// editing it, moving it to a Folder when it's listed in one (or at the
+/// top level: `listed_in`), and deleting it. It isn't a Favorite, so it
+/// has no like.
+pub fn own_playlist(
+    card: &Card,
+    playlist: &Playlist,
+    listed_in: Option<Option<String>>,
+) -> Vec<Vec<Item>> {
     let ask = |ask| Some(Link::Ask(Box::new(ask)));
+    let edit = Item::new(
+        Icon::Pencil,
+        "Edit playlist",
+        ask(Ask::EditPlaylist(playlist.clone())),
+    );
+    let moving = listed_in.map(|folder| {
+        move_to_folder(Placed {
+            playlist: playlist.clone(),
+            folder,
+        })
+    });
+    let delete = Item::new(
+        Icon::Trash2,
+        "Delete playlist",
+        ask(Ask::DeletePlaylist(playlist.clone())),
+    );
     vec![
         playing(card),
         vec![add_to_playlist(Tracks::Card(card.clone()))],
+        std::iter::once(edit)
+            .chain(moving)
+            .chain([delete])
+            .collect(),
+    ]
+}
+
+/// A Folder's menu: a new playlist in it, renaming it, and deleting it,
+/// which only an empty Folder offers (as TIDAL's own app does).
+pub fn folder(folder: &Folder, deletable: bool) -> Vec<Vec<Item>> {
+    let ask = |ask| Some(Link::Ask(Box::new(ask)));
+    let delete = Item::new(
+        Icon::Trash2,
+        "Delete folder",
+        deletable.then(|| Link::Ask(Box::new(Ask::DeleteFolder(folder.clone())))),
+    );
+    let delete = Item {
+        hint: (!deletable).then_some("Move or delete its playlists first"),
+        ..delete
+    };
+    vec![
         vec![
             Item::new(
-                Icon::Pencil,
-                "Edit playlist",
-                ask(Ask::EditPlaylist(playlist.clone())),
+                Icon::Plus,
+                "New playlist in folder",
+                ask(Ask::NewPlaylistIn(folder.clone())),
             ),
             Item::new(
-                Icon::Trash2,
-                "Delete playlist",
-                ask(Ask::DeletePlaylist(playlist.clone())),
+                Icon::Pencil,
+                "Rename folder",
+                ask(Ask::RenameFolder(folder.clone())),
             ),
         ],
+        vec![delete],
     ]
 }
 
@@ -292,9 +348,14 @@ fn item<'a>(item: Item) -> Element<'a, Link> {
     } else {
         style::TEXT_DISABLED
     };
-    let line = row![glyph, text(item.label).size(14).color(label)]
-        .spacing(12)
-        .align_y(Alignment::Center);
+    let words = Column::new()
+        .push(text(item.label).size(14).color(label))
+        .push(
+            item.hint
+                .map(|hint| text(hint).size(12).color(style::TEXT_MUTED)),
+        )
+        .spacing(2);
+    let line = row![glyph, words].spacing(12).align_y(Alignment::Center);
     button(line)
         .padding([10, 16])
         .width(Length::Fill)

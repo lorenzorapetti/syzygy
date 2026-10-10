@@ -17,6 +17,10 @@ use crate::track;
 /// The Folder TIDAL's own list starts from.
 pub(crate) const ROOT: &str = "root";
 
+/// The tag the playlists and Folders are read under: what a Folder edit
+/// invalidates.
+pub(crate) const FOLDERS: &str = "folders";
+
 /// One type of thing in the Library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Kind {
@@ -129,7 +133,7 @@ impl Shelf {
     pub fn tags(&self) -> Vec<String> {
         let kind: &[&str] = match self.kind {
             // Favorite playlists sit among the user's own, and in Folders.
-            Kind::Playlists => &["folders", favorites::PLAYLISTS],
+            Kind::Playlists => &[FOLDERS, favorites::PLAYLISTS],
             Kind::Albums => &[favorites::ALBUMS],
             Kind::Artists => &[favorites::ARTISTS],
             Kind::Mixes => &[favorites::MIXES],
@@ -162,7 +166,7 @@ pub enum Item {
 }
 
 /// A named group of playlists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Folder {
     pub id: String,
     pub name: String,
@@ -228,6 +232,16 @@ fn entry(item: &Value) -> Option<Item> {
         }));
     }
     playlist::from_details(data).map(Item::Playlist)
+}
+
+/// How TIDAL names a Folder in its Folder calls.
+pub(crate) fn folder_trn(id: &str) -> String {
+    format!("trn:folder:{id}")
+}
+
+/// How TIDAL names a playlist in its Folder calls.
+pub(crate) fn playlist_trn(uuid: &str) -> String {
+    format!("trn:playlist:{uuid}")
 }
 
 /// A page of the user's Favorite albums.
@@ -435,6 +449,12 @@ mod tests {
         assert_eq!(playlist.uuid, "p-1");
         assert_eq!(playlist.cover, Some(Cover::Image("sq-1".to_string())));
         assert_eq!(page.total, Some(7));
+    }
+
+    #[test]
+    fn folders_and_playlists_are_named_by_trn() {
+        assert_eq!(folder_trn("f-1"), "trn:folder:f-1");
+        assert_eq!(playlist_trn("p-1"), "trn:playlist:p-1");
     }
 
     #[test]

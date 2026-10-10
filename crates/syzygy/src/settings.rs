@@ -46,6 +46,8 @@ pub struct Settings {
     pub search_history: Vec<String>,
     /// The uuids of the playlists tracks last went into, newest first.
     pub recent_playlists: Vec<String>,
+    /// The ids of the Folders playlists last went into, newest first.
+    pub recent_folders: Vec<String>,
 }
 
 /// How many searches the history keeps.
@@ -53,6 +55,9 @@ const SEARCH_HISTORY: usize = 10;
 
 /// How many recent playlists "Add to playlist" offers first, as in sone.
 pub const RECENT_PLAYLISTS: usize = 8;
+
+/// How many recent Folders "Move to folder" offers first, as in sone.
+pub const RECENT_FOLDERS: usize = 8;
 
 /// An order the user picked for one of their lists.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +98,7 @@ impl Default for Settings {
             library_sorts: BTreeMap::new(),
             search_history: Vec::new(),
             recent_playlists: Vec::new(),
+            recent_folders: Vec::new(),
         }
     }
 }
@@ -147,19 +153,23 @@ impl Settings {
 
     /// Drop what belongs to the account rather than to the machine: the
     /// sorts of its playlists, Loved tracks and Library, and its recent
-    /// playlists. Preferences stay.
+    /// playlists and Folders. Preferences stay.
     pub fn forget_account(&mut self) {
         self.track_sorts.clear();
         self.loved_tracks_sort = None;
         self.library_sorts.clear();
         self.recent_playlists.clear();
+        self.recent_folders.clear();
     }
 
     /// Put a playlist at the front of the recent ones, once.
     pub fn remember_playlist(&mut self, uuid: &str) {
-        self.recent_playlists.retain(|recent| recent != uuid);
-        self.recent_playlists.insert(0, uuid.to_string());
-        self.recent_playlists.truncate(RECENT_PLAYLISTS);
+        remember(&mut self.recent_playlists, uuid, RECENT_PLAYLISTS);
+    }
+
+    /// Put a Folder at the front of the recent ones, once.
+    pub fn remember_folder(&mut self, id: &str) {
+        remember(&mut self.recent_folders, id, RECENT_FOLDERS);
     }
 
     /// Put a search at the front of the history, once whatever its case
@@ -196,6 +206,13 @@ impl Settings {
     ) -> impl Future<Output = Result<(), Arc<syzygy_store::Error>>> + use<> {
         crate::persist::write_json(store, path, self)
     }
+}
+
+/// Put `id` at the front of `recent`, once, keeping at most `keep`.
+fn remember(recent: &mut Vec<String>, id: &str, keep: usize) {
+    recent.retain(|seen| seen != id);
+    recent.insert(0, id.to_string());
+    recent.truncate(keep);
 }
 
 #[cfg(test)]
@@ -392,8 +409,23 @@ mod tests {
                 loved_tracks_sort: None,
                 library_sorts: BTreeMap::new(),
                 recent_playlists: Vec::new(),
+                recent_folders: Vec::new(),
                 ..kept
             }
+        );
+    }
+
+    #[test]
+    fn the_recent_folders_are_the_last_eight_newest_first_each_once() {
+        let mut settings = Settings::default();
+        for n in 0..10 {
+            settings.remember_folder(&format!("f-{n}"));
+        }
+        settings.remember_folder("f-5");
+
+        assert_eq!(
+            settings.recent_folders,
+            ["f-5", "f-9", "f-8", "f-7", "f-6", "f-4", "f-3", "f-2"]
         );
     }
 

@@ -17,7 +17,7 @@ use super::paged::List;
 use super::{Action, Context, Link, Load, PADDING, Preview, Route, cover, folder_art, menu};
 use crate::icons::{Icon, icon};
 use crate::images::Images;
-use crate::library::{Ask, Library, Listing, is_placeholder};
+use crate::library::{Ask, Library, Listing, is_placeholder, is_placeholder_folder};
 use crate::settings::Sort;
 use crate::style;
 
@@ -178,33 +178,54 @@ impl State {
         }
     }
 
+    /// The Folder on screen, as the user last named it.
+    fn folder(&self, library: &Library) -> Option<library::Folder> {
+        let folder = self.folder.as_ref()?;
+        Some(library.folder(&library::Folder {
+            id: folder.id.clone(),
+            name: folder.name.clone(),
+            playlists: None,
+        }))
+    }
+
     pub fn view<'a>(&'a self, images: &'a Images, library: &'a Library) -> Element<'a, Message> {
-        let title = match &self.folder {
-            Some(folder) => folder.name.as_str(),
-            None => title(self.kind),
+        let folder = self.folder(library);
+        let title = match &folder {
+            Some(folder) => folder.name.clone(),
+            None => title(self.kind).to_string(),
         };
         let total = self
             .items
             .total()
             .map(|total| noun(self.kind, total))
             .unwrap_or_default();
-        let new_playlist = (self.kind == Kind::Playlists && self.folder.is_none()).then(|| {
+        let ask = |ask| Message::Link(Link::Ask(Box::new(ask)));
+        let new = |glyph, label, ask| {
             button(
-                row![
-                    icon(Icon::Plus, 16.0, style::TEXT_PRIMARY),
-                    text("New playlist").size(14)
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
+                row![icon(glyph, 16.0, style::TEXT_PRIMARY), text(label).size(14)]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
             )
             .padding([8, 16])
             .style(style::pill_button)
-            .on_press(Message::Link(Link::Ask(Box::new(Ask::NewPlaylist(vec![])))))
-        });
+            .on_press(ask)
+        };
+        // A Folder gets new playlists, and the top level Folders too.
+        let buttons = match (&folder, self.kind) {
+            (Some(folder), _) => row![new(
+                Icon::Plus,
+                "New playlist",
+                ask(Ask::NewPlaylistIn(folder.clone()))
+            )],
+            (None, Kind::Playlists) => row![
+                new(Icon::FolderPlus, "New folder", ask(Ask::NewFolder(None))),
+                new(Icon::Plus, "New playlist", ask(Ask::NewPlaylist(vec![]))),
+            ],
+            (None, _) => row![],
+        }
+        .spacing(8);
         let header = column![
-            row![text(title).size(32), space::horizontal()]
-                .push(new_playlist)
-                .align_y(Alignment::Center),
+            row![text(title).size(32), space::horizontal(), buttons].align_y(Alignment::Center),
             row![
                 text(total).size(14).color(style::TEXT_MUTED),
                 self.sort_picker()
@@ -238,9 +259,10 @@ impl State {
                 let empty = format!("No {} yet", plural(self.kind));
                 return text(empty).color(style::TEXT_MUTED).into();
             }
+            let here = self.folder.as_ref().map(|folder| folder.id.as_str());
             let tiles = items
                 .into_iter()
-                .map(|item| tile(item, self.user_id, images, library));
+                .map(|item| tile(item, here, self.user_id, images, library));
             Column::new()
                 .push(cards::wrapped(tiles).map(Message::Link))
                 .push(self.items.end(Message::EndInView, Message::RetryMore))
@@ -286,21 +308,32 @@ impl State {
     }
 }
 
-/// One thing on a shelf as a card. Folders open to their playlists, and
-/// playlists open their menu when right-clicked, as cards do.
+/// One thing on a shelf as a card, listed in the Folder `here` (`None`
+/// is the top level). Folders open to their playlists, and they and
+/// playlists open their menu when right-clicked, as cards do. A new Folder
+/// or playlist TIDAL hasn't made yet does neither.
 pub fn tile<'a>(
     item: &'a Item,
+    here: Option<&str>,
     user_id: Option<u64>,
     images: &'a Images,
     library: &'a Library,
 ) -> Element<'a, Link> {
     match item {
-        Item::Folder(folder) => cards::tile(
-            folder_art(CARD_WIDTH, 4.0),
-            &folder.name,
-            folder.subtitle(),
-            Some(Link::Open(folder_route(folder))),
-        ),
+        Item::Folder(folder) => {
+            let placeholder = is_placeholder_folder(folder);
+            let shown = library.folder(folder);
+            let tile = cards::tile(
+                folder_art(CARD_WIDTH, 4.0),
+                shown.name.clone(),
+                shown.subtitle(),
+                (!placeholder).then(|| Link::Open(folder_route(&shown))),
+            );
+            if placeholder {
+                return tile;
+            }
+            folder_menu(tile, folder, library)
+        }
         Item::Playlist(playlist) => {
             let placeholder = is_placeholder(playlist);
             let tile = cards::tile(
@@ -312,25 +345,42 @@ pub fn tile<'a>(
             if placeholder {
                 return tile;
             }
-            playlist_menu(tile, playlist, user_id, library)
+            playlist_menu(tile, playlist, here, user_id, library)
         }
         Item::Card(card) => cards::card(card, images, library),
     }
 }
 
+/// `underlay`, opening a Folder's menu when right-clicked.
+pub fn folder_menu<'a>(
+    underlay: Element<'a, Link>,
+    folder: &library::Folder,
+    library: &Library,
+) -> Element<'a, Link> {
+    // The Folder as read: what it's asked about counts the pending edits
+    // itself.
+    let deletable = library.deletable(folder);
+    let folder = folder.clone();
+    menu::with_menu(underlay, move || menu::folder(&folder, deletable))
+}
+
 /// `underlay`, opening a playlist's card menu when right-clicked. An Own
-/// playlist isn't a Favorite: its menu has no like, but edits and deletes
-/// it.
+/// playlist isn't a Favorite: its menu has no like, but edits it, moves it
+/// out of the Folder `here` (`None` is the top level) and deletes it.
 pub fn playlist_menu<'a>(
     underlay: Element<'a, Link>,
     playlist: &Playlist,
+    here: Option<&str>,
     user_id: Option<u64>,
     library: &Library,
 ) -> Element<'a, Link> {
     let card = playlist_card(playlist);
     if playlist.is_own(user_id) {
         let playlist = playlist.clone();
-        menu::with_menu(underlay, move || menu::own_playlist(&card, &playlist))
+        let here = here.map(str::to_string);
+        menu::with_menu(underlay, move || {
+            menu::own_playlist(&card, &playlist, Some(here.clone()))
+        })
     } else {
         let liked = cards::liked(&card, library);
         menu::with_menu(underlay, move || menu::card(&card, liked))

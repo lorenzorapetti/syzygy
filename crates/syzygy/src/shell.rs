@@ -7,6 +7,7 @@ mod consent;
 mod dialog;
 pub mod drawer;
 mod maximized;
+mod mover;
 mod picker;
 mod play_card;
 pub mod player_bar;
@@ -41,6 +42,7 @@ use crate::style;
 use back_stack::{BackStack, Entry};
 use dialog::Dialog;
 use drawer::Drawer;
+use mover::Mover;
 use picker::Picker;
 use player_bar::PlayerBar;
 use search::Search;
@@ -95,6 +97,8 @@ pub struct Shell {
     dialog: Option<Dialog>,
     /// The "Add to playlist" popover, while it's open.
     picker: Option<Picker>,
+    /// The "Move to folder" popover, while it's open.
+    mover: Option<Mover>,
     /// The user's Library: their Favorites, their root playlists and
     /// Folders, and their pending edits.
     library: Library,
@@ -124,6 +128,7 @@ pub enum Message {
     Settings(settings_modal::Message),
     Dialog(dialog::Message),
     Picker(picker::Message),
+    Mover(mover::Message),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
@@ -182,6 +187,7 @@ impl Shell {
             settings: None,
             dialog: None,
             picker: None,
+            mover: None,
             library,
         };
         let task = shell.run_action(action, services, context);
@@ -292,6 +298,7 @@ impl Shell {
                     || self.settings.take().is_some()
                     || self.dialog.take().is_some()
                     || self.picker.take().is_some()
+                    || self.mover.take().is_some()
                     || std::mem::take(&mut self.maximized)
                     || self.drawer.close();
                 if !closed {
@@ -363,6 +370,19 @@ impl Shell {
                     picker::Outcome::Failed(text) => {
                         self.picker = None;
                         return self.toast(Kind::Error, text);
+                    }
+                }
+            }
+            Message::Mover(message) => {
+                let Some(mover) = &mut self.mover else {
+                    return Task::none();
+                };
+                match mover.update(message) {
+                    mover::Outcome::None => {}
+                    mover::Outcome::Close => self.mover = None,
+                    mover::Outcome::Library(message) => {
+                        self.mover = None;
+                        return self.update_library(*message, services, context);
                     }
                 }
             }
@@ -497,6 +517,7 @@ impl Shell {
         self.settings = None;
         self.dialog = None;
         self.picker = None;
+        self.mover = None;
     }
 
     /// Playback chose explicit tracks while they aren't allowed: ask.
@@ -780,6 +801,28 @@ impl Shell {
                             services.catalog.remove_track(user_id, &uuid, index),
                             done,
                         ),
+                        library::Mutation::CreateFolder {
+                            user_id,
+                            name,
+                            playlist,
+                        } => Task::perform(
+                            services.catalog.create_folder(user_id, &name, playlist),
+                            done,
+                        ),
+                        library::Mutation::RenameFolder { user_id, id, name } => {
+                            Task::perform(services.catalog.rename_folder(user_id, &id, &name), done)
+                        }
+                        library::Mutation::DeleteFolder { user_id, id } => {
+                            Task::perform(services.catalog.delete_folder(user_id, &id), done)
+                        }
+                        library::Mutation::Move {
+                            user_id,
+                            uuid,
+                            folder,
+                        } => Task::perform(
+                            services.catalog.move_to_folder(user_id, &uuid, folder),
+                            done,
+                        ),
                     }
                 }
                 library::Effect::ReadOrder(edit, uuid) => {
@@ -796,6 +839,7 @@ impl Shell {
                 library::Effect::Toast(text) => self.toast(Kind::Error, text),
                 library::Effect::Inform(text) => self.toast(Kind::Info, text),
                 library::Effect::Recent(uuid) => Task::done(app::Message::RecentPlaylist(uuid)),
+                library::Effect::RecentFolder(id) => Task::done(app::Message::RecentFolder(id)),
                 library::Effect::Cover(uuid) => match self.user_id {
                     Some(user_id) => {
                         let forget = services.catalog.forget_playlist(user_id, &uuid);
@@ -812,12 +856,17 @@ impl Shell {
                     None => Task::none(),
                 },
                 library::Effect::Pick { tracks, at } => self.open_picker(tracks, at, services),
+                library::Effect::PickFolder { playlist, at } => {
+                    self.open_mover(playlist, at, services)
+                }
                 library::Effect::Ask(ask) => {
                     self.picker = None;
+                    self.mover = None;
                     self.dialog = Some(Dialog::new(ask, &self.library));
                     Task::none()
                 }
                 library::Effect::Deleted(uuid) => self.playlist_deleted(&uuid, services, context),
+                library::Effect::FolderDeleted(id) => self.folder_deleted(&id, services, context),
                 library::Effect::Removed { uuid, track, index } => {
                     self.current
                         .page
@@ -844,6 +893,7 @@ impl Shell {
         let Some(user_id) = self.user_id else {
             return Task::none();
         };
+        self.mover = None;
         let to_picker = |message| app::Message::Shell(Message::Picker(message));
         let (mut picker, card) = match tracks {
             library::Tracks::These(tracks) => (Picker::new(Some(tracks), at), None),
@@ -868,6 +918,27 @@ impl Shell {
         };
         self.picker = Some(picker);
         Task::batch([playlists, tracks, Picker::focus()])
+    }
+
+    /// Open "Move to folder" beside `at`, reading the Folders.
+    fn open_mover(
+        &mut self,
+        playlist: library::Placed,
+        at: iced::Rectangle,
+        services: &Services,
+    ) -> Task<app::Message> {
+        let Some(user_id) = self.user_id else {
+            return Task::none();
+        };
+        self.picker = None;
+        let mut mover = Mover::new(playlist, at, user_id);
+        let (read, handle) = Task::run(services.catalog.root_folders(user_id), |read| {
+            app::Message::Shell(Message::Mover(mover::Message::Folders(read)))
+        })
+        .abortable();
+        mover.reading(handle);
+        self.mover = Some(mover);
+        read
     }
 
     /// What's read under `tags` is stale: the lists on screen read it
@@ -895,9 +966,36 @@ impl Shell {
         services: &Services,
         context: &Context,
     ) -> Task<app::Message> {
-        let shows =
-            |route: &Route| matches!(route, Route::Playlist { uuid: shown, .. } if shown == uuid);
-        self.back_stack.remove(shows);
+        self.gone(
+            |route| matches!(route, Route::Playlist { uuid: shown, .. } if shown == uuid),
+            services,
+            context,
+        )
+    }
+
+    /// A Folder is gone, as a playlist is.
+    fn folder_deleted(
+        &mut self,
+        id: &str,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        self.gone(
+            |route| matches!(route, Route::Folder { id: shown, .. } if shown == id),
+            services,
+            context,
+        )
+    }
+
+    /// The Pages `shows` picks are gone: they leave back and forward, and
+    /// if one is on screen, Home takes its place.
+    fn gone(
+        &mut self,
+        shows: impl Fn(&Route) -> bool,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        self.back_stack.remove(&shows);
         if !shows(&self.current.route) {
             return Task::none();
         }
@@ -1170,9 +1268,15 @@ impl Shell {
                 .view(&self.library, &settings.recent_playlists)
                 .map(|message| app::Message::Shell(Message::Picker(message)))
         });
+        let mover = self.mover.as_ref().map(|mover| {
+            mover
+                .view(&self.library, &settings.recent_folders)
+                .map(|message| app::Message::Shell(Message::Mover(message)))
+        });
         stack![main]
             .push(maximized)
             .push(picker)
+            .push(mover)
             .push(modal)
             .push(toasts)
             .into()

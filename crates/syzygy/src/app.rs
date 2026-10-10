@@ -122,6 +122,8 @@ pub enum Message {
     ForgetSearch(String),
     /// Tracks went into this playlist: it's the most recent one.
     RecentPlaylist(String),
+    /// A playlist went into this Folder: it's the most recent one.
+    RecentFolder(String),
     Playback(playback::Message),
     /// The volume slider was let go: remember the volume.
     SaveVolume,
@@ -407,6 +409,10 @@ impl App {
             }
             Message::RecentPlaylist(uuid) => {
                 self.settings.remember_playlist(&uuid);
+                self.save_settings()
+            }
+            Message::RecentFolder(id) => {
+                self.settings.remember_folder(&id);
                 self.save_settings()
             }
             Message::Frame(at) => {

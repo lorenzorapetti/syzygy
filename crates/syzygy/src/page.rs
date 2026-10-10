@@ -363,12 +363,20 @@ pub enum Link {
     AddToPlaylist(Box<crate::library::Tracks>, iced::Rectangle),
     /// "Remove from playlist", from an Own playlist's track row.
     RemoveTrack(Box<crate::library::Removal>),
+    /// "Move to folder", from the menu item on screen at the rectangle.
+    MoveToFolder(Box<crate::library::Placed>, iced::Rectangle),
 }
 
 impl Link {
     /// "Add to playlist" for `tracks`, from where its item or button is.
     pub fn add_to_playlist(tracks: crate::library::Tracks) -> impl Fn(iced::Rectangle) -> Link {
         move |at| Link::AddToPlaylist(Box::new(tracks.clone()), at)
+    }
+
+    /// "Move to folder" for a playlist where it's listed, from where its
+    /// item is.
+    pub fn move_to_folder(placed: crate::library::Placed) -> impl Fn(iced::Rectangle) -> Link {
+        move |at| Link::MoveToFolder(Box::new(placed.clone()), at)
     }
 
     pub fn follow(self) -> Action {
@@ -391,6 +399,12 @@ impl Link {
             }),
             Link::RemoveTrack(removal) => {
                 Action::Library(crate::library::Message::RemoveTrack(*removal))
+            }
+            Link::MoveToFolder(placed, at) => {
+                Action::Library(crate::library::Message::PickFolder {
+                    playlist: *placed,
+                    at,
+                })
             }
         }
     }

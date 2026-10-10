@@ -33,6 +33,13 @@
 //! hidden and the rows after it move up; once it has, the Page drops it
 //! from what it loaded.
 //!
+//! Folders are created, renamed and deleted the same way, and Own
+//! playlists are moved between them. A new Folder shows at once as a
+//! placeholder that can't be opened, with the playlist it was made for
+//! already in it, until a read of the top level lists TIDAL's. A moved
+//! playlist shows only where it went, and the Folders it left and joined
+//! count it at once. Only an empty Folder can be deleted.
+//!
 //! [`Library::update`] is pure: it changes the state and returns
 //! [`Effect`]s for the Shell to run.
 
@@ -40,17 +47,18 @@
 mod tests;
 
 use std::sync::Arc;
-use syzygy_catalog::home_feed::{Card, Target};
-use syzygy_catalog::library::Item;
+use syzygy_catalog::home_feed::{Card, Target as Leads};
+use syzygy_catalog::library::{Folder, Item};
 use syzygy_catalog::{
-    Added, FavoriteId, FavoriteIds, LibrarySort, Playlist, PlaylistFields, Read, Shelf, Track,
+    Added, FavoriteId, FavoriteIds, Kind, LibrarySort, Playlist, PlaylistFields, Read, Shelf, Track,
 };
 
 use crate::page::paged::List;
 use crate::playback::SourceRef;
 use crate::settings::Settings;
 
-/// How a new playlist's uuid starts until TIDAL has made it.
+/// How a new playlist's uuid, or a new Folder's id, starts until TIDAL
+/// has made it.
 const PLACEHOLDER: &str = "new:";
 
 /// The tag the root playlists and the Folders are read under.
@@ -64,6 +72,20 @@ pub struct Stamp(u64);
 /// One pending edit, as its mutation's result names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EditId(u64);
+
+/// What an edit changes: a Favorite, which is also how a track or an Own
+/// playlist is named, or a Folder by its id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Target {
+    Favorite(FavoriteId),
+    Folder(String),
+}
+
+impl Target {
+    fn playlist(uuid: &str) -> Self {
+        Target::Favorite(FavoriteId::Playlist(uuid.to_string()))
+    }
+}
 
 /// A Favorite as the lists show it.
 #[derive(Debug, Clone)]
@@ -83,11 +105,11 @@ impl Favorite {
     /// a Favorite, such as a video's card or the Loved tracks'.
     pub fn card(card: &Card) -> Option<Self> {
         let id = match &card.target {
-            Target::Album(id) => FavoriteId::Album(*id),
-            Target::Artist(id) => FavoriteId::Artist(*id),
-            Target::Playlist(uuid) => FavoriteId::Playlist(uuid.clone()),
-            Target::Mix(id) => FavoriteId::Mix(id.clone()),
-            Target::Favorites | Target::Track(_) | Target::Video(_) | Target::None => {
+            Leads::Album(id) => FavoriteId::Album(*id),
+            Leads::Artist(id) => FavoriteId::Artist(*id),
+            Leads::Playlist(uuid) => FavoriteId::Playlist(uuid.clone()),
+            Leads::Mix(id) => FavoriteId::Mix(id.clone()),
+            Leads::Favorites | Leads::Track(_) | Leads::Video(_) | Leads::None => {
                 return None;
             }
         };
@@ -124,9 +146,10 @@ pub enum Edit {
     /// Like or unlike; follow or unfollow an artist.
     Favorite(Favorite, bool),
     /// A new Own playlist, as an [`Item::Playlist`]: a placeholder until
-    /// TIDAL has made it, then the one TIDAL made. The tracks go in once
-    /// it's made, as an edit of their own.
-    Create(Item, Vec<Track>),
+    /// TIDAL has made it, then the one TIDAL made. What comes next (tracks
+    /// going in, or a move to a Folder) happens once it's made, as an edit
+    /// of its own.
+    Create(Item, Then),
     /// An Own playlist with new fields, as an [`Item::Playlist`].
     Change(Item),
     /// An Own playlist deleted.
@@ -135,6 +158,61 @@ pub enum Edit {
     Add(Adding),
     /// A track taken out of an Own playlist.
     Remove(Removing),
+    /// A new Folder, as an [`Item::Folder`] with a placeholder id, and the
+    /// playlist moved into it as it's made. It shows until a read of the
+    /// top level lists the Folder TIDAL made: its id isn't guessed.
+    CreateFolder {
+        folder: Item,
+        moving: Option<Moving>,
+    },
+    /// A Folder with a new name, and the name it had.
+    RenameFolder { folder: Folder, was: String },
+    /// An empty Folder deleted.
+    DeleteFolder(Folder),
+    /// An Own playlist moved to another Folder, or to the top level.
+    Move(Moving),
+}
+
+/// What follows a new playlist once TIDAL has made it.
+#[derive(Debug, Clone)]
+pub enum Then {
+    /// These tracks go in, if there are any.
+    Add(Vec<Track>),
+    /// It moves into this Folder.
+    Move(Folder),
+}
+
+/// A playlist and the Folder it's listed in: `None` is the top level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Placed {
+    pub playlist: Playlist,
+    pub folder: Option<String>,
+}
+
+/// An Own playlist on its way to another Folder.
+#[derive(Debug, Clone)]
+pub struct Moving {
+    /// The playlist as an [`Item::Playlist`], as last edited.
+    item: Item,
+    /// The Folder it leaves: `None` is the top level.
+    from: Option<String>,
+    /// The Folder it joins: `None` is the top level.
+    to: Option<Folder>,
+    /// The playlist was made for this Folder, just before.
+    new_playlist: bool,
+}
+
+impl Moving {
+    fn playlist(&self) -> &Playlist {
+        match &self.item {
+            Item::Playlist(playlist) => playlist,
+            Item::Folder(_) | Item::Card(_) => unreachable!("playlists move"),
+        }
+    }
+
+    fn to(&self) -> Option<&str> {
+        self.to.as_ref().map(|folder| folder.id.as_str())
+    }
 }
 
 /// A track to take out of an Own playlist, as its row's menu asks.
@@ -245,15 +323,40 @@ impl Adding {
 
 impl Edit {
     /// What the edit changes. Edits of one target run one at a time.
-    fn target(&self) -> FavoriteId {
+    /// A new Folder made with a playlist in it targets the playlist, so
+    /// that a move of it waits.
+    fn target(&self) -> Target {
         match self {
-            Edit::Favorite(favorite, _) => favorite.id(),
-            Edit::Create(item, _) | Edit::Change(item) => {
-                FavoriteId::Playlist(uuid(item).to_string())
+            Edit::Favorite(favorite, _) => Target::Favorite(favorite.id()),
+            Edit::Create(item, _) | Edit::Change(item) => Target::playlist(uuid(item)),
+            Edit::Delete(playlist) => Target::playlist(&playlist.uuid),
+            Edit::Add(adding) => Target::playlist(&adding.playlist().uuid),
+            Edit::Remove(removing) => Target::playlist(&removing.playlist().uuid),
+            Edit::CreateFolder {
+                moving: Some(moving),
+                ..
             }
-            Edit::Delete(playlist) => FavoriteId::Playlist(playlist.uuid.clone()),
-            Edit::Add(adding) => FavoriteId::Playlist(adding.playlist().uuid.clone()),
-            Edit::Remove(removing) => FavoriteId::Playlist(removing.playlist().uuid.clone()),
+            | Edit::Move(moving) => Target::playlist(&moving.playlist().uuid),
+            Edit::CreateFolder {
+                folder: Item::Folder(folder),
+                moving: None,
+            }
+            | Edit::RenameFolder { folder, .. }
+            | Edit::DeleteFolder(folder) => Target::Folder(folder.id.clone()),
+            Edit::CreateFolder { .. } => unreachable!("a new Folder is a Folder"),
+        }
+    }
+
+    /// Where it puts the playlist it targets: `Some(None)` is the top
+    /// level.
+    fn moves_to(&self) -> Option<Option<&str>> {
+        match self {
+            Edit::Move(moving) => Some(moving.to()),
+            Edit::CreateFolder {
+                folder: Item::Folder(folder),
+                moving: Some(_),
+            } => Some(Some(&folder.id)),
+            _ => None,
         }
     }
 
@@ -266,6 +369,10 @@ impl Edit {
             Edit::Delete(playlist) => playlist_tags(&playlist.uuid),
             Edit::Add(adding) => playlist_tags(&adding.playlist().uuid),
             Edit::Remove(removing) => playlist_tags(&removing.playlist().uuid),
+            Edit::CreateFolder { .. }
+            | Edit::RenameFolder { .. }
+            | Edit::DeleteFolder(_)
+            | Edit::Move(_) => vec![FOLDERS.to_string()],
         }
     }
 
@@ -275,13 +382,21 @@ impl Edit {
             Edit::Create(item, _) | Edit::Change(item) => Some(item),
             Edit::Add(adding) => Some(&adding.item),
             Edit::Remove(removing) => Some(&removing.item),
-            Edit::Favorite(..) | Edit::Delete(_) => None,
+            Edit::Move(moving) => Some(&moving.item),
+            Edit::Favorite(..)
+            | Edit::Delete(_)
+            | Edit::CreateFolder { .. }
+            | Edit::RenameFolder { .. }
+            | Edit::DeleteFolder(_) => None,
         }
     }
 
     /// Whether it takes what it targets out of the lists.
     fn hides(&self) -> bool {
-        matches!(self, Edit::Favorite(_, false) | Edit::Delete(_))
+        matches!(
+            self,
+            Edit::Favorite(_, false) | Edit::Delete(_) | Edit::DeleteFolder(_)
+        )
     }
 
     /// The toast when TIDAL refuses it.
@@ -323,6 +438,31 @@ impl Edit {
                 short(&removing.track.title),
                 short(&removing.playlist().title)
             ),
+            Edit::CreateFolder { folder, .. } => {
+                format!("Couldn't create \u{201c}{}\u{201d}", title(folder))
+            }
+            Edit::RenameFolder { was, .. } => {
+                format!("Couldn't rename \u{201c}{}\u{201d}", short(was))
+            }
+            Edit::DeleteFolder(folder) => {
+                format!("Couldn't delete \u{201c}{}\u{201d}", short(&folder.name))
+            }
+            Edit::Move(moving) => {
+                let playlist = short(&moving.playlist().title);
+                match (&moving.to, moving.new_playlist) {
+                    (Some(folder), true) => format!(
+                        "Created \u{201c}{playlist}\u{201d}, but couldn't move it to \u{201c}{}\u{201d}",
+                        short(&folder.name)
+                    ),
+                    (Some(folder), false) => format!(
+                        "Couldn't move \u{201c}{playlist}\u{201d} to \u{201c}{}\u{201d}",
+                        short(&folder.name)
+                    ),
+                    (None, _) => {
+                        format!("Couldn't move \u{201c}{playlist}\u{201d} out of its folder")
+                    }
+                }
+            }
         }
     }
 }
@@ -355,17 +495,29 @@ pub fn is_placeholder(playlist: &Playlist) -> bool {
     playlist.uuid.starts_with(PLACEHOLDER)
 }
 
+/// A new Folder TIDAL hasn't made yet. It can't be opened, right-clicked
+/// or moved into.
+pub fn is_placeholder_folder(folder: &Folder) -> bool {
+    folder.id.starts_with(PLACEHOLDER)
+}
+
 /// A dialog the user answers before an edit.
-// The Folders' dialogs join these.
-#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ask {
     /// The form for a new playlist, which these tracks go into.
     NewPlaylist(Vec<Track>),
+    /// The form for a new playlist that goes into this Folder.
+    NewPlaylistIn(Folder),
     /// The form for an Own playlist's title, description and access.
     EditPlaylist(Playlist),
     /// Whether to delete an Own playlist.
     DeletePlaylist(Playlist),
+    /// A new Folder's name, and the playlist that goes into it.
+    NewFolder(Option<Placed>),
+    /// A Folder's new name.
+    RenameFolder(Folder),
+    /// Whether to delete an empty Folder.
+    DeleteFolder(Folder),
 }
 
 /// Tracks for a playlist, as a menu has them.
@@ -434,6 +586,26 @@ pub enum Mutation {
         uuid: String,
         index: usize,
     },
+    /// Make a Folder at the top level, with this playlist in it.
+    CreateFolder {
+        user_id: u64,
+        name: String,
+        playlist: Option<String>,
+    },
+    /// Give a Folder a new name.
+    RenameFolder {
+        user_id: u64,
+        id: String,
+        name: String,
+    },
+    /// Delete an empty Folder.
+    DeleteFolder { user_id: u64, id: String },
+    /// Move an Own playlist into a Folder, or to the top level (`None`).
+    Move {
+        user_id: u64,
+        uuid: String,
+        folder: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -447,8 +619,24 @@ pub enum Message {
     /// Open "Add to playlist" for these tracks, in a popover beside `at`:
     /// the menu item or button that asked, on screen.
     Pick { tracks: Tracks, at: iced::Rectangle },
+    /// Open "Move to folder" for an Own playlist, in a popover beside
+    /// `at`.
+    PickFolder {
+        playlist: Placed,
+        at: iced::Rectangle,
+    },
     /// Make a playlist with these fields, and put these tracks in it.
     CreatePlaylist(PlaylistFields, Vec<Track>),
+    /// Make a playlist with these fields, and move it into this Folder.
+    CreatePlaylistIn(PlaylistFields, Folder),
+    /// Make a Folder with this name, with this playlist in it.
+    CreateFolder(String, Option<Placed>),
+    /// Give a Folder this name.
+    RenameFolder(Folder, String),
+    /// Delete an empty Folder, as the user confirmed.
+    DeleteFolder(Folder),
+    /// Move an Own playlist into a Folder, or to the top level (`None`).
+    Move(Placed, Option<Folder>),
     /// Set an Own playlist's fields.
     EditPlaylist(Playlist, PlaylistFields),
     /// Delete an Own playlist, as the user confirmed.
@@ -499,8 +687,17 @@ pub enum Effect {
     Ask(Ask),
     /// Open "Add to playlist".
     Pick { tracks: Tracks, at: iced::Rectangle },
+    /// Open "Move to folder".
+    PickFolder {
+        playlist: Placed,
+        at: iced::Rectangle,
+    },
+    /// A playlist is going into this Folder: it's one of the recent ones.
+    RecentFolder(String),
     /// The playlist with this uuid is gone: its Pages go too.
     Deleted(String),
+    /// The Folder with this id is gone: its Pages go too.
+    FolderDeleted(String),
     /// TIDAL took the track at `index` of the playlist's own order out:
     /// a Page showing it drops the row from what it loaded.
     Removed {
@@ -601,10 +798,15 @@ impl Library {
             }
             Message::Ask(ask) => {
                 let allowed = match &ask {
-                    Ask::NewPlaylist(_) => self.user_id.is_some(),
+                    Ask::NewPlaylist(_) | Ask::NewFolder(None) => self.user_id.is_some(),
                     Ask::EditPlaylist(playlist) | Ask::DeletePlaylist(playlist) => {
                         self.editable(playlist)
                     }
+                    Ask::NewFolder(Some(placed)) => self.editable(&placed.playlist),
+                    Ask::NewPlaylistIn(folder) | Ask::RenameFolder(folder) => {
+                        self.user_id.is_some() && !is_placeholder_folder(folder)
+                    }
+                    Ask::DeleteFolder(folder) => self.deletable(folder),
                 };
                 if allowed {
                     vec![Effect::Ask(ask)]
@@ -616,17 +818,68 @@ impl Library {
                 Some(_) => vec![Effect::Pick { tracks, at }],
                 None => vec![],
             },
-            Message::CreatePlaylist(fields, tracks) => {
-                let Some(user_id) = self.user_id else {
+            Message::PickFolder { playlist, at } => {
+                if !self.editable(&playlist.playlist) {
                     return vec![];
-                };
-                let uuid = format!("{PLACEHOLDER}{}", self.next_edit);
-                let placeholder = Playlist {
-                    tracks: tracks.len() as u32,
-                    ..fields.playlist(uuid, user_id)
-                };
-                self.push(Edit::Create(Item::Playlist(placeholder), tracks))
+                }
+                vec![Effect::PickFolder { playlist, at }]
             }
+            Message::CreatePlaylist(fields, tracks) => {
+                let count = tracks.len() as u32;
+                self.create_playlist(fields, count, Then::Add(tracks))
+            }
+            Message::CreatePlaylistIn(fields, folder) => {
+                if is_placeholder_folder(&folder) {
+                    return vec![];
+                }
+                self.create_playlist(fields, 0, Then::Move(folder))
+            }
+            Message::CreateFolder(name, playlist) => {
+                let name = name.trim().to_string();
+                let allowed = match &playlist {
+                    Some(placed) => self.editable(&placed.playlist),
+                    None => self.user_id.is_some(),
+                };
+                if !allowed || name.is_empty() {
+                    return vec![];
+                }
+                let folder = Folder {
+                    id: format!("{PLACEHOLDER}{}", self.next_edit),
+                    name,
+                    playlists: Some(playlist.is_some().into()),
+                };
+                let moving =
+                    playlist.map(|placed| self.moving(placed, Some(folder.clone()), false));
+                self.push(Edit::CreateFolder {
+                    folder: Item::Folder(folder),
+                    moving,
+                })
+            }
+            Message::RenameFolder(folder, name) => {
+                let name = name.trim().to_string();
+                let was = self.folder(&folder).name;
+                if self.user_id.is_none()
+                    || is_placeholder_folder(&folder)
+                    || name.is_empty()
+                    || name == was
+                {
+                    return vec![];
+                }
+                self.push(Edit::RenameFolder {
+                    folder: Folder { name, ..folder },
+                    was,
+                })
+            }
+            Message::DeleteFolder(folder) => {
+                if !self.deletable(&folder) {
+                    return vec![];
+                }
+                let id = folder.id.clone();
+                let mut effects = self.push(Edit::DeleteFolder(folder));
+                effects.push(Effect::FolderDeleted(id));
+                effects
+            }
+            Message::Move(placed, to) => self.move_to(placed, to, false),
             Message::EditPlaylist(playlist, fields) => {
                 if !self.editable(&playlist) {
                     return vec![];
@@ -681,14 +934,22 @@ impl Library {
                 let Some(pending) = self.pending.iter_mut().find(|pending| pending.id == id) else {
                     return vec![];
                 };
-                let Edit::Create(_, tracks) = &mut pending.edit else {
+                let Edit::Create(_, then) = &mut pending.edit else {
                     return vec![];
                 };
-                let tracks = std::mem::take(tracks);
-                pending.edit = Edit::Create(Item::Playlist(made.clone()), vec![]);
+                let then = std::mem::replace(then, Then::Add(vec![]));
+                pending.edit = Edit::Create(Item::Playlist(made.clone()), Then::Add(vec![]));
                 let mut effects = self.landed(id, None);
-                if !tracks.is_empty() {
-                    effects.extend(self.add(made, tracks, true));
+                match then {
+                    Then::Add(tracks) if tracks.is_empty() => {}
+                    Then::Add(tracks) => effects.extend(self.add(made, tracks, true)),
+                    Then::Move(folder) => {
+                        let placed = Placed {
+                            playlist: made,
+                            folder: None,
+                        };
+                        effects.extend(self.move_to(placed, Some(folder), true));
+                    }
                 }
                 effects
             }
@@ -723,6 +984,56 @@ impl Library {
     /// playlists that TIDAL has made.
     fn editable(&self, playlist: &Playlist) -> bool {
         playlist.is_own(self.user_id) && !is_placeholder(playlist)
+    }
+
+    /// Whether the user can delete `folder`: one TIDAL has made, with no
+    /// playlists in it once the pending edits are counted.
+    pub fn deletable(&self, folder: &Folder) -> bool {
+        self.user_id.is_some()
+            && !is_placeholder_folder(folder)
+            && self.folder(folder).playlists == Some(0)
+    }
+
+    /// Make a playlist with `count` tracks to come, and then what follows.
+    fn create_playlist(&mut self, fields: PlaylistFields, count: u32, then: Then) -> Vec<Effect> {
+        let Some(user_id) = self.user_id else {
+            return vec![];
+        };
+        let uuid = format!("{PLACEHOLDER}{}", self.next_edit);
+        let placeholder = Playlist {
+            tracks: count,
+            ..fields.playlist(uuid, user_id)
+        };
+        self.push(Edit::Create(Item::Playlist(placeholder), then))
+    }
+
+    /// A placed playlist on its way to `to`, as last edited.
+    fn moving(&self, placed: Placed, to: Option<Folder>, new_playlist: bool) -> Moving {
+        Moving {
+            item: Item::Playlist(self.playlist(&placed.playlist).clone()),
+            from: placed.folder,
+            to,
+            new_playlist,
+        }
+    }
+
+    /// Move a playlist to `to`, unless it's there already or `to` isn't
+    /// made yet.
+    fn move_to(&mut self, placed: Placed, to: Option<Folder>, new_playlist: bool) -> Vec<Effect> {
+        let to_id = to.as_ref().map(|folder| folder.id.as_str());
+        if !self.editable(&placed.playlist)
+            || placed.folder.as_deref() == to_id
+            || to.as_ref().is_some_and(is_placeholder_folder)
+        {
+            return vec![];
+        }
+        let recent = to
+            .as_ref()
+            .map(|folder| Effect::RecentFolder(folder.id.clone()));
+        let moving = self.moving(placed, to, new_playlist);
+        let mut effects = self.push(Edit::Move(moving));
+        effects.extend(recent);
+        effects
     }
 
     /// Put tracks in a playlist: it counts them at once.
@@ -812,6 +1123,29 @@ impl Library {
                     return vec![Effect::ReadOrder(id, removing.playlist().uuid.clone())];
                 }
             },
+            Edit::CreateFolder {
+                folder: Item::Folder(folder),
+                moving,
+            } => Mutation::CreateFolder {
+                user_id,
+                name: folder.name.clone(),
+                playlist: moving.as_ref().map(|moving| moving.playlist().uuid.clone()),
+            },
+            Edit::CreateFolder { .. } => return vec![],
+            Edit::RenameFolder { folder, .. } => Mutation::RenameFolder {
+                user_id,
+                id: folder.id.clone(),
+                name: folder.name.clone(),
+            },
+            Edit::DeleteFolder(folder) => Mutation::DeleteFolder {
+                user_id,
+                id: folder.id.clone(),
+            },
+            Edit::Move(moving) => Mutation::Move {
+                user_id,
+                uuid: moving.playlist().uuid.clone(),
+                folder: moving.to().map(str::to_string),
+            },
         };
         vec![Effect::Mutate(id, mutation)]
     }
@@ -866,7 +1200,7 @@ impl Library {
         effects.extend(removed);
         effects.push(Effect::Refresh(tags));
         effects.extend(deleted.map(Effect::SourceDeleted));
-        if let (Some(told), FavoriteId::Playlist(uuid)) = (told, target) {
+        if let (Some(told), Target::Favorite(FavoriteId::Playlist(uuid))) = (told, target) {
             effects.push(Effect::Inform(told));
             effects.push(Effect::Cover(uuid));
         }
@@ -937,7 +1271,7 @@ impl Library {
     }
 
     /// Run the first edit waiting on `target`.
-    fn next(&mut self, target: &FavoriteId) -> Vec<Effect> {
+    fn next(&mut self, target: &Target) -> Vec<Effect> {
         let queued = self
             .pending
             .iter()
@@ -980,7 +1314,7 @@ impl Library {
 
     /// An Own playlist as the user last edited it, for its Page.
     pub fn playlist<'a>(&'a self, playlist: &'a Playlist) -> &'a Playlist {
-        let id = FavoriteId::Playlist(playlist.uuid.clone());
+        let id = Target::playlist(&playlist.uuid);
         self.pending
             .iter()
             .rev()
@@ -990,6 +1324,41 @@ impl Library {
                 _ => None,
             })
             .unwrap_or(playlist)
+    }
+
+    /// A Folder as the user last edited it: its new name, and its count
+    /// with the playlists moved in and out of it.
+    pub fn folder(&self, folder: &Folder) -> Folder {
+        let mut shown = folder.clone();
+        let mut change: i64 = 0;
+        for pending in &self.pending {
+            match &pending.edit {
+                Edit::RenameFolder {
+                    folder: renamed, ..
+                } if renamed.id == folder.id => {
+                    shown.name = renamed.name.clone();
+                }
+                Edit::Move(moving) => {
+                    if moving.from.as_deref() == Some(folder.id.as_str()) {
+                        change -= 1;
+                    }
+                    if moving.to() == Some(folder.id.as_str()) {
+                        change += 1;
+                    }
+                }
+                // A new Folder counts its playlist already: only the Folder
+                // it left is counted here.
+                Edit::CreateFolder {
+                    moving: Some(moving),
+                    ..
+                } if moving.from.as_deref() == Some(folder.id.as_str()) => change -= 1,
+                _ => {}
+            }
+        }
+        shown.playlists = folder
+            .playlists
+            .map(|n| (i64::from(n) + change).max(0) as u32);
+        shown
     }
 
     /// The rows of a playlist's loaded `tracks` that aren't on their way
@@ -1038,7 +1407,7 @@ pub enum Listing<'a> {
     /// A Library shelf: a type at the top level, or a Folder's playlists.
     Shelf(&'a Shelf),
     /// Every Own playlist, wherever its Folder: what tracks can be added
-    /// to. Likes don't change it.
+    /// to. Likes and moves don't change it.
     Own,
 }
 
@@ -1048,13 +1417,27 @@ impl Listing<'_> {
         !matches!((self, edit), (Listing::Own, Edit::Favorite(..)))
     }
 
-    /// Whether a like of this Favorite adds it to the list. A liked
-    /// playlist goes to the top level, not into a Folder.
-    fn adds(&self, id: &FavoriteId) -> bool {
+    /// Whether a like of this Favorite, or a new playlist, goes into the
+    /// list. A liked or new playlist goes to the top level, not into a
+    /// Folder.
+    fn adds(&self, id: &Target) -> bool {
+        let Target::Favorite(id) = id else {
+            return false;
+        };
         match self {
             Listing::Loved => matches!(id, FavoriteId::Track(_)),
             Listing::Shelf(shelf) => shelf.folder.is_none() && shelf.lists(id),
             Listing::Own => matches!(id, FavoriteId::Playlist(_)),
+        }
+    }
+
+    /// The Folder whose playlists these are, for a list of playlists and
+    /// Folders: `Some(None)` is the top level. Where a playlist was moved
+    /// to decides which of these lists it's in.
+    fn folder(&self) -> Option<Option<&str>> {
+        match self {
+            Listing::Shelf(shelf) if shelf.kind == Kind::Playlists => Some(shelf.folder.as_deref()),
+            _ => None,
         }
     }
 }
@@ -1063,9 +1446,14 @@ impl Listing<'_> {
 pub trait Listed {
     /// The Favorite it is, if it's one.
     fn favorite(&self) -> Option<FavoriteId>;
+    /// What its edits target, if it can be edited.
+    fn target(&self) -> Option<Target> {
+        self.favorite().map(Target::Favorite)
+    }
     /// What a pending like adds to a list of these.
     fn liked(favorite: &Favorite) -> Option<&Self>;
-    /// What an edited or new playlist shows as in a list of these.
+    /// What an edited or new playlist, or a new Folder, shows as in a list
+    /// of these.
     fn edited(item: &Item) -> Option<&Self>;
 }
 
@@ -1095,6 +1483,13 @@ impl Listed for Item {
         }
     }
 
+    fn target(&self) -> Option<Target> {
+        match self {
+            Item::Folder(folder) => Some(Target::Folder(folder.id.clone())),
+            _ => self.favorite().map(Target::Favorite),
+        }
+    }
+
     fn liked(favorite: &Favorite) -> Option<&Self> {
         match favorite {
             Favorite::Item(_, item) => Some(item),
@@ -1108,50 +1503,81 @@ impl Listed for Item {
 }
 
 /// What a list shows: its server items with the pending edits laid over
-/// them. An unliked Favorite or a deleted playlist is hidden, and an
-/// edited playlist shows as edited. A liked Favorite or a new playlist not
-/// yet among them goes first, the latest edit first. The last edit of a
-/// target is the one that counts. The one merge every list goes through.
+/// them. An unliked Favorite, a deleted playlist or Folder is hidden, and
+/// an edited playlist shows as edited. A moved playlist shows only in the
+/// Folder it went to. New Folders go first at the top level, then a liked
+/// Favorite, a new playlist or a moved one not yet among them, the latest
+/// edit first. The last edit of a target is the one that counts. The one
+/// merge every list goes through.
 pub fn apply<'a, T: Listed>(
     server: &'a [T],
     listing: Listing<'_>,
     pending: &'a [Pending],
 ) -> Vec<&'a T> {
+    let shown = || pending.iter().rev().filter(|p| listing.shows(&p.edit));
     // Each target's last edit, latest first.
-    let mut last: Vec<(FavoriteId, &'a Edit)> = Vec::new();
-    for pending in pending.iter().rev().filter(|p| listing.shows(&p.edit)) {
+    let mut last: Vec<(Target, &'a Edit)> = Vec::new();
+    for pending in shown() {
         let id = pending.edit.target();
         if !last.iter().any(|(seen, _)| *seen == id) {
             last.push((id, &pending.edit));
         }
     }
-    let edit = |id: &FavoriteId| {
+    let edit = |id: &Target| {
         last.iter()
             .find(|(seen, _)| seen == id)
             .map(|(_, edit)| *edit)
     };
-    let created = |id: &FavoriteId| {
+    let created = |id: &Target| {
         pending
             .iter()
             .any(|pending| matches!(pending.edit, Edit::Create(..)) && pending.edit.target() == *id)
     };
-    let listed = |id: &FavoriteId| {
-        server
-            .iter()
-            .any(|item| item.favorite().as_ref() == Some(id))
+    let listed = |id: &Target| server.iter().any(|item| item.target().as_ref() == Some(id));
+    // Where the target was last moved to, if it was.
+    let moved_to = |id: &Target| {
+        shown()
+            .filter(|pending| pending.edit.target() == *id)
+            .find_map(|pending| pending.edit.moves_to())
     };
+    // Whether it's in this list, if it's moved; else whether a like or a
+    // new playlist goes into it.
+    let belongs = |id: &Target| match (listing.folder(), moved_to(id)) {
+        (Some(here), Some(to)) => here == to,
+        _ => listing.adds(id),
+    };
+    // The target as last edited.
+    let latest = |id: &Target| {
+        shown()
+            .filter(|pending| pending.edit.target() == *id)
+            .find_map(|pending| pending.edit.shows())
+    };
+    let folders = shown()
+        .filter(|_| listing.folder() == Some(None))
+        .filter_map(|pending| match &pending.edit {
+            Edit::CreateFolder { folder, .. } => T::edited(folder),
+            _ => None,
+        });
     let added = last
         .iter()
-        .filter(|(id, _)| listing.adds(id) && !listed(id))
+        .filter(|(id, _)| !listed(id) && belongs(id))
         .filter_map(|(id, edit)| match edit {
             Edit::Favorite(favorite, true) => T::liked(favorite),
-            Edit::Create(..) | Edit::Change(_) | Edit::Add(_) | Edit::Remove(_) if created(id) => {
-                edit.shows().and_then(T::edited)
-            }
+            _ if edit.hides() => None,
+            Edit::Favorite(..) => None,
+            _ if created(id) || moved_to(id).is_some() => latest(id).and_then(T::edited),
             _ => None,
         });
     let kept = server.iter().filter_map(|item| {
-        let Some(edit) = item.favorite().and_then(|id| edit(&id)) else {
+        let Some(id) = item.target() else {
+            return Some(item);
+        };
+        if let (Some(here), Some(to)) = (listing.folder(), moved_to(&id))
+            && here != to
+        {
+            return None;
+        }
+        let Some(edit) = edit(&id) else {
             return Some(item);
         };
         if edit.hides() {
@@ -1159,7 +1585,7 @@ pub fn apply<'a, T: Listed>(
         }
         Some(edit.shows().and_then(T::edited).unwrap_or(item))
     });
-    added.chain(kept).collect()
+    folders.chain(added).chain(kept).collect()
 }
 
 /// A name short enough for a toast, as sone cuts it.

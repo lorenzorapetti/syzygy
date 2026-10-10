@@ -331,7 +331,8 @@ impl State {
             };
             if self.is_own() {
                 let playlist = playlist.clone();
-                return menu::more(move || menu::own_playlist(&card, &playlist)).map(Message::Link);
+                return menu::more(move || menu::own_playlist(&card, &playlist, None))
+                    .map(Message::Link);
             }
             let favorite = Favorite::playlist(playlist);
             header_actions(card, Some(favorite), library).map(Message::Link)

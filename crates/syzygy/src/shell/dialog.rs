@@ -1,34 +1,48 @@
-//! The Library's dialog: the form for a new or an Own playlist, and the
-//! confirmation before one is deleted. One is open at a time, over the
-//! Shell, and Escape or a click outside closes it.
+//! The Library's dialog: the form for a new or an Own playlist, a
+//! Folder's name, and the confirmation before a playlist or a Folder is
+//! deleted. One is open at a time, over the Shell, and Escape or a click
+//! outside closes it.
 
 use iced::widget::{
     button, center, column, container, mouse_area, opaque, row, space, text, text_input, toggler,
 };
 use iced::{Alignment, Element};
+use syzygy_catalog::library::Folder;
 use syzygy_catalog::playlist::DESCRIPTION_LIMIT;
 use syzygy_catalog::{Playlist, PlaylistFields, Track};
 
-use crate::library::{self, Ask, Library};
+use crate::library::{self, Ask, Library, Placed};
 use crate::style;
 
 const WIDTH: f32 = 440.0;
 
 pub enum Dialog {
     /// A new playlist's fields, or an Own playlist's being edited. A new
-    /// one gets `tracks`.
+    /// one gets `tracks`, or goes into `folder`.
     Playlist {
         editing: Option<Playlist>,
         fields: PlaylistFields,
         tracks: Vec<Track>,
+        folder: Option<Folder>,
     },
     /// Whether to delete an Own playlist.
     Delete(Playlist),
+    /// A new Folder's name, with `playlist` going into it, or a Folder's
+    /// new name.
+    Folder {
+        renaming: Option<Folder>,
+        name: String,
+        playlist: Option<Placed>,
+    },
+    /// Whether to delete an empty Folder, as read, by its name as shown.
+    DeleteFolder { folder: Folder, name: String },
 }
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Title(String),
+    /// A Folder's name.
+    Name(String),
     Description(String),
     Public(bool),
     Submit,
@@ -53,13 +67,35 @@ impl Dialog {
                 editing: None,
                 fields: PlaylistFields::new(),
                 tracks,
+                folder: None,
+            },
+            Ask::NewPlaylistIn(folder) => Dialog::Playlist {
+                editing: None,
+                fields: PlaylistFields::new(),
+                tracks: vec![],
+                folder: Some(library.folder(&folder)),
             },
             Ask::EditPlaylist(editing) => Dialog::Playlist {
                 fields: PlaylistFields::of(library.playlist(&editing)),
                 editing: Some(editing),
                 tracks: vec![],
+                folder: None,
             },
             Ask::DeletePlaylist(playlist) => Dialog::Delete(playlist),
+            Ask::NewFolder(playlist) => Dialog::Folder {
+                renaming: None,
+                name: String::new(),
+                playlist,
+            },
+            Ask::RenameFolder(folder) => Dialog::Folder {
+                name: library.folder(&folder).name,
+                renaming: Some(folder),
+                playlist: None,
+            },
+            Ask::DeleteFolder(folder) => Dialog::DeleteFolder {
+                name: library.folder(&folder).name,
+                folder,
+            },
         }
     }
 
@@ -83,6 +119,7 @@ impl Dialog {
                     editing,
                     fields,
                     tracks,
+                    folder,
                 },
                 Message::Submit,
             ) => {
@@ -90,15 +127,44 @@ impl Dialog {
                     return Outcome::None;
                 }
                 let fields = fields.trimmed();
-                Outcome::Library(Box::new(match editing.take() {
-                    Some(playlist) => library::Message::EditPlaylist(playlist, fields),
-                    None => library::Message::CreatePlaylist(fields, std::mem::take(tracks)),
+                Outcome::Library(Box::new(match (editing.take(), folder.take()) {
+                    (Some(playlist), _) => library::Message::EditPlaylist(playlist, fields),
+                    (None, Some(folder)) => library::Message::CreatePlaylistIn(fields, folder),
+                    (None, None) => {
+                        library::Message::CreatePlaylist(fields, std::mem::take(tracks))
+                    }
+                }))
+            }
+            (Dialog::Folder { name, .. }, Message::Name(typed)) => {
+                *name = typed;
+                Outcome::None
+            }
+            (
+                Dialog::Folder {
+                    renaming,
+                    name,
+                    playlist,
+                },
+                Message::Submit,
+            ) => {
+                if name.trim().is_empty() {
+                    return Outcome::None;
+                }
+                let name = name.trim().to_string();
+                Outcome::Library(Box::new(match renaming.take() {
+                    Some(folder) => library::Message::RenameFolder(folder, name),
+                    None => library::Message::CreateFolder(name, playlist.take()),
                 }))
             }
             (Dialog::Delete(playlist), Message::Submit) => {
                 Outcome::Library(Box::new(library::Message::DeletePlaylist(playlist.clone())))
             }
-            (Dialog::Delete(_), _) => Outcome::None,
+            (Dialog::DeleteFolder { folder, .. }, Message::Submit) => {
+                Outcome::Library(Box::new(library::Message::DeleteFolder(folder.clone())))
+            }
+            (Dialog::Playlist { .. }, Message::Name(_))
+            | (Dialog::Folder { .. }, _)
+            | (Dialog::Delete(_) | Dialog::DeleteFolder { .. }, _) => Outcome::None,
         }
     }
 
@@ -107,9 +173,23 @@ impl Dialog {
     pub fn view(&self) -> Element<'_, Message> {
         let card = match self {
             Dialog::Playlist {
-                editing, fields, ..
-            } => form(editing.is_some(), fields),
-            Dialog::Delete(playlist) => confirm_delete(playlist),
+                editing,
+                fields,
+                folder,
+                ..
+            } => form(editing.is_some(), fields, folder.as_ref()),
+            Dialog::Delete(playlist) => confirm_delete(
+                "Delete playlist",
+                format!(
+                    "Delete \u{201c}{}\u{201d}? This can't be undone.",
+                    library::short(&playlist.title)
+                ),
+            ),
+            Dialog::Folder { renaming, name, .. } => folder_form(renaming.is_some(), name),
+            Dialog::DeleteFolder { name, .. } => confirm_delete(
+                "Delete folder",
+                format!("Delete \u{201c}{}\u{201d}?", library::short(name)),
+            ),
         };
         let card = container(card)
             .padding(24)
@@ -120,11 +200,18 @@ impl Dialog {
     }
 }
 
-fn form<'a>(editing: bool, fields: &'a PlaylistFields) -> Element<'a, Message> {
-    let heading = if editing {
-        "Edit playlist"
-    } else {
-        "Create playlist"
+fn form<'a>(
+    editing: bool,
+    fields: &'a PlaylistFields,
+    folder: Option<&Folder>,
+) -> Element<'a, Message> {
+    let heading = match (editing, folder) {
+        (true, _) => "Edit playlist".to_string(),
+        (false, Some(folder)) => format!(
+            "Create playlist in \u{201c}{}\u{201d}",
+            library::short(&folder.name)
+        ),
+        (false, None) => "Create playlist".to_string(),
     };
     let title = text_input("Title", &fields.title)
         .on_input(Message::Title)
@@ -172,15 +259,32 @@ fn form<'a>(editing: bool, fields: &'a PlaylistFields) -> Element<'a, Message> {
     .into()
 }
 
-fn confirm_delete(playlist: &Playlist) -> Element<'_, Message> {
-    column![
-        text("Delete playlist").size(20),
-        text(format!(
-            "Delete \u{201c}{}\u{201d}? This can't be undone.",
-            library::short(&playlist.title)
-        ))
+/// A new Folder's name, or a Folder's new name.
+fn folder_form(renaming: bool, name: &str) -> Element<'_, Message> {
+    let (heading, answer) = if renaming {
+        ("Rename folder", "Save")
+    } else {
+        ("New folder", "Create")
+    };
+    let input = text_input("Name", name)
+        .on_input(Message::Name)
+        .on_submit(Message::Submit)
+        .padding([8, 14])
         .size(14)
-        .color(style::TEXT_SECONDARY),
+        .style(style::filter_input);
+    column![
+        text(heading).size(20),
+        input,
+        buttons(answer, !name.trim().is_empty()),
+    ]
+    .spacing(16)
+    .into()
+}
+
+fn confirm_delete<'a>(heading: &'a str, question: String) -> Element<'a, Message> {
+    column![
+        text(heading).size(20),
+        text(question).size(14).color(style::TEXT_SECONDARY),
         buttons("Delete", true),
     ]
     .spacing(16)

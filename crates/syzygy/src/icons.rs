@@ -20,7 +20,9 @@ pub enum Icon {
     Compass,
     Disc3,
     Ellipsis,
+    FolderInput,
     FolderOpen,
+    FolderPlus,
     GripVertical,
     Heart,
     House,
@@ -62,7 +64,7 @@ pub enum Icon {
 }
 
 /// In [`Icon`] order.
-const SOURCES: [&str; 51] = [
+const SOURCES: [&str; 53] = [
     include_str!("../icons/arrow-up-down.svg"),
     include_str!("../icons/bell.svg"),
     include_str!("../icons/calendar.svg"),
@@ -75,7 +77,9 @@ const SOURCES: [&str; 51] = [
     include_str!("../icons/compass.svg"),
     include_str!("../icons/disc-3.svg"),
     include_str!("../icons/ellipsis.svg"),
+    include_str!("../icons/folder-input.svg"),
     include_str!("../icons/folder-open.svg"),
+    include_str!("../icons/folder-plus.svg"),
     include_str!("../icons/grip-vertical.svg"),
     include_str!("../icons/heart.svg"),
     include_str!("../icons/house.svg"),
