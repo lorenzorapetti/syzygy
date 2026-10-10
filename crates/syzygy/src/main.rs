@@ -1,6 +1,7 @@
 mod app;
 mod events;
 mod fill;
+mod fonts;
 mod icons;
 mod identity;
 mod images;
@@ -29,6 +30,7 @@ fn main() -> iced::Result {
     // flushed on drop.
     let _logger = logging::init(&paths.log_dir);
     log::info!("Starting syzygy {}", env!("CARGO_PKG_VERSION"));
+    fonts::list_variable_weights();
 
     iced::application(move || app::boot(paths.clone()), app::update, app::view)
         .title(app::title)

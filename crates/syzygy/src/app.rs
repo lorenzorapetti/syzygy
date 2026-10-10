@@ -543,10 +543,12 @@ impl App {
         }
     }
 
-    /// Whether the drawer is sliding up or down.
+    /// Whether the drawer is sliding up or down, as of the last frame: the
+    /// view draws it there. Asked as of now, a slow frame could end the
+    /// frames before one drew the slide's end, leaving it stuck midway.
     fn slides(&self) -> bool {
         match &self.phase {
-            Phase::Shell(shell) => shell.is_animating(Instant::now()),
+            Phase::Shell(shell) => shell.is_animating(self.frame),
             Phase::Login(_) => false,
         }
     }
