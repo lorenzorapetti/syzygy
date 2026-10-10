@@ -772,7 +772,20 @@ impl Shell {
                             services.catalog.add_tracks(user_id, &uuid, tracks),
                             move |result| to_library(library::Message::Added(edit, result)),
                         ),
+                        library::Mutation::RemoveTrack {
+                            user_id,
+                            uuid,
+                            index,
+                        } => Task::perform(
+                            services.catalog.remove_track(user_id, &uuid, index),
+                            done,
+                        ),
                     }
+                }
+                library::Effect::ReadOrder(edit, uuid) => {
+                    Task::perform(services.catalog.playlist_order(&uuid), move |result| {
+                        to_library(library::Message::Order(edit, result))
+                    })
                 }
                 library::Effect::ReadFavorites { user_id, stamp } => {
                     Task::run(services.catalog.favorite_ids(user_id), move |read| {
@@ -805,6 +818,12 @@ impl Shell {
                     Task::none()
                 }
                 library::Effect::Deleted(uuid) => self.playlist_deleted(&uuid, services, context),
+                library::Effect::Removed { uuid, track, index } => {
+                    self.current
+                        .page
+                        .removed(&uuid, &track, index, &self.library);
+                    Task::none()
+                }
                 library::Effect::SourceDeleted(source) => Task::done(app::Message::Playback(
                     playback::Message::SourceDeleted(source),
                 )),

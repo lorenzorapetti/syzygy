@@ -77,12 +77,17 @@ impl<T> List<T> {
     }
 
     /// The items from `offset` on. Dropped unless they follow on from what's
-    /// on screen.
+    /// on screen, and then the next page is asked for from where it ends.
     pub fn more(&mut self, offset: usize, result: Result<Paged<T>, Arc<syzygy_catalog::Error>>) {
         let Remote::Loaded(page) = &mut self.list else {
             return;
         };
         if page.items.len() != offset {
+            // A row went while it loaded, as a track removed from a
+            // playlist does.
+            if matches!(self.more, More::Loading) {
+                self.more = More::Idle;
+            }
             return;
         }
         match result {

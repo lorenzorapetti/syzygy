@@ -15,8 +15,8 @@ use super::{
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
-use crate::library::{Favorite, Library};
-use crate::playback::{SourceRef, Start};
+use crate::library::{At, Favorite, Library, Removal};
+use crate::playback::{Continuation, SourceRef, Start};
 use crate::settings::Sort;
 use crate::style;
 
@@ -37,8 +37,11 @@ pub struct State {
     sort: Option<TrackSort>,
     tracks: List<Track>,
     filter: String,
-    /// The loaded tracks the filter lets through, by their place in the
-    /// list. In the own order that's the track's index in the playlist.
+    /// The loaded tracks the pending removals leave, by their place in
+    /// `tracks`. In the own order a row's place among them is its index in
+    /// the playlist.
+    rows: Vec<usize>,
+    /// The places in `rows` the filter lets through.
     shown: Vec<usize>,
     recommendations: Recommendations,
 }
@@ -93,13 +96,14 @@ impl State {
             sort,
             tracks: List::new(),
             filter: String::new(),
+            rows: Vec::new(),
             shown: Vec::new(),
             recommendations: Recommendations::default(),
         };
         (state, action)
     }
 
-    pub fn update(&mut self, message: Message) -> Action {
+    pub fn update(&mut self, message: Message, library: &Library) -> Action {
         match message {
             Message::Playlist(read) => {
                 self.playlist.apply(read, "a playlist");
@@ -107,7 +111,7 @@ impl State {
             }
             Message::Tracks { sort, read } if sort == self.sort => {
                 self.tracks.apply(read, "playlist's tracks");
-                self.loaded()
+                self.loaded(library)
             }
             Message::More {
                 sort,
@@ -115,7 +119,7 @@ impl State {
                 result,
             } if sort == self.sort => {
                 self.tracks.more(offset, result);
-                self.loaded()
+                self.loaded(library)
             }
             // From before the sort changed.
             Message::Tracks { .. } | Message::More { .. } => Action::None,
@@ -138,7 +142,7 @@ impl State {
             }
             Message::Filter(filter) => {
                 self.filter = filter;
-                self.loaded()
+                self.loaded(library)
             }
             Message::Recommendations { offset, result } => {
                 match self.recommendations.arrived(offset, result) {
@@ -152,7 +156,11 @@ impl State {
             },
             Message::Link(link) => link.follow(),
             Message::Play(start) => {
-                let tracks = self.tracks.items();
+                let tracks: Vec<Track> = self
+                    .rows
+                    .iter()
+                    .map(|&position| self.tracks.items()[position].clone())
+                    .collect();
                 if tracks.is_empty() {
                     return Action::None;
                 }
@@ -161,8 +169,16 @@ impl State {
                     (_, Some(preview)) => preview.title.as_str(),
                     _ => "Playlist",
                 };
-                let request = super::request(self.source(), name, tracks, start);
-                Action::Play(super::with_rest(request, self.tracks.has_more()))
+                let source = self.source();
+                let mut request = super::request(source.clone(), name, &tracks, start);
+                // The rest is read on from where the loaded pages end, the
+                // rows still on their way out counted: TIDAL has them until
+                // their removals land.
+                request.continuation = self.tracks.has_more().then(|| Continuation {
+                    source,
+                    offset: self.tracks.items().len(),
+                });
+                Action::Play(request)
             }
             Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
@@ -191,14 +207,47 @@ impl State {
     /// Read the tracks again from the first page.
     fn reset_tracks(&mut self) {
         self.tracks = List::new();
+        self.rows.clear();
         self.shown.clear();
     }
 
     /// The tracks or the filter changed: filter them again, and while a
     /// filter is on, load the rest so it sees every track.
-    fn loaded(&mut self) -> Action {
-        self.shown = track_list::matching(self.tracks.items(), &self.filter);
+    fn loaded(&mut self, library: &Library) -> Action {
+        self.refilter(library);
         self.load_rest_if_filtering()
+    }
+
+    /// Lay the pending removals over the tracks, then the filter.
+    fn refilter(&mut self, library: &Library) {
+        let tracks = self.tracks.items();
+        self.rows = library.rows(&self.uuid, tracks, self.sort.is_some());
+        let rows = self.rows.iter().map(|&position| &tracks[position]);
+        self.shown = track_list::matching(rows, &self.filter);
+    }
+
+    /// The Library's pending edits changed which rows are on their way
+    /// out.
+    pub fn library_changed(&mut self, library: &Library) {
+        self.refilter(library);
+    }
+
+    /// TIDAL took the track at `index` of the own order out of this
+    /// playlist: its row goes from what's loaded, so the pages read after
+    /// follow on from TIDAL's.
+    pub fn removed(&mut self, uuid: &str, track: &Track, index: usize, library: &Library) {
+        if uuid != self.uuid {
+            return;
+        }
+        let index = self.sort.is_none().then_some(index);
+        if let Remote::Loaded(page) = &mut self.tracks.list {
+            let rows: Vec<&Track> = page.items.iter().collect();
+            if let Some(at) = crate::library::locate(&rows, track, index) {
+                page.items.remove(at);
+                page.total = page.total.map(|total| total.saturating_sub(1));
+            }
+        }
+        self.refilter(library);
     }
 
     fn load_rest_if_filtering(&mut self) -> Action {
@@ -300,24 +349,48 @@ impl State {
         };
         let body = self.tracks.list.view(Message::Retry, |_| {
             let tracks = self.tracks.items();
-            if tracks.is_empty() {
+            if self.rows.is_empty() {
                 return empty(
                     "This playlist is empty",
                     "Add tracks in TIDAL to see them here.",
                 );
             }
             let header = track_list::sortable_header(columns, self.sort, Message::Sort);
+            let own = self.playlist.loaded().filter(|_| self.is_own());
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
-                let position = self.shown[i];
-                let track = &tracks[position];
+                let place = self.shown[i];
+                let track = &tracks[self.rows[place]];
                 let liked = library.liked(track);
-                let row =
-                    track_list::track(images, position + 1, track, columns, allow_explicit, liked);
+                let number = place + 1;
+                let row = match own {
+                    Some(playlist) => {
+                        let removal = Removal {
+                            playlist: playlist.clone(),
+                            track: track.clone(),
+                            at: match self.sort {
+                                None => At::Index(place),
+                                Some(_) => At::Sorted,
+                            },
+                        };
+                        track_list::own(
+                            images,
+                            number,
+                            track,
+                            columns,
+                            allow_explicit,
+                            liked,
+                            removal,
+                        )
+                    }
+                    None => {
+                        track_list::track(images, number, track, columns, allow_explicit, liked)
+                    }
+                };
                 track_list::playable_track(
                     row.map(Message::Link),
                     track,
                     now_playing,
-                    Message::Play(Start::Track(position)),
+                    Message::Play(Start::Track(place)),
                 )
             });
             let nothing_matches = (self.shown.is_empty() && !self.filter.trim().is_empty())

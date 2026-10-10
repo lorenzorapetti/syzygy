@@ -11,6 +11,7 @@ use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 use super::{Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link, menu};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
+use crate::library::Removal;
 use crate::style;
 
 /// Every row is this tall, so where a row sits is a multiplication.
@@ -189,8 +190,45 @@ pub fn track<'a>(
     )
 }
 
+/// [`track`] in one of the user's Own playlists, whose menu can take it
+/// out.
+pub fn own<'a>(
+    images: &'a Images,
+    number: usize,
+    track: &'a Track,
+    columns: Columns,
+    allow_explicit: bool,
+    liked: Option<bool>,
+    removal: Removal,
+) -> Element<'a, Link> {
+    let row = line(
+        images,
+        number,
+        track,
+        columns,
+        allow_explicit,
+        Mark::None,
+        liked,
+    );
+    menu::with_menu(row, move || menu::own_track(track, liked, &removal))
+}
+
 /// [`track`], with its number marked.
 pub fn marked<'a>(
+    images: &'a Images,
+    number: usize,
+    track: &'a Track,
+    columns: Columns,
+    allow_explicit: bool,
+    mark: Mark,
+    liked: Option<bool>,
+) -> Element<'a, Link> {
+    let row = line(images, number, track, columns, allow_explicit, mark, liked);
+    menu::with_menu(row, move || menu::track(track, liked))
+}
+
+/// A track's row, without its menu.
+fn line<'a>(
     images: &'a Images,
     number: usize,
     track: &'a Track,
@@ -291,8 +329,7 @@ pub fn marked<'a>(
         )
         .spacing(16)
         .align_y(Alignment::Center);
-    let row = container(line).padding([0, 16]).center_y(ROW_HEIGHT);
-    menu::with_menu(row.into(), move || menu::track(track, liked))
+    container(line).padding([0, 16]).center_y(ROW_HEIGHT).into()
 }
 
 /// A row's heart: filled in the accent for a Loved track.

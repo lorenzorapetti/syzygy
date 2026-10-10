@@ -25,6 +25,14 @@
 //! back. One track is refused if the playlist has it already; a selection
 //! skips what it has and the user is told how many that was.
 //!
+//! Tracks are removed from Own playlists by their index in the playlist's
+//! own order, which is how TIDAL takes them. A row shown in that order
+//! knows its index; a row shown sorted doesn't, so its removal first reads
+//! the playlist in its own order and looks for the one row that's the same
+//! track added at the same time. Until TIDAL has taken it, the row is
+//! hidden and the rows after it move up; once it has, the Page drops it
+//! from what it loaded.
+//!
 //! [`Library::update`] is pure: it changes the state and returns
 //! [`Effect`]s for the Shell to run.
 
@@ -125,6 +133,59 @@ pub enum Edit {
     Delete(Playlist),
     /// Tracks added to an Own playlist.
     Add(Adding),
+    /// A track taken out of an Own playlist.
+    Remove(Removing),
+}
+
+/// A track to take out of an Own playlist, as its row's menu asks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Removal {
+    pub playlist: Playlist,
+    pub track: Track,
+    pub at: At,
+}
+
+/// Where the row to remove is in its playlist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum At {
+    /// Its index in the playlist's own order, as the rows show it: with
+    /// the removals still to land taken out.
+    Index(usize),
+    /// Somewhere in a sorted view, which doesn't say. It's found in the
+    /// playlist's own order once the removal runs.
+    Sorted,
+}
+
+/// A track coming out of an Own playlist.
+#[derive(Debug, Clone)]
+pub struct Removing {
+    /// The playlist as an [`Item::Playlist`], without the track.
+    item: Item,
+    track: Track,
+    at: At,
+}
+
+impl Removing {
+    fn playlist(&self) -> &Playlist {
+        match &self.item {
+            Item::Playlist(playlist) => playlist,
+            Item::Folder(_) | Item::Card(_) => unreachable!("tracks come out of a playlist"),
+        }
+    }
+}
+
+/// Whether two rows are the same entry of a playlist: the same track,
+/// added at the same time. Two copies of a track were added apart.
+fn same_entry(a: &Track, b: &Track) -> bool {
+    a.id == b.id && a.date_added == b.date_added
+}
+
+/// Where `track` is among `rows`: at `index` when it's there, or else the
+/// first row that's the same entry.
+pub fn locate(rows: &[&Track], track: &Track, index: Option<usize>) -> Option<usize> {
+    index
+        .filter(|&index| rows.get(index).is_some_and(|row| same_entry(row, track)))
+        .or_else(|| rows.iter().position(|row| same_entry(row, track)))
 }
 
 /// Tracks going into an Own playlist.
@@ -192,6 +253,7 @@ impl Edit {
             }
             Edit::Delete(playlist) => FavoriteId::Playlist(playlist.uuid.clone()),
             Edit::Add(adding) => FavoriteId::Playlist(adding.playlist().uuid.clone()),
+            Edit::Remove(removing) => FavoriteId::Playlist(removing.playlist().uuid.clone()),
         }
     }
 
@@ -203,6 +265,7 @@ impl Edit {
             Edit::Change(item) => playlist_tags(uuid(item)),
             Edit::Delete(playlist) => playlist_tags(&playlist.uuid),
             Edit::Add(adding) => playlist_tags(&adding.playlist().uuid),
+            Edit::Remove(removing) => playlist_tags(&removing.playlist().uuid),
         }
     }
 
@@ -211,6 +274,7 @@ impl Edit {
         match self {
             Edit::Create(item, _) | Edit::Change(item) => Some(item),
             Edit::Add(adding) => Some(&adding.item),
+            Edit::Remove(removing) => Some(&removing.item),
             Edit::Favorite(..) | Edit::Delete(_) => None,
         }
     }
@@ -254,6 +318,11 @@ impl Edit {
                     }
                 }
             }
+            Edit::Remove(removing) => format!(
+                "Couldn't remove \u{201c}{}\u{201d} from \u{201c}{}\u{201d}",
+                short(&removing.track.title),
+                short(&removing.playlist().title)
+            ),
         }
     }
 }
@@ -359,6 +428,12 @@ pub enum Mutation {
         uuid: String,
         tracks: Vec<u64>,
     },
+    /// Take the track at `index` in an Own playlist's own order out.
+    RemoveTrack {
+        user_id: u64,
+        uuid: String,
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -380,12 +455,16 @@ pub enum Message {
     DeletePlaylist(Playlist),
     /// Add tracks to an Own playlist.
     AddTracks(Playlist, Vec<Track>),
+    /// Take a track out of an Own playlist.
+    RemoveTrack(Removal),
     /// An edit's mutation came back.
     Done(EditId, Result<(), Arc<syzygy_catalog::Error>>),
     /// A new playlist's mutation came back with the playlist TIDAL made.
     Created(EditId, Result<Playlist, Arc<syzygy_catalog::Error>>),
     /// Tracks went into a playlist, as TIDAL counted them.
     Added(EditId, Result<Added, Arc<syzygy_catalog::Error>>),
+    /// A sorted removal's playlist, read in its own order.
+    Order(EditId, Result<Vec<Track>, Arc<syzygy_catalog::Error>>),
     /// A read of the Favorite ids, started at the stamp.
     FavoriteIds(Stamp, Read<FavoriteIds>),
     /// A read of these tags, started at the stamp, brought TIDAL's answer.
@@ -398,6 +477,9 @@ pub enum Effect {
     /// Run an edit's mutation. Its result comes back as
     /// [`Message::Done`] with the edit's id.
     Mutate(EditId, Mutation),
+    /// Read the playlist with this uuid in its own order, to find where a
+    /// sorted removal's row is. It comes back as [`Message::Order`].
+    ReadOrder(EditId, String),
     /// Read the Favorite ids, as of the stamp.
     ReadFavorites { user_id: u64, stamp: Stamp },
     /// An edit landed: what's read under these tags is stale, so lists on
@@ -419,6 +501,13 @@ pub enum Effect {
     Pick { tracks: Tracks, at: iced::Rectangle },
     /// The playlist with this uuid is gone: its Pages go too.
     Deleted(String),
+    /// TIDAL took the track at `index` of the playlist's own order out:
+    /// a Page showing it drops the row from what it loaded.
+    Removed {
+        uuid: String,
+        track: Track,
+        index: usize,
+    },
     /// TIDAL deleted a playlist: playback stops reading it, should it be
     /// the Playback source.
     SourceDeleted(SourceRef),
@@ -560,10 +649,32 @@ impl Library {
                 }
                 self.add(playlist, tracks, false)
             }
+            Message::RemoveTrack(Removal {
+                playlist,
+                track,
+                at,
+            }) => {
+                if !self.editable(&playlist) {
+                    return vec![];
+                }
+                let shown = self.playlist(&playlist);
+                let without = Playlist {
+                    tracks: shown.tracks.saturating_sub(1),
+                    duration: shown.duration.saturating_sub(track.duration),
+                    ..shown.clone()
+                };
+                self.push(Edit::Remove(Removing {
+                    item: Item::Playlist(without),
+                    track,
+                    at,
+                }))
+            }
             Message::Done(id, Ok(())) => self.landed(id, None),
             Message::Done(id, Err(e))
             | Message::Created(id, Err(e))
-            | Message::Added(id, Err(e)) => self.failed(id, &e),
+            | Message::Added(id, Err(e))
+            | Message::Order(id, Err(e)) => self.failed(id, &e),
+            Message::Order(id, Ok(order)) => self.found(id, &order),
             Message::Created(id, Ok(made)) => {
                 // From now on it's the playlist TIDAL made, which can be
                 // opened.
@@ -691,6 +802,16 @@ impl Library {
                     },
                 }
             }
+            Edit::Remove(removing) => match removing.at {
+                At::Index(index) => Mutation::RemoveTrack {
+                    user_id,
+                    uuid: removing.playlist().uuid.clone(),
+                    index,
+                },
+                At::Sorted => {
+                    return vec![Effect::ReadOrder(id, removing.playlist().uuid.clone())];
+                }
+            },
         };
         vec![Effect::Mutate(id, mutation)]
     }
@@ -729,7 +850,20 @@ impl Library {
             }),
             _ => None,
         };
+        let removed = match &pending.edit {
+            Edit::Remove(removing) => match removing.at {
+                At::Index(index) => Some(Effect::Removed {
+                    uuid: removing.playlist().uuid.clone(),
+                    track: removing.track.clone(),
+                    index,
+                }),
+                // A removal runs once its index is known.
+                At::Sorted => None,
+            },
+            _ => None,
+        };
         let mut effects = self.next(&target);
+        effects.extend(removed);
         effects.push(Effect::Refresh(tags));
         effects.extend(deleted.map(Effect::SourceDeleted));
         if let (Some(told), FavoriteId::Playlist(uuid)) = (told, target) {
@@ -742,14 +876,10 @@ impl Library {
     /// TIDAL refused an edit: it's dropped, with the edits waiting behind
     /// it, and the user is told once.
     fn failed(&mut self, id: EditId, error: &syzygy_catalog::Error) -> Vec<Effect> {
-        let Some(index) = self.pending.iter().position(|pending| pending.id == id) else {
+        let Some(failed) = self.drop_edit(id) else {
             return vec![];
         };
-        let failed = self.pending.remove(index);
         log::warn!("TIDAL refused {:?}: {error}", failed.edit);
-        let target = failed.edit.target();
-        self.pending
-            .retain(|pending| pending.edit.target() != target || pending.state != Progress::Queued);
         // A playlist just made has no tracks to clash with.
         let duplicate = matches!(&failed.edit, Edit::Add(adding)
             if adding.single().is_some() && !adding.new_playlist)
@@ -758,6 +888,52 @@ impl Library {
             return vec![Effect::Inform("Track already in this playlist".to_string())];
         }
         vec![Effect::Toast(failed.edit.failure())]
+    }
+
+    /// Take an edit out, with the edits waiting behind it.
+    fn drop_edit(&mut self, id: EditId) -> Option<Pending> {
+        let index = self.pending.iter().position(|pending| pending.id == id)?;
+        let dropped = self.pending.remove(index);
+        let target = dropped.edit.target();
+        self.pending
+            .retain(|pending| pending.edit.target() != target || pending.state != Progress::Queued);
+        Some(dropped)
+    }
+
+    /// A sorted removal's playlist came in its own order: the removal goes
+    /// by the one row that's the same entry, and is refused when there's
+    /// none or more than one.
+    fn found(&mut self, id: EditId, order: &[Track]) -> Vec<Effect> {
+        let Some(pending) = self.pending.iter_mut().find(|pending| pending.id == id) else {
+            return vec![];
+        };
+        let Edit::Remove(removing) = &mut pending.edit else {
+            return vec![];
+        };
+        let mut matching = order
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| same_entry(row, &removing.track))
+            .map(|(index, _)| index);
+        let refusal = match (matching.next(), matching.next()) {
+            (Some(index), None) => {
+                removing.at = At::Index(index);
+                return self.run(id);
+            }
+            (None, _) => format!(
+                "Couldn't find \u{201c}{}\u{201d} in \u{201c}{}\u{201d}",
+                short(&removing.track.title),
+                short(&removing.playlist().title)
+            ),
+            (Some(_), Some(_)) => format!(
+                "Couldn't tell which \u{201c}{}\u{201d} to remove. \
+                 Sort the playlist by # and remove it there",
+                short(&removing.track.title)
+            ),
+        };
+        log::warn!("Not removing {:?}: {refusal}", removing.track);
+        self.drop_edit(id);
+        vec![Effect::Toast(refusal)]
     }
 
     /// Run the first edit waiting on `target`.
@@ -814,6 +990,38 @@ impl Library {
                 _ => None,
             })
             .unwrap_or(playlist)
+    }
+
+    /// The rows of a playlist's loaded `tracks` that aren't on their way
+    /// out, by their place in `tracks`. In the playlist's own order (not
+    /// `sorted`), a row's place among them is its index in the playlist.
+    pub fn rows(&self, uuid: &str, tracks: &[Track], sorted: bool) -> Vec<usize> {
+        let mut rows: Vec<usize> = (0..tracks.len()).collect();
+        let removing = self
+            .pending
+            .iter()
+            .filter_map(|pending| match &pending.edit {
+                Edit::Remove(removing)
+                    if removing.playlist().uuid == uuid
+                        && !matches!(pending.state, Progress::Landed(_)) =>
+                {
+                    Some(removing)
+                }
+                _ => None,
+            });
+        // In the order they were asked for, as each index counts the
+        // removals before it.
+        for removing in removing {
+            let index = match removing.at {
+                At::Index(index) if !sorted => Some(index),
+                At::Index(_) | At::Sorted => None,
+            };
+            let shown: Vec<&Track> = rows.iter().map(|&position| &tracks[position]).collect();
+            if let Some(at) = locate(&shown, &removing.track, index) {
+                rows.remove(at);
+            }
+        }
+        rows
     }
 
     /// A list's server items with the pending edits laid over them.
@@ -937,7 +1145,7 @@ pub fn apply<'a, T: Listed>(
         .filter(|(id, _)| listing.adds(id) && !listed(id))
         .filter_map(|(id, edit)| match edit {
             Edit::Favorite(favorite, true) => T::liked(favorite),
-            Edit::Create(..) | Edit::Change(_) | Edit::Add(_) if created(id) => {
+            Edit::Create(..) | Edit::Change(_) | Edit::Add(_) | Edit::Remove(_) if created(id) => {
                 edit.shows().and_then(T::edited)
             }
             _ => None,

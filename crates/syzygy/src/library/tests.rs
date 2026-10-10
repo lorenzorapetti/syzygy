@@ -1051,3 +1051,283 @@ fn a_new_playlists_one_track_refused_as_a_dupe_still_says_the_track_didnt_go_in(
     );
     assert!(informed(&effects).is_empty());
 }
+
+// Removing tracks from Own playlists.
+
+/// A track as an Own playlist lists it: when it was added tells apart two
+/// of the same track.
+fn entry(id: u64, added: &str) -> Track {
+    Track {
+        date_added: Some(added.to_string()),
+        ..track(id)
+    }
+}
+
+/// An Own playlist's rows, in its own order.
+fn rows() -> Vec<Track> {
+    vec![
+        entry(1, "2024-01-01"),
+        entry(2, "2024-01-02"),
+        entry(3, "2024-01-03"),
+        entry(4, "2024-01-04"),
+    ]
+}
+
+/// The ids of the rows `library` leaves of `tracks`, in the order shown.
+fn shown_ids(library: &Library, uuid: &str, tracks: &[Track], sorted: bool) -> Vec<u64> {
+    library
+        .rows(uuid, tracks, sorted)
+        .into_iter()
+        .map(|position| tracks[position].id)
+        .collect()
+}
+
+fn remove(playlist: &Playlist, track: Track, at: At) -> Message {
+    Message::RemoveTrack(Removal {
+        playlist: playlist.clone(),
+        track,
+        at,
+    })
+}
+
+#[test]
+fn a_removal_in_the_own_order_goes_by_its_index_and_shows_at_once() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let server = playlists(std::slice::from_ref(&playlist));
+
+    let effects = library.update(remove(&playlist, entry(2, "2024-01-02"), At::Index(1)));
+
+    let (_, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::RemoveTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            index: 1,
+        }
+    );
+    assert_eq!(offered(&library, &server), vec![("Mix".to_string(), 3)]);
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 3, 4]);
+}
+
+#[test]
+fn rows_after_a_removal_move_up_and_the_next_removal_waits_with_its_new_index() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (first, _) =
+        mutation(&library.update(remove(&playlist, entry(2, "2024-01-02"), At::Index(1))));
+
+    // Track 4 was fourth; with track 2 on its way out it's third.
+    let effects = library.update(remove(&playlist, entry(4, "2024-01-04"), At::Index(2)));
+    assert_eq!(mutations(&effects), 0);
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 3]);
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 2)]
+    );
+
+    let (_, next) = mutation(&library.update(Message::Done(first, Ok(()))));
+    assert_eq!(
+        next,
+        Mutation::RemoveTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            index: 2,
+        }
+    );
+}
+
+#[test]
+fn a_landed_removal_leaves_the_row_to_the_page_and_reads_the_playlist_again() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (id, _) =
+        mutation(&library.update(remove(&playlist, entry(2, "2024-01-02"), At::Index(1))));
+
+    let effects = library.update(Message::Done(id, Ok(())));
+
+    assert!(effects.contains(&Effect::Removed {
+        uuid: "p-1".to_string(),
+        track: entry(2, "2024-01-02"),
+        index: 1,
+    }));
+    assert!(effects.contains(&Effect::Refresh(vec![
+        "folders".to_string(),
+        "playlist:p-1".to_string(),
+    ])));
+    // The Page has dropped it from its rows, so they're shown as they are.
+    let dropped: Vec<Track> = rows().into_iter().filter(|track| track.id != 2).collect();
+    assert_eq!(shown_ids(&library, "p-1", &dropped, false), vec![1, 3, 4]);
+    // The count stays down until TIDAL's lists have it.
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 3)]
+    );
+}
+
+#[test]
+fn a_refused_removal_brings_the_row_and_the_count_back_with_a_toast() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (id, _) =
+        mutation(&library.update(remove(&playlist, entry(2, "2024-01-02"), At::Index(1))));
+    library.update(remove(&playlist, entry(4, "2024-01-04"), At::Index(2)));
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't remove \u{201c}Track 2\u{201d} from \u{201c}Mix\u{201d}"]
+    );
+    assert_eq!(mutations(&effects), 0);
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 2, 3, 4]);
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 4)]
+    );
+}
+
+#[test]
+fn tracks_come_out_only_of_own_playlists_that_tidal_has_made() {
+    let mut library = library(&[], &[]);
+    let theirs = PlaylistFields::new().playlist("p-1".to_string(), USER + 1);
+
+    let effects = library.update(remove(&theirs, entry(1, "2024-01-01"), At::Index(0)));
+
+    assert!(effects.is_empty());
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 2, 3, 4]);
+}
+
+/// The one own-order read `effects` asks for, before a sorted removal.
+fn located(effects: &[Effect]) -> EditId {
+    let reads: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::ReadOrder(id, uuid) if uuid == "p-1" => Some(*id),
+            _ => None,
+        })
+        .collect();
+    match reads.as_slice() {
+        [one] => *one,
+        _ => panic!("one read of the own order, not {effects:?}"),
+    }
+}
+
+#[test]
+fn a_sorted_removal_reads_the_own_order_and_goes_by_the_row_it_finds() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    // Sorted by title, last first.
+    let sorted: Vec<Track> = rows().into_iter().rev().collect();
+
+    let effects = library.update(remove(&playlist, entry(3, "2024-01-03"), At::Sorted));
+
+    assert_eq!(mutations(&effects), 0);
+    let id = located(&effects);
+    assert_eq!(shown_ids(&library, "p-1", &sorted, true), vec![4, 2, 1]);
+
+    // Track 3 is there twice, added apart.
+    let order = vec![
+        entry(3, "2023-12-31"),
+        entry(1, "2024-01-01"),
+        entry(2, "2024-01-02"),
+        entry(3, "2024-01-03"),
+        entry(4, "2024-01-04"),
+    ];
+    let (_, mutation) = mutation(&library.update(Message::Order(id, Ok(order))));
+    assert_eq!(
+        mutation,
+        Mutation::RemoveTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            index: 3,
+        }
+    );
+}
+
+#[test]
+fn a_sorted_removal_whose_row_isnt_there_is_refused_with_a_toast() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let id = located(&library.update(remove(&playlist, entry(3, "2024-01-03"), At::Sorted)));
+
+    let order = vec![entry(1, "2024-01-01"), entry(3, "2024-02-01")];
+    let effects = library.update(Message::Order(id, Ok(order)));
+
+    assert_eq!(mutations(&effects), 0);
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't find \u{201c}Track 3\u{201d} in \u{201c}Mix\u{201d}"]
+    );
+    assert_eq!(shown_ids(&library, "p-1", &rows(), true), vec![1, 2, 3, 4]);
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 4)]
+    );
+}
+
+#[test]
+fn a_sorted_removal_matching_several_rows_is_refused_with_a_toast() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let id = located(&library.update(remove(&playlist, entry(3, "2024-01-03"), At::Sorted)));
+
+    let order = vec![entry(3, "2024-01-03"), entry(3, "2024-01-03")];
+    let effects = library.update(Message::Order(id, Ok(order)));
+
+    assert_eq!(mutations(&effects), 0);
+    assert_eq!(
+        toasts(&effects),
+        vec![
+            "Couldn't tell which \u{201c}Track 3\u{201d} to remove. \
+             Sort the playlist by # and remove it there"
+        ]
+    );
+    assert_eq!(shown_ids(&library, "p-1", &rows(), true), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn a_sorted_removal_waits_for_the_one_before_it_to_read_the_own_order() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (first, _) =
+        mutation(&library.update(remove(&playlist, entry(1, "2024-01-01"), At::Index(0))));
+
+    let effects = library.update(remove(&playlist, entry(3, "2024-01-03"), At::Sorted));
+    assert!(effects.is_empty());
+
+    located(&library.update(Message::Done(first, Ok(()))));
+}
+
+#[test]
+fn a_sorted_removal_whose_read_fails_says_so() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let id = located(&library.update(remove(&playlist, entry(3, "2024-01-03"), At::Sorted)));
+
+    let effects = library.update(Message::Order(id, Err(failure())));
+
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't remove \u{201c}Track 3\u{201d} from \u{201c}Mix\u{201d}"]
+    );
+}
+
+#[test]
+fn a_refused_sorted_removal_drops_the_removals_waiting_behind_it() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let id = located(&library.update(remove(&playlist, entry(3, "2024-01-03"), At::Sorted)));
+    library.update(remove(&playlist, entry(1, "2024-01-01"), At::Sorted));
+
+    let effects = library.update(Message::Order(id, Ok(vec![])));
+
+    assert_eq!(toasts(&effects).len(), 1);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::ReadOrder(..)))
+    );
+    assert_eq!(shown_ids(&library, "p-1", &rows(), true), vec![1, 2, 3, 4]);
+}

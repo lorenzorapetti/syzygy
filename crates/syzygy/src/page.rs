@@ -361,6 +361,8 @@ pub enum Link {
     /// "Add to playlist", from the menu item or button on screen at the
     /// rectangle.
     AddToPlaylist(Box<crate::library::Tracks>, iced::Rectangle),
+    /// "Remove from playlist", from an Own playlist's track row.
+    RemoveTrack(Box<crate::library::Removal>),
 }
 
 impl Link {
@@ -387,6 +389,9 @@ impl Link {
                 tracks: *tracks,
                 at,
             }),
+            Link::RemoveTrack(removal) => {
+                Action::Library(crate::library::Message::RemoveTrack(*removal))
+            }
         }
     }
 }
@@ -475,7 +480,7 @@ impl Page {
             (Page::ArtistTracks(state), Message::ArtistTracks(message)) => state.update(message),
             (Page::ArtistViewAll(state), Message::ArtistViewAll(message)) => state.update(message),
             (Page::Mix(state), Message::Mix(message)) => state.update(message),
-            (Page::Playlist(state), Message::Playlist(message)) => state.update(message),
+            (Page::Playlist(state), Message::Playlist(message)) => state.update(message, library),
             (Page::Favorites(state), Message::Favorites(message)) => state.update(message, library),
             (Page::Library(state), Message::Library(message)) => state.update(message),
             (Page::Search(state), Message::Search(message)) => state.update(message),
@@ -492,8 +497,18 @@ impl Page {
 
     /// The Library's pending edits changed.
     pub fn library_changed(&mut self, library: &Library) {
-        if let Page::Favorites(state) = self {
-            state.library_changed(library);
+        match self {
+            Page::Favorites(state) => state.library_changed(library),
+            Page::Playlist(state) => state.library_changed(library),
+            _ => {}
+        }
+    }
+
+    /// TIDAL took the track at `index` of the playlist's own order out: a
+    /// Page showing the playlist drops its row.
+    pub fn removed(&mut self, uuid: &str, track: &Track, index: usize, library: &Library) {
+        if let Page::Playlist(state) = self {
+            state.removed(uuid, track, index, library);
         }
     }
 

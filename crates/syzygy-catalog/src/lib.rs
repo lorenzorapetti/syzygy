@@ -615,6 +615,45 @@ impl Catalog {
         }
     }
 
+    /// Take the track at `index` in an Own playlist's own order out of it.
+    /// The playlist's reads and the user's lists are stale after.
+    pub fn remove_track(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        index: usize,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .remove_track_from_playlist(&uuid, index as u32)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Every track of a playlist in its own order, read from TIDAL now:
+    /// where a removal finds its row's index. Not cached, as an index from
+    /// an older read could take out the wrong track.
+    pub fn playlist_order(
+        &self,
+        uuid: &str,
+    ) -> impl Future<Output = Result<Vec<Track>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let tracks = tidal
+                .get_playlist_tracks(&uuid)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(tracks.into_iter().map(Track::from).collect())
+        }
+    }
+
     /// Forget what's cached of a playlist and the user's lists, so they're
     /// read again: TIDAL makes a playlist's cover a while after its tracks
     /// change.

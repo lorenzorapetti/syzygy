@@ -16,7 +16,7 @@ use syzygy_catalog::{Playlist, Track};
 
 use super::{Link, Preview, Route, cards};
 use crate::icons::{Icon, filled, icon};
-use crate::library::{Ask, Favorite, Tracks};
+use crate::library::{Ask, Favorite, Removal, Tracks};
 use crate::style;
 
 const WIDTH: f32 = 240.0;
@@ -144,6 +144,17 @@ pub fn track(track: &Track, liked: Option<bool>) -> Vec<Vec<Item>> {
             Item::new(Icon::User, "Go to artist", artist),
         ],
     ]
+}
+
+/// A track's menu in an Own playlist: [`track`]'s, and taking it out.
+pub fn own_track(track: &Track, liked: Option<bool>, removal: &Removal) -> Vec<Vec<Item>> {
+    let mut sections = self::track(track, liked);
+    sections.push(vec![Item::new(
+        Icon::Trash2,
+        "Remove from playlist",
+        Some(Link::RemoveTrack(Box::new(removal.clone()))),
+    )]);
+    sections
 }
 
 /// A card's menu: playing what it leads to, and liking or following it.
