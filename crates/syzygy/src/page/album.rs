@@ -215,29 +215,21 @@ impl State {
             Row::Volume(volume) => track_list::heading(format!("Volume {volume}")),
             Row::Track(index, number) => {
                 let track = &album.tracks[index];
-                let now = now_playing.filter(|now| now.track_id == track.id);
                 let hovered = self.hovered == Some(index);
-                let mark = match now {
-                    Some(NowPlaying {
-                        playing: Some(at), ..
-                    }) => Mark::Playing(at),
-                    Some(_) => Mark::Current { hovered },
-                    None if hovered => Mark::Hovered,
-                    None => Mark::None,
-                };
                 let line = track_list::marked(
                     images,
                     number,
                     track,
                     COLUMNS,
                     allow_explicit,
-                    mark,
+                    Mark::of(track, now_playing, hovered),
                     library.liked(track),
                 );
-                let row = track_list::playable(
+                let row = track_list::playable_track(
                     line.map(Message::Link),
+                    track,
+                    now_playing,
                     Message::Play(Start::Track(index)),
-                    now.is_some(),
                 );
                 mouse_area(row)
                     .on_enter(Message::Hovered(index))

@@ -413,6 +413,9 @@ pub enum SourceRef {
         uuid: String,
         sort: Option<TrackSort>,
     },
+    /// The recommendations showing on a playlist's Page, by the playlist's
+    /// uuid. Playing them isn't playing the playlist.
+    PlaylistRecommendations(String),
     Mix(String),
     /// A track's mix, by the mix's id.
     TrackRadio(String),

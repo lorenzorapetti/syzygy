@@ -58,6 +58,7 @@ fn read(
         },
         SourceRef::Artist(id) => Some(catalog.more_artist_tracks(*id, offset).boxed()),
         SourceRef::Album(_)
+        | SourceRef::PlaylistRecommendations(_)
         | SourceRef::Mix(_)
         | SourceRef::TrackRadio(_)
         | SourceRef::Search(_)

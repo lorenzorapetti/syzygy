@@ -60,7 +60,7 @@ _Avoid_: history (that's the tracks already played), navigation history
 ### Playback
 
 **Playback source**:
-The album, playlist, mix, artist, Loved tracks, search results, single track or Track radio that playback is working through. Every play has one, and it stays in place while the Manual queue plays.
+The album, playlist, a playlist's recommendations, mix, artist, Loved tracks, search results, single track or Track radio that playback is working through. Every play has one, and it stays in place while the Manual queue plays.
 _Avoid_: context, context source, container
 
 **Queue entry**:

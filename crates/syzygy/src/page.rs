@@ -505,6 +505,7 @@ impl Page {
     pub fn shows_track(&self, track_id: u64) -> bool {
         match self {
             Page::Album(state) => state.shows_track(track_id),
+            Page::Playlist(state) => state.shows_track(track_id),
             _ => false,
         }
     }
@@ -937,6 +938,11 @@ pub fn source_route(source: &Source, track: &Track) -> Option<Route> {
         SourceRef::Playlist { uuid, .. } => Route::Playlist {
             uuid: uuid.clone(),
             preview: preview(),
+        },
+        // Its name is "<title>: Recommended", not the playlist's title.
+        SourceRef::PlaylistRecommendations(uuid) => Route::Playlist {
+            uuid: uuid.clone(),
+            preview: None,
         },
         SourceRef::Mix(id) | SourceRef::TrackRadio(id) => Route::Mix {
             id: id.clone(),

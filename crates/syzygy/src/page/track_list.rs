@@ -165,6 +165,21 @@ pub enum Mark {
     Playing(f32),
 }
 
+impl Mark {
+    /// The mark for `track`'s row, given what plays and whether the pointer
+    /// is over the row.
+    pub fn of(track: &Track, now_playing: Option<NowPlaying>, hovered: bool) -> Self {
+        match now_playing.filter(|now| now.track_id == track.id) {
+            Some(NowPlaying {
+                playing: Some(at), ..
+            }) => Self::Playing(at),
+            Some(_) => Self::Current { hovered },
+            None if hovered => Self::Hovered,
+            None => Self::None,
+        }
+    }
+}
+
 /// One track: its number, the cover if the list shows covers, the title
 /// over its artists, the album if shown, its heart and how long it is.
 /// Right-clicked, it opens the track's menu. Dimmed if it can't play: TIDAL
@@ -482,7 +497,35 @@ pub fn window(rows: usize, top: f32, viewport: Viewport) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::playback::SourceRef;
     use syzygy_catalog::track::{AlbumRef, ArtistRef};
+
+    #[test]
+    fn a_row_is_marked_by_what_plays_and_the_pointer() {
+        let source = SourceRef::Album(1);
+        let now = |track_id, playing| {
+            Some(NowPlaying {
+                track_id,
+                playing,
+                source: &source,
+            })
+        };
+        let row = track(7, "T", "A", "B");
+
+        assert_eq!(Mark::of(&row, None, false), Mark::None);
+        assert_eq!(Mark::of(&row, None, true), Mark::Hovered);
+        assert_eq!(Mark::of(&row, now(8, Some(0.5)), false), Mark::None);
+        assert_eq!(Mark::of(&row, now(8, Some(0.5)), true), Mark::Hovered);
+        assert_eq!(Mark::of(&row, now(7, Some(0.5)), true), Mark::Playing(0.5));
+        assert_eq!(
+            Mark::of(&row, now(7, None), false),
+            Mark::Current { hovered: false }
+        );
+        assert_eq!(
+            Mark::of(&row, now(7, None), true),
+            Mark::Current { hovered: true }
+        );
+    }
 
     fn track(id: u64, title: &str, artist: &str, album: &str) -> Track {
         Track {

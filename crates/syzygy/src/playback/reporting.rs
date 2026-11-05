@@ -15,7 +15,9 @@ impl From<&SourceRef> for report::Source {
     fn from(source: &SourceRef) -> Self {
         match source {
             SourceRef::Album(id) => report::Source::Album(*id),
-            SourceRef::Playlist { uuid, .. } => report::Source::Playlist(uuid.clone()),
+            SourceRef::Playlist { uuid, .. } | SourceRef::PlaylistRecommendations(uuid) => {
+                report::Source::Playlist(uuid.clone())
+            }
             SourceRef::Mix(id) | SourceRef::TrackRadio(id) => report::Source::Mix(id.clone()),
             SourceRef::Artist(id) => report::Source::Artist(*id),
             SourceRef::LovedTracks(_) => report::Source::LovedTracks,

@@ -1,14 +1,14 @@
 //! The Playlist Page: a playlist's tracks a page at a time, sorted by TIDAL
 //! and filtered here, then the tracks TIDAL recommends for it.
 
-use iced::widget::{Column, button, column, container, row, space, text, text_input};
+use iced::widget::{Column, button, column, container, mouse_area, row, space, text, text_input};
 use iced::{Alignment, Element, Length};
 use std::sync::Arc;
 use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
 
 use super::paged::List;
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Mark};
 use super::{
     Action, Context, Link, Load, NowPlaying, PADDING, Preview, Remote, Route, Viewport, count,
     duration, header_actions, hero, play_buttons,
@@ -41,6 +41,9 @@ pub struct State {
     /// list. In the own order that's the track's index in the playlist.
     shown: Vec<usize>,
     recommendations: Recommendations,
+    /// The recommendation the pointer is over, by its place among those
+    /// showing.
+    hovered_recommendation: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +76,12 @@ pub enum Message {
     /// Play the loaded tracks, in the order shown, from a track by its
     /// place in the list or all of them.
     Play(Start),
+    /// Play the recommendations showing, from one by its place among them.
+    PlayRecommendation(usize),
+    /// The pointer came over the recommendation at this place.
+    RecommendationHovered(usize),
+    /// The pointer left the recommendation at this place.
+    RecommendationLeft(usize),
     TogglePlay,
     Retry,
 }
@@ -95,6 +104,7 @@ impl State {
             filter: String::new(),
             shown: Vec::new(),
             recommendations: Recommendations::default(),
+            hovered_recommendation: None,
         };
         (state, action)
     }
@@ -156,13 +166,25 @@ impl State {
                 if tracks.is_empty() {
                     return Action::None;
                 }
-                let name = match (&self.playlist, &self.preview) {
-                    (Remote::Loaded(playlist), _) => playlist.title.as_str(),
-                    (_, Some(preview)) => preview.title.as_str(),
-                    _ => "Playlist",
-                };
-                let request = super::request(self.source(), name, tracks, start);
+                let request = super::request(self.source(), self.title(), tracks, start);
                 Action::Play(super::with_rest(request, self.tracks.has_more()))
+            }
+            Message::PlayRecommendation(i) => Action::Play(super::request(
+                SourceRef::PlaylistRecommendations(self.uuid.clone()),
+                &format!("{}: Recommended", self.title()),
+                self.recommendations.shown(),
+                Start::Track(i),
+            )),
+            Message::RecommendationHovered(i) => {
+                self.hovered_recommendation = Some(i);
+                Action::None
+            }
+            // Only the row it left: the next row's arrival may come first.
+            Message::RecommendationLeft(i) => {
+                if self.hovered_recommendation == Some(i) {
+                    self.hovered_recommendation = None;
+                }
+                Action::None
             }
             Message::TogglePlay => Action::TogglePlay,
             Message::Retry => {
@@ -177,6 +199,24 @@ impl State {
                     Action::Load(Load::Playlist(self.uuid.clone())),
                 ])
             }
+        }
+    }
+
+    /// Whether the track is among the recommendations showing, the only rows
+    /// here that animate.
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.recommendations
+            .shown()
+            .iter()
+            .any(|track| track.id == track_id)
+    }
+
+    /// The playlist's title, as far as it's known.
+    fn title(&self) -> &str {
+        match (&self.playlist, &self.preview) {
+            (Remote::Loaded(playlist), _) => &playlist.title,
+            (_, Some(preview)) => &preview.title,
+            _ => "Playlist",
         }
     }
 
@@ -314,7 +354,7 @@ impl State {
                 .push(self.tracks.end(Message::EndInView, Message::RetryMore))
                 .push(
                     all_loaded
-                        .then(|| self.recommendations(images, library, allow_explicit))
+                        .then(|| self.recommendations(images, library, now_playing, allow_explicit))
                         .flatten(),
                 )
                 .spacing(SPACING)
@@ -385,6 +425,7 @@ impl State {
         &'a self,
         images: &'a Images,
         library: &'a Library,
+        now_playing: Option<NowPlaying<'a>>,
         allow_explicit: bool,
     ) -> Option<Element<'a, Message>> {
         let shown = self.recommendations.shown();
@@ -398,8 +439,26 @@ impl State {
         };
         let rows = shown.iter().enumerate().map(|(i, track)| {
             let liked = library.liked(track);
-            track_list::track(images, i + 1, track, columns, allow_explicit, liked)
-                .map(Message::Link)
+            let hovered = self.hovered_recommendation == Some(i);
+            let line = track_list::marked(
+                images,
+                i + 1,
+                track,
+                columns,
+                allow_explicit,
+                Mark::of(track, now_playing, hovered),
+                liked,
+            );
+            let row = track_list::playable_track(
+                line.map(Message::Link),
+                track,
+                now_playing,
+                Message::PlayRecommendation(i),
+            );
+            mouse_area(row)
+                .on_enter(Message::RecommendationHovered(i))
+                .on_exit(Message::RecommendationLeft(i))
+                .into()
         });
         let refresh = button(
             row![
@@ -541,6 +600,56 @@ mod tests {
 
     fn batch(n: usize) -> Vec<Track> {
         (0..n as u64).map(|id| track(id, "T", "A", "B")).collect()
+    }
+
+    #[test]
+    fn only_the_recommendations_showing_animate() {
+        let settings = crate::settings::Settings::default();
+        let context = Context {
+            user_id: None,
+            settings: &settings,
+        };
+        let (mut state, _) = State::new("uuid".to_string(), None, &context);
+        state.recommendations.arrived(0, Ok(batch(50)));
+
+        assert!(state.shows_track(9));
+        assert!(!state.shows_track(10));
+
+        state.recommendations.next();
+
+        assert!(!state.shows_track(9));
+        assert!(state.shows_track(10));
+    }
+
+    #[test]
+    fn a_recommendation_plays_the_ones_showing_as_their_own_source() {
+        let settings = crate::settings::Settings::default();
+        let context = Context {
+            user_id: None,
+            settings: &settings,
+        };
+        let preview = Preview {
+            title: "Mine".to_string(),
+            cover: None,
+            artist: None,
+        };
+        let (mut state, _) = State::new("uuid".to_string(), Some(preview), &context);
+        state.recommendations.arrived(0, Ok(batch(50)));
+        state.recommendations.next();
+
+        let Action::Play(request) = state.update(Message::PlayRecommendation(3)) else {
+            panic!("a click on a recommendation plays");
+        };
+
+        assert_eq!(
+            request.source.kind,
+            SourceRef::PlaylistRecommendations("uuid".to_string())
+        );
+        assert_eq!(request.source.name, "Mine: Recommended");
+        let ids: Vec<u64> = request.first_page.iter().map(|track| track.id).collect();
+        assert_eq!(ids, (10..20).collect::<Vec<u64>>());
+        assert!(matches!(request.start, Start::Track(3)));
+        assert!(request.continuation.is_none());
     }
 
     #[test]
