@@ -28,6 +28,7 @@ open.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["rt", "time"] }
+ttf-parser.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

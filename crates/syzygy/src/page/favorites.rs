@@ -7,7 +7,7 @@ use std::sync::Arc;
 use syzygy_catalog::{Direction, Paged, Read, Track, TrackOrder, TrackSort};
 
 use super::paged::List;
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Hover, Mark};
 use super::{
     Action, Context, Link, Load, NowPlaying, PADDING, Viewport, count, hero, loved_art,
     play_buttons,
@@ -43,6 +43,8 @@ pub struct State {
     /// The tracks the filter lets through, by their place in the list as
     /// the pending Library edits change it.
     shown: Vec<usize>,
+    /// The track the pointer is over, by its place in the list.
+    hover: Hover,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +72,10 @@ pub enum Message {
     /// place in the list or all of them.
     Play(Start),
     TogglePlay,
+    /// The pointer came over the row with this key.
+    Hovered(usize),
+    /// The pointer left the row with this key.
+    Left(usize),
     Retry,
 }
 
@@ -81,6 +87,7 @@ impl State {
             tracks: List::new(),
             filter: String::new(),
             shown: Vec::new(),
+            hover: Hover::default(),
         };
         let action = state.load();
         (state, action)
@@ -141,6 +148,14 @@ impl State {
                 Action::Play(request)
             }
             Message::TogglePlay => Action::TogglePlay,
+            Message::Hovered(key) => {
+                self.hover.entered(key);
+                Action::None
+            }
+            Message::Left(key) => {
+                self.hover.left(key);
+                Action::None
+            }
             Message::Retry => self.load(),
         }
     }
@@ -224,6 +239,10 @@ impl State {
         self.sort.unwrap_or(LAST_ADDED_FIRST)
     }
 
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.tracks.items().iter().any(|track| track.id == track_id)
+    }
+
     pub fn view<'a>(
         &'a self,
         images: &'a Images,
@@ -271,13 +290,23 @@ impl State {
                 let position = self.shown[i];
                 let track = tracks[position];
                 let liked = library.liked(track);
-                let row =
-                    track_list::track(images, position + 1, track, COLUMNS, allow_explicit, liked);
+                let mark = Mark::of(track, now_playing, self.hover.over(position));
+                let row = track_list::marked(
+                    images,
+                    position + 1,
+                    track,
+                    COLUMNS,
+                    allow_explicit,
+                    mark,
+                    liked,
+                );
                 track_list::playable_track(
                     row.map(Message::Link),
-                    track,
-                    now_playing,
+                    mark,
                     Message::Play(Start::Track(position)),
+                    position,
+                    Message::Hovered,
+                    Message::Left,
                 )
             });
             let nothing_matches = (self.shown.is_empty() && !self.filter.trim().is_empty())

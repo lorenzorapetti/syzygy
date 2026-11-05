@@ -11,21 +11,24 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use syzygy_catalog::home_feed::Target;
 use syzygy_catalog::library::{self, Item};
-use syzygy_catalog::{Kind, LibrarySort, Paged, Read, Shelf};
+use syzygy_catalog::{Direction, Kind, LibraryOrder, LibrarySort, Paged, Read, Shelf};
 
 use crate::icons::{Icon, icon};
 use crate::identity::DISPLAY_NAME;
 use crate::images::Images;
-use crate::library::{Library, Listing, Shelved};
-use crate::page::library::{folder_route, label, playlist_menu, playlist_route};
+use crate::library::{Library, Listing, Shelved, is_placeholder, is_placeholder_folder};
+use crate::page::library::{
+    folder_menu, folder_route, label, order_label, playlist_menu, playlist_route,
+};
 use crate::page::paged::List;
 use crate::page::{Link, Remote, Route, cards, folder_art, loved_art, menu, rounded_cover};
-use crate::settings::Settings;
+use crate::settings::{Settings, Sort};
 use crate::style;
 
 pub const WIDTH: f32 = 280.0;
 const ART_SIZE: f32 = 40.0;
 const ART_RADIUS: f32 = 4.0;
+const SORT_MENU_WIDTH: f32 = 180.0;
 
 pub struct Sidebar {
     /// Who's signed in. Nothing is read until TIDAL has said.
@@ -40,6 +43,8 @@ pub struct Sidebar {
 pub enum Message {
     /// A Library type's pill.
     Select(Kind),
+    /// An order was picked for the type showing.
+    Sort(LibraryOrder),
     /// A read of a shelf's first page.
     Items {
         shelf: Shelf,
@@ -69,6 +74,8 @@ pub enum Effect {
         offset: usize,
         cursor: Option<String>,
     },
+    /// Keep a type's new order, and read it so.
+    Sort(Sort),
     Link(Link),
 }
 
@@ -133,6 +140,10 @@ impl Sidebar {
             Message::Select(kind) => {
                 self.kind = kind;
                 self.ask(kind, library)
+            }
+            Message::Sort(order) => {
+                let sort = LibrarySort::picked(self.list(self.kind, library).sort, order);
+                Effect::Sort(Sort::Library(self.kind, sort))
             }
             Message::Items { shelf, read } => {
                 if Some(&shelf) != self.shelf(shelf.kind, library).as_ref() {
@@ -265,16 +276,19 @@ impl Sidebar {
         };
         let feed = nav(bell, "Feed", Route::Feed, matches!(current, Route::Feed));
         let pages = column![home, explore, feed].spacing(2);
-        let show_all = button(text("Show all").size(12))
+        let show_all = button(text("Show all").size(12).wrapping(text::Wrapping::None))
             .padding([4, 8])
             .style(show_all_style)
             .on_press(Message::Link(Link::Open(Route::Library {
                 kind: self.kind,
             })));
+        let sort = container(icon(Icon::ArrowUpDown, 16.0, style::TEXT_SECONDARY)).padding(4);
+        let sort = menu::dropdown(sort, move || self.sort_menu(library));
         let header = row![
             icon(Icon::Library, 20.0, style::TEXT_SECONDARY),
             text("Your Library").size(13).color(style::TEXT_SECONDARY),
             space::horizontal(),
+            sort,
             show_all,
         ]
         .spacing(12)
@@ -311,6 +325,36 @@ impl Sidebar {
             .into()
     }
 
+    /// The orders the type showing can be in, the one it's in marked with
+    /// which way it goes. Picking it again turns it around.
+    fn sort_menu<'a>(&self, library: &Library) -> Element<'a, Message> {
+        let sort = self.list(self.kind, library).sort;
+        let options = self.kind.orders().iter().map(|&order| {
+            let picked = order == sort.order;
+            let arrow = match sort.direction {
+                Direction::Ascending => " ↑",
+                Direction::Descending => " ↓",
+            };
+            let label = format!("{}{}", order_label(order), if picked { arrow } else { "" });
+            let color = if picked {
+                style::ACCENT
+            } else {
+                style::TEXT_SECONDARY
+            };
+            button(text(label).size(14).color(color))
+                .padding([8, 16])
+                .width(Length::Fill)
+                .style(menu::item_style)
+                .on_press(Message::Sort(order))
+                .into()
+        });
+        container(Column::with_children(options))
+            .padding([4, 0])
+            .width(SORT_MENU_WIDTH)
+            .style(menu::panel)
+            .into()
+    }
+
     /// The type showing, with Loved tracks pinned above the playlists.
     fn rows<'a>(
         &'a self,
@@ -328,7 +372,7 @@ impl Sidebar {
                 loved_art(ART_SIZE, ART_RADIUS),
                 "Loved Tracks",
                 "Collection".to_string(),
-                Route::Favorites,
+                Some(Route::Favorites),
                 current,
             )
             .map(Message::Link)
@@ -370,11 +414,31 @@ impl Sidebar {
     ) -> Element<'a, Message> {
         let art = |cover, radius| rounded_cover(images, cover, ART_SIZE, radius);
         let row = match item {
-            Item::Folder(folder) => entry(
+            // A new Folder TIDAL hasn't made yet leads nowhere.
+            Item::Folder(folder) if is_placeholder_folder(folder) => entry(
                 folder_art(ART_SIZE, ART_RADIUS),
-                &folder.name,
+                folder.name.clone(),
                 folder.subtitle(),
-                folder_route(folder),
+                None,
+                current,
+            ),
+            Item::Folder(folder) => {
+                let shown = library.folder(folder);
+                let row = entry(
+                    folder_art(ART_SIZE, ART_RADIUS),
+                    shown.name.clone(),
+                    shown.subtitle(),
+                    Some(folder_route(&shown)),
+                    current,
+                );
+                folder_menu(row, folder, library)
+            }
+            // A new playlist TIDAL hasn't made yet leads nowhere.
+            Item::Playlist(playlist) if is_placeholder(playlist) => entry(
+                art(None, ART_RADIUS),
+                &playlist.title,
+                library::playlist_subtitle(playlist, self.user_id),
+                None,
                 current,
             ),
             Item::Playlist(playlist) => {
@@ -382,10 +446,10 @@ impl Sidebar {
                     art(playlist.cover.as_ref(), ART_RADIUS),
                     &playlist.title,
                     library::playlist_subtitle(playlist, self.user_id),
-                    playlist_route(playlist),
+                    Some(playlist_route(playlist)),
                     current,
                 );
-                playlist_menu(row, playlist, self.user_id, library)
+                playlist_menu(row, playlist, None, self.user_id, library)
             }
             Item::Card(card) => {
                 let radius = match card.target {
@@ -399,7 +463,7 @@ impl Sidebar {
                     art(card.cover.as_ref(), radius),
                     &card.title,
                     card.subtitle.clone(),
-                    route,
+                    Some(route),
                     current,
                 );
                 let liked = cards::liked(card, library);
@@ -445,9 +509,9 @@ fn dot(_theme: &Theme) -> container::Style {
 /// One row: the art, the title over a line about it, leading to `route`.
 fn entry<'a>(
     art: Element<'a, Link>,
-    title: &'a str,
+    title: impl text::IntoFragment<'a>,
     subtitle: String,
-    route: Route,
+    route: Option<Route>,
     current: &Route,
 ) -> Element<'a, Link> {
     let line = |line: text::Text<'a>| {
@@ -460,12 +524,14 @@ fn entry<'a>(
         line(text(subtitle).size(12).color(style::TEXT_MUTED)),
     ]
     .spacing(2);
-    let here = same_place(&route, current);
+    let here = route
+        .as_ref()
+        .is_some_and(|route| same_place(route, current));
     button(row![art, words].spacing(10).align_y(Alignment::Center))
         .padding([6, 6])
         .width(Length::Fill)
         .style(item_style(here))
-        .on_press(Link::Open(route))
+        .on_press_maybe(route.map(Link::Open))
         .into()
 }
 

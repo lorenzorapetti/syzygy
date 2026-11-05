@@ -5,7 +5,7 @@ use iced::{Alignment, Element};
 use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Mix, Read};
 
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Hover, Mark};
 use super::{
     Action, Link, Load, NowPlaying, PADDING, PLAY_BUTTONS_HEIGHT, Preview, Remote, Viewport, count,
     header_actions, hero, mix_source, play_buttons,
@@ -28,6 +28,8 @@ pub struct State {
     id: String,
     preview: Option<Preview>,
     mix: Remote<Mix>,
+    /// The track the pointer is over, by its place in the mix.
+    hover: Hover,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +39,10 @@ pub enum Message {
     /// Play the mix, from a track by its place or all of it.
     Play(Start),
     TogglePlay,
+    /// The pointer came over the row with this key.
+    Hovered(usize),
+    /// The pointer left the row with this key.
+    Left(usize),
     Retry,
 }
 
@@ -47,6 +53,7 @@ impl State {
             id,
             preview,
             mix: Remote::Loading,
+            hover: Hover::default(),
         };
         (state, action)
     }
@@ -71,11 +78,25 @@ impl State {
                 None => Action::None,
             },
             Message::TogglePlay => Action::TogglePlay,
+            Message::Hovered(key) => {
+                self.hover.entered(key);
+                Action::None
+            }
+            Message::Left(key) => {
+                self.hover.left(key);
+                Action::None
+            }
             Message::Retry => {
                 self.mix = Remote::Loading;
                 Action::Load(Load::Mix(self.id.clone()))
             }
         }
+    }
+
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.mix
+            .loaded()
+            .is_some_and(|mix| mix.tracks.iter().any(|track| track.id == track_id))
     }
 
     fn source(&self, mix: &Mix) -> Source {
@@ -127,13 +148,23 @@ impl State {
                 |i| {
                     let track = &mix.tracks[i];
                     let liked = library.liked(track);
-                    let row =
-                        track_list::track(images, i + 1, track, COLUMNS, allow_explicit, liked);
+                    let mark = Mark::of(track, now_playing, self.hover.over(i));
+                    let row = track_list::marked(
+                        images,
+                        i + 1,
+                        track,
+                        COLUMNS,
+                        allow_explicit,
+                        mark,
+                        liked,
+                    );
                     track_list::playable_track(
                         row.map(Message::Link),
-                        track,
-                        now_playing,
+                        mark,
                         Message::Play(Start::Track(i)),
+                        i,
+                        Message::Hovered,
+                        Message::Left,
                     )
                 },
             );

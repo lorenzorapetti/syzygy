@@ -18,6 +18,24 @@ MPRIS and play reporting) comes from sone, and its layout follows sone's.
 
 GPL-3.0-only, like sone. See [LICENSE](LICENSE).
 
+## Installing
+
+With Nix, `nix profile install github:lorenzorapetti/syzygy` (or the flake's
+`packages.default` in your configuration) installs the binary, the desktop
+file and the icons.
+
+Without Nix, build and install the binary, then the desktop file and icons
+for your user:
+
+```sh
+cargo install --path crates/syzygy
+./scripts/install-desktop-files.sh
+```
+
+The script puts the desktop file in `~/.local/share/applications/` and the
+icons under `~/.local/share/icons/hicolor/`, then refreshes the desktop
+database (and an existing icon cache) where those tools exist.
+
 ## Logs
 
 Logs are written to `~/.local/state/syzygy/logs/`. Set `RUST_LOG` to change

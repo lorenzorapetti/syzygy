@@ -6,11 +6,11 @@ use iced::widget::{
     self as widget, Text, button, column, container, hover, operation, row, scrollable, sensor,
     space, text,
 };
-use iced::{Alignment, Element, Length, Theme};
+use iced::{Alignment, Color, Element, Length, Theme};
 use std::collections::HashMap;
 use syzygy_catalog::home_feed::{Card, Target};
 
-use super::{Action, COVER_RADIUS, Link, Preview, Route, cover, loved_art, menu};
+use super::{Action, COVER_RADIUS, Link, Preview, Route, cover, loved_art, menu, rounded_cover};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
 use crate::library::{Favorite, Library};
@@ -20,6 +20,11 @@ pub const CARD_WIDTH: f32 = 160.0;
 const CARD_GAP: f32 = 16.0;
 /// The play button over a card's cover.
 const PLAY_SIZE: f32 = 40.0;
+/// The like over an album's or a playlist's cover, and its heart.
+const LIKE_SIZE: f32 = 32.0;
+const LIKE_GLYPH_SIZE: f32 = 16.0;
+/// The play glyph over an artist's round picture.
+const ARTIST_PLAY_SIZE: f32 = 32.0;
 /// A row this close to an end counts as at that end.
 const SCROLL_SLACK: f32 = 10.0;
 
@@ -157,10 +162,33 @@ pub fn wrapped<'a>(tiles: impl IntoIterator<Item = Element<'a, Link>>) -> Elemen
 
 /// A card. Under the pointer, what can play shows a play button over its
 /// cover; a track's card plays wherever it's clicked. Right-clicked, it
-/// opens its menu.
+/// opens its menu. As in sone, an artist's picture is round, with their
+/// name centered under it.
 pub fn card<'a>(card: &'a Card, images: &'a Images, library: &'a Library) -> Element<'a, Link> {
-    let art = art(card, images, CARD_WIDTH);
+    let artist = matches!(card.target, Target::Artist(_));
+    let art = if artist {
+        rounded_cover(images, card.cover.as_ref(), CARD_WIDTH, CARD_WIDTH / 2.0)
+    } else {
+        art(card, images, CARD_WIDTH)
+    };
     let art = match play_button(card) {
+        // An artist's play is a bare white glyph in the middle of the circle.
+        Some(_) if artist => hover(art, container(artist_play(card)).center(Length::Fill)),
+        // An album's or a playlist's play sits bottom left, with its like
+        // bottom right.
+        Some(play) if matches!(card.target, Target::Album(_) | Target::Playlist(_)) => {
+            let like = cover_like(card, library);
+            hover(
+                art,
+                container(
+                    row![play, space::horizontal()]
+                        .push(like)
+                        .align_y(Alignment::Center),
+                )
+                .padding(8)
+                .align_bottom(Length::Fill),
+            )
+        }
         Some(play) => hover(
             art,
             container(play)
@@ -170,7 +198,12 @@ pub fn card<'a>(card: &'a Card, images: &'a Images, library: &'a Library) -> Ele
         ),
         None => art,
     };
-    let tile = tile(art, &card.title, &card.subtitle, open(card));
+    let align = if artist {
+        Alignment::Center
+    } else {
+        Alignment::Start
+    };
+    let tile = aligned_tile(art, &card.title, &card.subtitle, open(card), align);
     let liked = liked(card, library);
     menu::with_menu(tile, move || menu::card(card, liked))
 }
@@ -209,6 +242,34 @@ pub fn play_button<'a>(card: &Card) -> Option<Element<'a, Link>> {
     })
 }
 
+/// An artist card's play: a white glyph, centered over their picture.
+fn artist_play<'a>(card: &Card) -> Element<'a, Link> {
+    button(container(filled(Icon::Play, ARTIST_PLAY_SIZE, Color::WHITE)).center(PLAY_SIZE))
+        .padding(0)
+        .style(|_, _| button::Style::default())
+        .on_press(Link::PlayCard(card.clone()))
+        .into()
+}
+
+/// The like over a card's cover: a heart on a dark disc, lit while what the
+/// card leads to is a Favorite. None until the Favorites have loaded.
+fn cover_like<'a>(card: &Card, library: &Library) -> Option<Element<'a, Link>> {
+    let favorite = Favorite::card(card)?;
+    let liked = library.favorite(&favorite.id())?;
+    let glyph = if liked {
+        filled(Icon::Heart, LIKE_GLYPH_SIZE, style::ACCENT)
+    } else {
+        icon(Icon::Heart, LIKE_GLYPH_SIZE, Color::WHITE)
+    };
+    Some(
+        button(container(glyph).center(LIKE_SIZE))
+            .padding(0)
+            .style(like_disc)
+            .on_press(Link::Favorite(Box::new(favorite), !liked))
+            .into(),
+    )
+}
+
 /// Whether a card's play button has something to play.
 pub fn plays(card: &Card) -> bool {
     matches!(
@@ -230,9 +291,21 @@ pub fn tile<'a>(
     subtitle: impl text::IntoFragment<'a>,
     open: Option<Link>,
 ) -> Element<'a, Link> {
+    aligned_tile(art, title, subtitle, open, Alignment::Start)
+}
+
+/// [`tile`] with its title and subtitle lined up under `art` by `align`.
+fn aligned_tile<'a>(
+    art: Element<'a, Link>,
+    title: impl text::IntoFragment<'a>,
+    subtitle: impl text::IntoFragment<'a>,
+    open: Option<Link>,
+    align: Alignment,
+) -> Element<'a, Link> {
     let line = |line: Text<'a>| {
         container(line.wrapping(text::Wrapping::None))
             .width(CARD_WIDTH)
+            .align_x(align)
             .clip(true)
     };
     button(
@@ -321,6 +394,19 @@ fn play_disc(_theme: &Theme, status: button::Status) -> button::Style {
             offset: iced::Vector::new(0.0, 4.0),
             blur_radius: 12.0,
         },
+        ..button::Style::default()
+    }
+}
+
+/// A card's like: a dark see-through disc.
+fn like_disc(_theme: &Theme, status: button::Status) -> button::Style {
+    let alpha = match status {
+        button::Status::Hovered | button::Status::Pressed => 0.7,
+        _ => 0.5,
+    };
+    button::Style {
+        background: Some(Color::from_rgba(0.0, 0.0, 0.0, alpha).into()),
+        border: style::rounded(LIKE_SIZE / 2.0),
         ..button::Style::default()
     }
 }

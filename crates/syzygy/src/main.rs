@@ -1,6 +1,7 @@
 mod app;
 mod events;
 mod fill;
+mod fonts;
 mod icons;
 mod identity;
 mod images;
@@ -19,7 +20,7 @@ mod style;
 
 use iced::window;
 
-use identity::{APP_ID, Paths};
+use identity::{APP_ID, Paths, window_icon};
 
 fn main() -> iced::Result {
     // Before anything starts a thread.
@@ -29,6 +30,7 @@ fn main() -> iced::Result {
     // flushed on drop.
     let _logger = logging::init(&paths.log_dir);
     log::info!("Starting syzygy {}", env!("CARGO_PKG_VERSION"));
+    fonts::list_variable_weights();
 
     iced::application(move || app::boot(paths.clone()), app::update, app::view)
         .title(app::title)
@@ -37,6 +39,7 @@ fn main() -> iced::Result {
         .window(window::Settings {
             // Closing goes through `Message::Quit`, which saves before exiting.
             exit_on_close_request: false,
+            icon: window_icon(),
             platform_specific: window::settings::PlatformSpecific {
                 application_id: APP_ID.to_string(),
                 ..Default::default()

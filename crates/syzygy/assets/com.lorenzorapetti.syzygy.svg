@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1e1b4b"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.4" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#fde68a"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </radialGradient>
+    <radialGradient id="planet" cx="0.35" cy="0.35" r="0.65">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#0e7490"/>
+    </radialGradient>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+  <!-- The line the three bodies share -->
+  <line x1="96" y1="416" x2="416" y2="96" stroke="#a5b4fc" stroke-opacity="0.35" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="176" cy="336" r="84" fill="url(#sun)"/>
+  <circle cx="314" cy="198" r="48" fill="url(#planet)"/>
+  <circle cx="390" cy="122" r="24" fill="#e2e8f0"/>
+</svg>

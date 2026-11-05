@@ -4,8 +4,11 @@
 
 mod back_stack;
 mod consent;
+mod dialog;
 pub mod drawer;
 mod maximized;
+mod mover;
+mod picker;
 mod play_card;
 pub mod player_bar;
 pub mod search;
@@ -37,7 +40,10 @@ use crate::radio;
 use crate::settings::{Settings, Sort};
 use crate::style;
 use back_stack::{BackStack, Entry};
+use dialog::Dialog;
 use drawer::Drawer;
+use mover::Mover;
+use picker::Picker;
 use player_bar::PlayerBar;
 use search::Search;
 use settings_modal::{Hardware, SettingsModal};
@@ -52,6 +58,9 @@ const HEADER_SPACING: f32 = 8.0;
 const STEP_SIZE: f32 = 32.0;
 /// Pages stop growing past this on wide windows.
 const MAX_PAGE_WIDTH: f32 = 1520.0;
+/// How long TIDAL takes to make a playlist's cover after its tracks
+/// change, as sone waits.
+const COVER_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 /// The scrollable every Page draws in.
 const PAGE_SCROLL: iced::widget::Id = iced::widget::Id::new("page");
 /// How tall the Page's viewport is taken to be until it's reported:
@@ -84,6 +93,12 @@ pub struct Shell {
     consent: Option<playback::Pending>,
     /// The Settings modal, while it's open. Never on the Back stack.
     settings: Option<SettingsModal>,
+    /// The Library's dialog, while one is open.
+    dialog: Option<Dialog>,
+    /// The "Add to playlist" popover, while it's open.
+    picker: Option<Picker>,
+    /// The "Move to folder" popover, while it's open.
+    mover: Option<Mover>,
     /// The user's Library: their Favorites, their root playlists and
     /// Folders, and their pending edits.
     library: Library,
@@ -111,6 +126,9 @@ pub enum Message {
     /// The header's settings button.
     OpenSettings,
     Settings(settings_modal::Message),
+    Dialog(dialog::Message),
+    Picker(picker::Message),
+    Mover(mover::Message),
     Sidebar(sidebar::Message),
     Search(search::Message),
     PlayerBar(player_bar::Message),
@@ -132,6 +150,9 @@ pub enum Message {
         result: Result<Option<PlayRequest>, Arc<syzygy_catalog::Error>>,
     },
     Library(library::Message),
+    /// What's read under these tags is stale, a while after an edit
+    /// landed.
+    Reread(Vec<String>),
 }
 
 impl Shell {
@@ -164,6 +185,9 @@ impl Shell {
             radio_read: None,
             consent: None,
             settings: None,
+            dialog: None,
+            picker: None,
+            mover: None,
             library,
         };
         let task = shell.run_action(action, services, context);
@@ -272,6 +296,9 @@ impl Shell {
             Message::Escape => {
                 let closed = self.consent.take().is_some()
                     || self.settings.take().is_some()
+                    || self.dialog.take().is_some()
+                    || self.picker.take().is_some()
+                    || self.mover.take().is_some()
                     || std::mem::take(&mut self.maximized)
                     || self.drawer.close();
                 if !closed {
@@ -314,6 +341,49 @@ impl Shell {
                     .and_then(|modal| modal.update(message))
                 {
                     return Task::done(message);
+                }
+            }
+            Message::Dialog(message) => {
+                let Some(dialog) = &mut self.dialog else {
+                    return Task::none();
+                };
+                match dialog.update(message) {
+                    dialog::Outcome::None => {}
+                    dialog::Outcome::Close => self.dialog = None,
+                    dialog::Outcome::Library(message) => {
+                        self.dialog = None;
+                        return self.update_library(*message, services, context);
+                    }
+                }
+            }
+            Message::Picker(message) => {
+                let Some(picker) = &mut self.picker else {
+                    return Task::none();
+                };
+                match picker.update(message) {
+                    picker::Outcome::None => {}
+                    picker::Outcome::Close => self.picker = None,
+                    picker::Outcome::Library(message) => {
+                        self.picker = None;
+                        return self.update_library(*message, services, context);
+                    }
+                    picker::Outcome::Failed(text) => {
+                        self.picker = None;
+                        return self.toast(Kind::Error, text);
+                    }
+                }
+            }
+            Message::Mover(message) => {
+                let Some(mover) = &mut self.mover else {
+                    return Task::none();
+                };
+                match mover.update(message) {
+                    mover::Outcome::None => {}
+                    mover::Outcome::Close => self.mover = None,
+                    mover::Outcome::Library(message) => {
+                        self.mover = None;
+                        return self.update_library(*message, services, context);
+                    }
                 }
             }
             Message::Sidebar(message) => {
@@ -389,6 +459,7 @@ impl Shell {
                 };
             }
             Message::Library(message) => return self.update_library(message, services, context),
+            Message::Reread(tags) => return self.reread(&tags, services, context),
             Message::CardQueued { next, result } => {
                 return match result {
                     Ok(Some(request)) => self.queue(
@@ -444,6 +515,9 @@ impl Shell {
         self.drawer.close();
         self.maximized = false;
         self.settings = None;
+        self.dialog = None;
+        self.picker = None;
+        self.mover = None;
     }
 
     /// Playback chose explicit tracks while they aren't allowed: ask.
@@ -685,31 +759,255 @@ impl Shell {
         let mut tasks = Vec::new();
         for effect in effects {
             let task = match effect {
-                library::Effect::Mutate(edit, library::Mutation::Favorite { user_id, id, on }) => {
-                    Task::perform(
-                        services.catalog.set_favorite(user_id, id, on),
-                        move |result| to_library(library::Message::Done(edit, result)),
-                    )
+                library::Effect::Mutate(edit, mutation) => {
+                    let done = move |result| to_library(library::Message::Done(edit, result));
+                    match mutation {
+                        library::Mutation::Favorite { user_id, id, on } => {
+                            Task::perform(services.catalog.set_favorite(user_id, id, on), done)
+                        }
+                        library::Mutation::CreatePlaylist { user_id, fields } => Task::perform(
+                            services.catalog.create_playlist(user_id, fields),
+                            move |result| to_library(library::Message::Created(edit, result)),
+                        ),
+                        library::Mutation::UpdatePlaylist {
+                            user_id,
+                            uuid,
+                            fields,
+                        } => Task::perform(
+                            services.catalog.update_playlist(user_id, &uuid, fields),
+                            done,
+                        ),
+                        library::Mutation::DeletePlaylist { user_id, uuid } => {
+                            Task::perform(services.catalog.delete_playlist(user_id, &uuid), done)
+                        }
+                        library::Mutation::AddTrack {
+                            user_id,
+                            uuid,
+                            track,
+                        } => Task::perform(services.catalog.add_track(user_id, &uuid, track), done),
+                        library::Mutation::AddTracks {
+                            user_id,
+                            uuid,
+                            tracks,
+                        } => Task::perform(
+                            services.catalog.add_tracks(user_id, &uuid, tracks),
+                            move |result| to_library(library::Message::Added(edit, result)),
+                        ),
+                        library::Mutation::RemoveTrack {
+                            user_id,
+                            uuid,
+                            index,
+                        } => Task::perform(
+                            services.catalog.remove_track(user_id, &uuid, index),
+                            done,
+                        ),
+                        library::Mutation::CreateFolder {
+                            user_id,
+                            name,
+                            playlist,
+                        } => Task::perform(
+                            services.catalog.create_folder(user_id, &name, playlist),
+                            done,
+                        ),
+                        library::Mutation::RenameFolder { user_id, id, name } => {
+                            Task::perform(services.catalog.rename_folder(user_id, &id, &name), done)
+                        }
+                        library::Mutation::DeleteFolder { user_id, id } => {
+                            Task::perform(services.catalog.delete_folder(user_id, &id), done)
+                        }
+                        library::Mutation::Move {
+                            user_id,
+                            uuid,
+                            folder,
+                        } => Task::perform(
+                            services.catalog.move_to_folder(user_id, &uuid, folder),
+                            done,
+                        ),
+                    }
+                }
+                library::Effect::ReadOrder(edit, uuid) => {
+                    Task::perform(services.catalog.playlist_order(&uuid), move |result| {
+                        to_library(library::Message::Order(edit, result))
+                    })
                 }
                 library::Effect::ReadFavorites { user_id, stamp } => {
                     Task::run(services.catalog.favorite_ids(user_id), move |read| {
                         to_library(library::Message::FavoriteIds(stamp, read))
                     })
                 }
-                library::Effect::Refresh(tags) => {
-                    let mut reads = Vec::new();
-                    for effect in self.sidebar.refresh(&tags, &mut self.library) {
-                        reads.push(self.run_sidebar(effect, services, context));
-                    }
-                    let action = self.current.page.refresh(&tags);
-                    reads.push(self.run_action(action, services, context));
-                    Task::batch(reads)
-                }
+                library::Effect::Refresh(tags) => self.reread(&tags, services, context),
                 library::Effect::Toast(text) => self.toast(Kind::Error, text),
+                library::Effect::Inform(text) => self.toast(Kind::Info, text),
+                library::Effect::Recent(uuid) => Task::done(app::Message::RecentPlaylist(uuid)),
+                library::Effect::RecentFolder(id) => Task::done(app::Message::RecentFolder(id)),
+                library::Effect::Cover(uuid) => match self.user_id {
+                    Some(user_id) => {
+                        let forget = services.catalog.forget_playlist(user_id, &uuid);
+                        Task::perform(
+                            async move {
+                                tokio::time::sleep(COVER_DELAY).await;
+                                forget.await;
+                            },
+                            move |()| {
+                                app::Message::Shell(Message::Reread(library::playlist_tags(&uuid)))
+                            },
+                        )
+                    }
+                    None => Task::none(),
+                },
+                library::Effect::Pick { tracks, at } => self.open_picker(tracks, at, services),
+                library::Effect::PickFolder { playlist, at } => {
+                    self.open_mover(playlist, at, services)
+                }
+                library::Effect::Ask(ask) => {
+                    self.picker = None;
+                    self.mover = None;
+                    self.dialog = Some(Dialog::new(ask, &self.library));
+                    Task::none()
+                }
+                library::Effect::Deleted(uuid) => self.playlist_deleted(&uuid, services, context),
+                library::Effect::FolderDeleted(id) => self.folder_deleted(&id, services, context),
+                library::Effect::Removed { uuid, track, index } => {
+                    self.current
+                        .page
+                        .removed(&uuid, &track, index, &self.library);
+                    Task::none()
+                }
+                library::Effect::NotAdded { uuid, track } => {
+                    self.current.page.not_added(&uuid, track);
+                    Task::none()
+                }
+                library::Effect::SourceDeleted(source) => Task::done(app::Message::Playback(
+                    playback::Message::SourceDeleted(source),
+                )),
             };
             tasks.push(task);
         }
         Task::batch(tasks)
+    }
+
+    /// Open "Add to playlist" beside `at`, reading the Own playlists and
+    /// a card's tracks.
+    fn open_picker(
+        &mut self,
+        tracks: library::Tracks,
+        at: iced::Rectangle,
+        services: &Services,
+    ) -> Task<app::Message> {
+        let Some(user_id) = self.user_id else {
+            return Task::none();
+        };
+        self.mover = None;
+        let to_picker = |message| app::Message::Shell(Message::Picker(message));
+        let (mut picker, card) = match tracks {
+            library::Tracks::These(tracks) => (Picker::new(Some(tracks), at), None),
+            library::Tracks::Card(card) => (Picker::new(None, at), Some(card)),
+        };
+        let (playlists, handle) = Task::run(services.catalog.own_playlists(user_id), move |read| {
+            to_picker(picker::Message::Playlists(read))
+        })
+        .abortable();
+        picker.reading(handle);
+        let tracks = match card {
+            Some(card) => {
+                let (task, handle) = Task::perform(
+                    play_card::tracks(card, &services.catalog, Some(user_id)),
+                    move |result| to_picker(picker::Message::Tracks(result)),
+                )
+                .abortable();
+                picker.reading(handle);
+                task
+            }
+            None => Task::none(),
+        };
+        self.picker = Some(picker);
+        Task::batch([playlists, tracks, Picker::focus()])
+    }
+
+    /// Open "Move to folder" beside `at`, reading the Folders.
+    fn open_mover(
+        &mut self,
+        playlist: library::Placed,
+        at: iced::Rectangle,
+        services: &Services,
+    ) -> Task<app::Message> {
+        let Some(user_id) = self.user_id else {
+            return Task::none();
+        };
+        self.picker = None;
+        let mut mover = Mover::new(playlist, at, user_id);
+        let (read, handle) = Task::run(services.catalog.root_folders(user_id), |read| {
+            app::Message::Shell(Message::Mover(mover::Message::Folders(read)))
+        })
+        .abortable();
+        mover.reading(handle);
+        self.mover = Some(mover);
+        read
+    }
+
+    /// What's read under `tags` is stale: the lists on screen read it
+    /// again.
+    fn reread(
+        &mut self,
+        tags: &[String],
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        let mut reads = Vec::new();
+        for effect in self.sidebar.refresh(tags, &mut self.library) {
+            reads.push(self.run_sidebar(effect, services, context));
+        }
+        let action = self.current.page.refresh(tags);
+        reads.push(self.run_action(action, services, context));
+        Task::batch(reads)
+    }
+
+    /// A playlist is gone: its Pages leave back and forward, and if it's
+    /// on screen, Home takes its place.
+    fn playlist_deleted(
+        &mut self,
+        uuid: &str,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        self.gone(
+            |route| matches!(route, Route::Playlist { uuid: shown, .. } if shown == uuid),
+            services,
+            context,
+        )
+    }
+
+    /// A Folder is gone, as a playlist is.
+    fn folder_deleted(
+        &mut self,
+        id: &str,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        self.gone(
+            |route| matches!(route, Route::Folder { id: shown, .. } if shown == id),
+            services,
+            context,
+        )
+    }
+
+    /// The Pages `shows` picks are gone: they leave back and forward, and
+    /// if one is on screen, Home takes its place.
+    fn gone(
+        &mut self,
+        shows: impl Fn(&Route) -> bool,
+        services: &Services,
+        context: &Context,
+    ) -> Task<app::Message> {
+        self.back_stack.remove(&shows);
+        if !shows(&self.current.route) {
+            return Task::none();
+        }
+        let home = Entry {
+            route: Route::home(),
+            offset: 0.0,
+        };
+        self.open(home, services, context)
     }
 
     fn run_drawer(
@@ -798,6 +1096,9 @@ impl Shell {
                     })
                 },
             ),
+            sidebar::Effect::Sort(sort) => {
+                self.run_action(Action::SaveSort(sort), services, context)
+            }
             sidebar::Effect::Link(link) => self.run_action(link.follow(), services, context),
         }
     }
@@ -949,22 +1250,43 @@ impl Shell {
             .then(|| maximized::view(&self.player_bar, playback, images))
             .flatten()
             .map(|view| view.map(|message| app::Message::Shell(Message::Maximized(message))));
-        let modal = match (&self.consent, &self.settings) {
-            (Some(_), _) => {
+        let modal = match (&self.consent, &self.settings, &self.dialog) {
+            (Some(_), _, _) => {
                 Some(consent::view().map(|answer| app::Message::Shell(Message::Consent(answer))))
             }
-            (None, Some(modal)) => Some(
+            (None, Some(modal), _) => Some(
                 modal
                     .view(settings, playback)
                     .map(|message| app::Message::Shell(Message::Settings(message))),
             ),
-            (None, None) => None,
+            (None, None, Some(dialog)) => Some(
+                dialog
+                    .view()
+                    .map(|message| app::Message::Shell(Message::Dialog(message))),
+            ),
+            (None, None, None) => None,
         };
         let toasts = self
             .toasts
             .view()
             .map(|id| app::Message::Shell(Message::DismissToast(id)));
-        stack![main].push(maximized).push(modal).push(toasts).into()
+        let picker = self.picker.as_ref().map(|picker| {
+            picker
+                .view(&self.library, &settings.recent_playlists)
+                .map(|message| app::Message::Shell(Message::Picker(message)))
+        });
+        let mover = self.mover.as_ref().map(|mover| {
+            mover
+                .view(&self.library, &settings.recent_folders)
+                .map(|message| app::Message::Shell(Message::Mover(message)))
+        });
+        stack![main]
+            .push(maximized)
+            .push(picker)
+            .push(mover)
+            .push(modal)
+            .push(toasts)
+            .into()
     }
 
     /// Back and forward, search and the avatar.

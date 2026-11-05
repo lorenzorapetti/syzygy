@@ -13,7 +13,7 @@ use syzygy_catalog::Catalog;
 use syzygy_report::Reporter;
 use syzygy_store::{DiskCache, Store};
 use syzygy_tidal::models::{AuthTokens, SessionInfo, StreamInfo};
-use syzygy_tidal::{LoginMethod, TidalClient};
+use syzygy_tidal::{LoginMethod, Quality, TidalClient};
 
 use crate::events::EventSource;
 use crate::fill;
@@ -120,6 +120,10 @@ pub enum Message {
     Searched(String),
     /// Take a search out of the history.
     ForgetSearch(String),
+    /// Tracks went into this playlist: it's the most recent one.
+    RecentPlaylist(String),
+    /// A playlist went into this Folder: it's the most recent one.
+    RecentFolder(String),
     Playback(playback::Message),
     /// The volume slider was let go: remember the volume.
     SaveVolume,
@@ -403,6 +407,14 @@ impl App {
                 self.settings.forget_search(&query);
                 self.save_settings()
             }
+            Message::RecentPlaylist(uuid) => {
+                self.settings.remember_playlist(&uuid);
+                self.save_settings()
+            }
+            Message::RecentFolder(id) => {
+                self.settings.remember_folder(&id);
+                self.save_settings()
+            }
             Message::Frame(at) => {
                 self.frame = at;
                 self.update(Message::Images(images::Message::Frame(at)))
@@ -531,10 +543,12 @@ impl App {
         }
     }
 
-    /// Whether the drawer is sliding up or down.
+    /// Whether the drawer is sliding up or down, as of the last frame: the
+    /// view draws it there. Asked as of now, a slow frame could end the
+    /// frames before one drew the slide's end, leaving it stuck midway.
     fn slides(&self) -> bool {
         match &self.phase {
-            Phase::Shell(shell) => shell.is_animating(Instant::now()),
+            Phase::Shell(shell) => shell.is_animating(self.frame),
             Phase::Login(_) => false,
         }
     }
@@ -592,7 +606,7 @@ impl App {
                 // task runs.
                 self.arm_task = None;
                 let cleared = player.clear_next_track();
-                let play = async move |busy: &mut mpsc::Sender<playback::Message>| {
+                let play = async move |tell: &mut mpsc::Sender<playback::Message>| {
                     if let Err(e) = cleared.await {
                         log::warn!("Could not clear the next track: {e}");
                     }
@@ -601,6 +615,8 @@ impl App {
                         .await
                         .map_err(|e| PlayError::Resolve(Arc::new(e)))?;
                     served(reporter.as_ref(), track_id, &stream.info);
+                    let format = format(&stream.info);
+                    let _ = tell.send(playback::Message::Served(track_id, format)).await;
                     let audio = |e| PlayError::Audio(Arc::new(e));
                     if normalize {
                         let (replay_gain, peak) = replay_gain(&stream.info, album_gain);
@@ -614,7 +630,7 @@ impl App {
                         match player.play_url(stream.uri.clone(), from).await {
                             Err(syzygy_audio::Error::DeviceBusy) if tries < DEVICE_TRIES => {
                                 if tries == 0 {
-                                    let _ = busy.send(playback::Message::DeviceBusy(token)).await;
+                                    let _ = tell.send(playback::Message::DeviceBusy(token)).await;
                                 }
                                 tries += 1;
                                 tokio::time::sleep(DEVICE_RETRY).await;
@@ -714,7 +730,7 @@ impl App {
                         Ok(stream) => stream,
                         Err(e) => {
                             log::warn!("Could not resolve track {track_id} to arm it: {e}");
-                            return;
+                            return None;
                         }
                     };
                     served(reporter.as_ref(), track_id, &stream.info);
@@ -736,8 +752,11 @@ impl App {
                     if let Err(e) = armed.await {
                         log::warn!("Could not arm track {track_id}: {e}");
                     }
+                    Some(playback::Message::Served(track_id, format(&stream.info)))
                 };
-                let (task, handle) = Task::future(arm).discard().abortable();
+                let (task, handle) = Task::future(arm)
+                    .and_then(|served| Task::done(Message::Playback(served)))
+                    .abortable();
                 self.arm_task = Some(handle.abort_on_drop());
                 task
             }
@@ -1180,6 +1199,16 @@ fn served(reporter: Option<&Reporter>, track_id: u64, info: &StreamInfo) {
                 presentation: info.asset_presentation.clone(),
             },
         );
+    }
+}
+
+/// The tier, bit depth and sample rate TIDAL served.
+fn format(info: &StreamInfo) -> playback::Format {
+    playback::Format {
+        quality: info.audio_quality.as_deref().map(Quality::from_name),
+        bit_depth: info.bit_depth,
+        sample_rate: info.sample_rate,
+        codec: info.codec.clone(),
     }
 }
 

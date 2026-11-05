@@ -45,7 +45,7 @@ pub use library::{Kind, LibraryOrder, LibrarySort, Shelf};
 pub use lyrics::Lyrics;
 pub use mix::Mix;
 pub use paged::Paged;
-pub use playlist::{Direction, Playlist, TrackOrder, TrackSort};
+pub use playlist::{Added, Direction, Playlist, PlaylistFields, TrackOrder, TrackSort};
 pub use profile::Profile;
 pub use search::{Hit, SearchResults, Suggestion, Suggestions};
 pub use swr::Read;
@@ -479,6 +479,296 @@ impl Catalog {
         }
     }
 
+    /// Make an Own playlist for `user_id`, empty. The user's lists are
+    /// stale after.
+    pub fn create_playlist(
+        &self,
+        user_id: u64,
+        fields: PlaylistFields,
+    ) -> impl Future<Output = Result<Playlist, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        async move {
+            let fields = fields.trimmed();
+            let made = tidal
+                .create_playlist(&fields.title, &fields.description, fields.access())
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            cache.invalidate_tag(&favorites::user_tag(user_id)).await;
+            Ok(fields.playlist(made.uuid, user_id))
+        }
+    }
+
+    /// Set an Own playlist's title, description and access. Its reads and
+    /// the user's lists are stale after.
+    pub fn update_playlist(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        fields: PlaylistFields,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let fields = fields.trimmed();
+            tidal
+                .update_playlist(&uuid, &fields.title, &fields.description, fields.access())
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Delete an Own playlist. Its reads and the user's lists are stale
+    /// after.
+    pub fn delete_playlist(
+        &self,
+        user_id: u64,
+        uuid: &str,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .delete_playlist(&uuid)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Every Folder at the top level of `user_id`'s playlists, by name:
+    /// where "Move to folder" offers to move a playlist. TIDAL's pages are
+    /// read to the end.
+    pub fn root_folders(&self, user_id: u64) -> BoxStream<'static, Read<Vec<library::Folder>>> {
+        let tidal = self.tidal.clone();
+        let entry = serde_entry(
+            format!("root-folders:{user_id}"),
+            vec![library::FOLDERS.to_string(), favorites::user_tag(user_id)],
+        );
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(root_folders(&tidal).await?)
+        })
+        .boxed()
+    }
+
+    /// Make a Folder at the top level, with `playlist` moved into it in the
+    /// same call. The user's lists are stale after.
+    pub fn create_folder(
+        &self,
+        user_id: u64,
+        name: &str,
+        playlist: Option<String>,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let name = name.to_string();
+        async move {
+            let trns = playlist
+                .as_deref()
+                .map(library::playlist_trn)
+                .unwrap_or_default();
+            tidal
+                .create_playlist_folder(library::ROOT, &name, &trns)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Give a Folder a new name. The user's lists are stale after.
+    pub fn rename_folder(
+        &self,
+        user_id: u64,
+        id: &str,
+        name: &str,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let (trn, name) = (library::folder_trn(id), name.to_string());
+        async move {
+            tidal
+                .rename_playlist_folder(&trn, &name)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Delete a Folder, which should be empty. The user's lists are stale
+    /// after.
+    pub fn delete_folder(
+        &self,
+        user_id: u64,
+        id: &str,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let trn = library::folder_trn(id);
+        async move {
+            tidal
+                .delete_playlist_folder(&trn)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Move a playlist into a Folder, or to the top level (`None`). The
+    /// user's lists are stale after.
+    pub fn move_to_folder(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        folder: Option<String>,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let trn = library::playlist_trn(uuid);
+        async move {
+            let folder = folder.as_deref().unwrap_or(library::ROOT);
+            tidal
+                .move_playlist_to_folder(folder, &trn)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_folders(&cache, user_id).await;
+            Ok(())
+        }
+    }
+
+    /// Every Own playlist of `user_id`'s, wherever its Folder, last
+    /// updated first: what "Add to playlist" offers. The pages after the
+    /// first are read at once.
+    pub fn own_playlists(&self, user_id: u64) -> BoxStream<'static, Read<Vec<Playlist>>> {
+        let tidal = self.tidal.clone();
+        let entry = serde_entry(
+            format!("own-playlists:{user_id}"),
+            vec![favorites::user_tag(user_id)],
+        );
+        swr::read(self.cache.clone(), entry, move || async move {
+            Ok(own_playlists(&tidal, user_id).await?)
+        })
+        .boxed()
+    }
+
+    /// Add one track to an Own playlist. TIDAL refuses it if the playlist
+    /// has it already ([`Error::is_duplicate`]). The playlist's reads and
+    /// the user's lists are stale after.
+    pub fn add_track(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        track_id: u64,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .add_track_to_playlist(&uuid, track_id)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Add tracks to an Own playlist, skipping those it has already. What
+    /// was added is the playlist's count before and after, read from
+    /// TIDAL. The playlist's reads and the user's lists are stale after.
+    pub fn add_tracks(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        track_ids: Vec<u64>,
+    ) -> impl Future<Output = Result<Added, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let count = async || -> Result<u32, syzygy_tidal::Error> {
+                let details = tidal.get_playlist_details(&uuid).await?;
+                let playlist = playlist::from_details(&details).ok_or_else(|| {
+                    syzygy_tidal::Error::Parse(format!("Not a playlist: {details}"))
+                })?;
+                Ok(playlist.tracks)
+            };
+            let added = async {
+                let before = count().await?;
+                tidal.add_tracks_to_playlist(&uuid, &track_ids).await?;
+                let after = count().await?;
+                Ok::<_, syzygy_tidal::Error>(Added {
+                    asked: track_ids.len(),
+                    new: after.saturating_sub(before) as usize,
+                    tracks: after,
+                })
+            }
+            .await;
+            // The add may have landed even if the count after it failed.
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            added.map_err(|e| Arc::new(Error::from(e)))
+        }
+    }
+
+    /// Take the track at `index` in an Own playlist's own order out of it.
+    /// The playlist's reads and the user's lists are stale after.
+    pub fn remove_track(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        index: usize,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .remove_track_from_playlist(&uuid, index as u32)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
+    /// Every track of a playlist in its own order, read from TIDAL now:
+    /// where a removal finds its row's index. Not cached, as an index from
+    /// an older read could take out the wrong track.
+    pub fn playlist_order(
+        &self,
+        uuid: &str,
+    ) -> impl Future<Output = Result<Vec<Track>, Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let uuid = uuid.to_string();
+        async move {
+            let tracks = tidal
+                .get_playlist_tracks(&uuid)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            Ok(tracks.into_iter().map(Track::from).collect())
+        }
+    }
+
+    /// Forget what's cached of a playlist and the user's lists, so they're
+    /// read again: TIDAL makes a playlist's cover a while after its tracks
+    /// change.
+    pub fn forget_playlist(
+        &self,
+        user_id: u64,
+        uuid: &str,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move { invalidate_playlist(&cache, user_id, &uuid).await }
+    }
+
     /// One track, to play on its own. Not cached: it's read once per play.
     pub fn track(
         &self,
@@ -678,7 +968,89 @@ fn artist_or_album_tags(kind: &str, id: u64) -> Vec<String> {
 
 /// The tags of a playlist's reads.
 fn playlist_tags(uuid: &str) -> Vec<String> {
-    vec!["playlist".to_string(), format!("playlist:{uuid}")]
+    vec!["playlist".to_string(), playlist_tag(uuid)]
+}
+
+/// The tag of one playlist's own reads: what an edit of it invalidates.
+pub fn playlist_tag(uuid: &str) -> String {
+    format!("playlist:{uuid}")
+}
+
+/// A playlist changed: its own reads, and every list of the user's.
+async fn invalidate_playlist(cache: &DiskCache, user_id: u64, uuid: &str) {
+    cache.invalidate_tag(&playlist_tag(uuid)).await;
+    cache.invalidate_tag(&favorites::user_tag(user_id)).await;
+}
+
+/// The Folders changed: the playlists and Folders as read, and every list
+/// of the user's.
+async fn invalidate_folders(cache: &DiskCache, user_id: u64) {
+    cache.invalidate_tag(library::FOLDERS).await;
+    cache.invalidate_tag(&favorites::user_tag(user_id)).await;
+}
+
+/// More pages of the top level than anyone's Folders fill: a stop should
+/// TIDAL keep sending cursors.
+const MAX_FOLDER_PAGES: usize = 40;
+
+/// Every Folder at the top level, by name, read a page at a time from
+/// TIDAL's cursor.
+async fn root_folders(tidal: &TidalClient) -> Result<Vec<library::Folder>, syzygy_tidal::Error> {
+    let mut folders = Vec::new();
+    let mut cursor = String::new();
+    for _ in 0..MAX_FOLDER_PAGES {
+        let page = tidal
+            .get_playlist_folders(library::ROOT, "", 0, PAGE_SIZE, "NAME", "ASC", &cursor)
+            .await?;
+        let page = library::folder_page(&page);
+        folders.extend(page.items.into_iter().filter_map(|item| match item {
+            library::Item::Folder(folder) => Some(folder),
+            _ => None,
+        }));
+        match page.cursor {
+            Some(next) if page.has_more => cursor = next,
+            _ => break,
+        }
+    }
+    Ok(folders)
+}
+
+/// How many Own playlists a read asks for at a time, as in sone.
+const OWN_PLAYLISTS_PAGE: u32 = 500;
+
+/// Every Own playlist, last updated first: the first page, then the rest
+/// at once from where TIDAL's pages end.
+async fn own_playlists(
+    tidal: &TidalClient,
+    user_id: u64,
+) -> Result<Vec<Playlist>, syzygy_tidal::Error> {
+    let page = async |offset| {
+        tidal
+            .get_all_playlists(user_id, offset, OWN_PLAYLISTS_PAGE, "DATE_UPDATED", "DESC")
+            .await
+    };
+    let first = page(0).await?;
+    let offsets = rest_offsets(first.items.len() as u32, first.total_number_of_items);
+    let rest = futures::future::try_join_all(offsets.into_iter().map(page)).await?;
+    Ok(std::iter::once(first)
+        .chain(rest)
+        .flat_map(|page| page.items)
+        .map(playlist::from_tidal)
+        .filter(|playlist| playlist.is_own(Some(user_id)))
+        .collect())
+}
+
+/// Where the pages after a first one of `size` items start, until
+/// `total`. The first page's size is the one TIDAL keeps to, which may be
+/// fewer than were asked for.
+fn rest_offsets(size: u32, total: u32) -> Vec<u32> {
+    if size == 0 {
+        return vec![];
+    }
+    (1..)
+        .map(|n| n * size)
+        .take_while(|&offset| offset < total)
+        .collect()
 }
 
 /// `PAGE_SIZE` of a playlist's tracks from `offset`, sorted by TIDAL.
@@ -808,5 +1180,18 @@ fn json_entry(key: String, tags: Vec<String>) -> Entry<Value> {
         tags,
         encode: |value| serde_json::to_vec(value).ok(),
         decode: |bytes| serde_json::from_slice(bytes).ok(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rest_of_the_own_playlists_is_read_in_pages_of_the_first_ones_size() {
+        assert_eq!(rest_offsets(500, 1200), vec![500, 1000]);
+        assert_eq!(rest_offsets(100, 300), vec![100, 200]);
+        assert_eq!(rest_offsets(500, 500), Vec::<u32>::new());
+        assert_eq!(rest_offsets(0, 300), Vec::<u32>::new());
     }
 }

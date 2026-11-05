@@ -63,6 +63,19 @@ in
       ]
       ++ gstPlugins;
 
+    # The desktop file and icons, so launchers list syzygy and the compositor
+    # matches its window (application_id) to the icon.
+    postInstall = ''
+      install -Dm644 crates/syzygy/assets/com.lorenzorapetti.syzygy.desktop \
+        -t $out/share/applications
+      install -Dm644 crates/syzygy/assets/com.lorenzorapetti.syzygy.svg \
+        -t $out/share/icons/hicolor/scalable/apps
+      for dir in crates/syzygy/assets/icons/*; do
+        install -Dm644 $dir/com.lorenzorapetti.syzygy.png \
+          -t $out/share/icons/hicolor/$(basename $dir)/apps
+      done
+    '';
+
     preFixup = ''
       gappsWrapperArgs+=(--prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath runtimeLibs}")
     '';

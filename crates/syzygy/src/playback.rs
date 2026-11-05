@@ -54,6 +54,7 @@ use std::time::Duration;
 use syzygy_catalog::{Track, TrackSort};
 use syzygy_mpris as mpris;
 use syzygy_report as report;
+use syzygy_tidal::Quality;
 
 mod controls;
 mod reporting;
@@ -124,6 +125,21 @@ pub struct Playback {
     mpris: mpris::View,
     /// The track last reported playing or paused.
     reported: Option<reporting::Reported>,
+    /// Playlists the user deleted: "Playing from" no longer leads to them.
+    deleted: Vec<SourceRef>,
+    /// What TIDAL served for the current track and for the one fetched
+    /// after it, by track id.
+    served: Vec<(u64, Format)>,
+}
+
+/// What TIDAL served for a track: its tier, and the depth and rate of its
+/// samples where TIDAL says.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Format {
+    pub quality: Option<Quality>,
+    pub bit_depth: Option<u32>,
+    pub sample_rate: Option<u32>,
+    pub codec: Option<String>,
 }
 
 /// Where listening is: the source, the Manual queue, the current track and
@@ -429,6 +445,20 @@ pub enum SourceRef {
     Track(u64),
 }
 
+impl SourceRef {
+    /// Whether both are the same album, playlist and so on, whatever
+    /// order they're in.
+    pub fn same_place(&self, other: &SourceRef) -> bool {
+        match (self, other) {
+            (SourceRef::Playlist { uuid, .. }, SourceRef::Playlist { uuid: other, .. }) => {
+                uuid == other
+            }
+            (SourceRef::LovedTracks(_), SourceRef::LovedTracks(_)) => true,
+            _ => self == other,
+        }
+    }
+}
+
 /// How every play starts: the source, its tracks (all of them, or the first
 /// page of them) and where to start. Playback goes from there to the end
 /// of the source, never around to its start.
@@ -565,6 +595,8 @@ pub enum Message {
     TrackAdvanced(EntryId),
     /// The engine stopped on an error of its own, in its words.
     EngineFailed(String),
+    /// TIDAL served this for the track: one playing or about to.
+    Served(u64, Format),
     /// A fill read these tracks, the next ones in the source.
     PageArrived(FillId, Vec<Track>),
     /// A fill read the last of its source, or gave up.
@@ -609,6 +641,9 @@ pub enum Message {
     Move(Entry, usize),
     /// Empty the Manual queue and what's left of the source.
     Clear,
+    /// The user deleted this playlist. Should it be the Playback source,
+    /// what has loaded plays on, Repeat all included, but no more is read.
+    SourceDeleted(SourceRef),
     /// Stop, and forget the source, the Manual queue, the current track
     /// and History, as the account they belong to leaves. Preferences
     /// stay.
@@ -685,10 +720,12 @@ fn changes_listening(message: &Message) -> bool {
         | Message::Pick(_)
         | Message::Remove(_)
         | Message::Move(..)
-        | Message::Clear => true,
+        | Message::Clear
+        | Message::SourceDeleted(_) => true,
         // What's on disk is the app's to keep or delete.
         Message::Reset
         | Message::Position(_)
+        | Message::Served(..)
         | Message::DeviceBusy(_)
         | Message::SetVolume(_)
         | Message::ToggleMute
@@ -833,6 +870,8 @@ impl Playback {
             next_radio: 0,
             mpris: mpris::View::default(),
             reported: None,
+            deleted: Vec::new(),
+            served: Vec::new(),
         };
         playback.mpris = playback.mpris_now();
         playback
@@ -1147,7 +1186,38 @@ impl Playback {
                     None => vec![],
                 }
             }
+            Message::Served(track_id, format) => {
+                // Only the current track's is still worth keeping.
+                let current = self.current().map(|track| track.id);
+                self.served
+                    .retain(|&(id, _)| Some(id) == current && id != track_id);
+                self.served.push((track_id, format));
+                vec![]
+            }
             Message::Reset => self.reset(),
+            Message::SourceDeleted(deleted) => self.source_deleted(deleted),
+        }
+    }
+
+    /// A playlist is gone: stop reading the rest of it, should it be the
+    /// source, and keep "Playing from" from leading to it.
+    fn source_deleted(&mut self, deleted: SourceRef) -> Vec<Effect> {
+        let filling = self.fill_id();
+        let rollback = self.rollback.as_mut().map(|r| &mut r.listening);
+        let plays = std::iter::once(&mut self.listening)
+            .chain(rollback)
+            .filter_map(|listening| listening.source.as_mut())
+            .filter(|play| play.source.kind.same_place(&deleted));
+        for play in plays {
+            play.fill = None;
+        }
+        if !self.is_deleted(&deleted) {
+            self.deleted.push(deleted);
+        }
+        if filling.is_some() && self.fill_id().is_none() {
+            vec![Effect::CancelFill]
+        } else {
+            vec![]
         }
     }
 
@@ -1167,6 +1237,7 @@ impl Playback {
         self.rate_limited = None;
         self.radio = None;
         self.rollback = None;
+        self.deleted.clear();
         effects
     }
 
@@ -1343,6 +1414,15 @@ impl Playback {
         self.listening.current.as_ref().map(|entry| &entry.track)
     }
 
+    /// What TIDAL served for the current track, once it said.
+    pub fn format(&self) -> Option<&Format> {
+        let id = self.current()?.id;
+        self.served
+            .iter()
+            .find(|(served, _)| *served == id)
+            .map(|(_, format)| format)
+    }
+
     /// Where the current track comes from.
     pub fn playing_from(&self) -> Option<&Source> {
         self.listening
@@ -1378,6 +1458,14 @@ impl Playback {
             .history
             .iter()
             .map(|entry| (entry.id, &entry.track))
+    }
+
+    /// Whether the user deleted this playlist, so "Playing from" leads
+    /// nowhere.
+    pub fn is_deleted(&self, source: &SourceRef) -> bool {
+        self.deleted
+            .iter()
+            .any(|deleted| deleted.same_place(source))
     }
 
     /// The Playback source, which stays while a queued entry plays.

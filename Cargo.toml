@@ -57,6 +57,8 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 tokio = "1"
+# fontdb's: reads variable fonts' weight axis (`fonts.rs`).
+ttf-parser = "0.25"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 

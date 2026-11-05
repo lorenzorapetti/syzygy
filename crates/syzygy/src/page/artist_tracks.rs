@@ -7,7 +7,7 @@ use std::sync::Arc;
 use syzygy_catalog::{Artist, Paged, Read, Track};
 
 use super::paged::List;
-use super::track_list::{self, Columns};
+use super::track_list::{self, Columns, Hover, Mark};
 use super::{Action, Link, Load, NowPlaying, PADDING, Remote, Viewport, play_buttons};
 use crate::images::Images;
 use crate::library::Library;
@@ -29,6 +29,8 @@ pub struct State {
     /// For the artist's name.
     artist: Remote<Artist>,
     tracks: List<Track>,
+    /// The track the pointer is over, by its place in the list.
+    hover: Hover,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +49,10 @@ pub enum Message {
     /// Play the loaded tracks, from one by its place or all of them.
     Play(Start),
     TogglePlay,
+    /// The pointer came over the row with this key.
+    Hovered(usize),
+    /// The pointer left the row with this key.
+    Left(usize),
     Retry,
 }
 
@@ -56,6 +62,7 @@ impl State {
             id,
             artist: Remote::Loading,
             tracks: List::new(),
+            hover: Hover::default(),
         };
         let action = Action::Batch(vec![
             Action::Load(artist(id)),
@@ -94,6 +101,14 @@ impl State {
                 }
             },
             Message::TogglePlay => Action::TogglePlay,
+            Message::Hovered(key) => {
+                self.hover.entered(key);
+                Action::None
+            }
+            Message::Left(key) => {
+                self.hover.left(key);
+                Action::None
+            }
             Message::Retry => {
                 self.tracks = List::new();
                 let tracks = Action::Load(Load::ArtistTracks(self.id));
@@ -105,6 +120,10 @@ impl State {
                 Action::Batch(vec![tracks, Action::Load(artist(self.id))])
             }
         }
+    }
+
+    pub fn shows_track(&self, track_id: u64) -> bool {
+        self.tracks.items().iter().any(|track| track.id == track_id)
     }
 
     pub fn view<'a>(
@@ -150,19 +169,23 @@ impl State {
                 track_list::header(COLUMNS),
                 |i| {
                     let track = &tracks[i];
-                    let row = track_list::track(
+                    let mark = Mark::of(track, now_playing, self.hover.over(i));
+                    let row = track_list::marked(
                         images,
                         i + 1,
                         track,
                         COLUMNS,
                         allow_explicit,
+                        mark,
                         library.liked(track),
                     );
                     track_list::playable_track(
                         row.map(Message::Link),
-                        track,
-                        now_playing,
+                        mark,
                         Message::Play(Start::Track(i)),
+                        i,
+                        Message::Hovered,
+                        Message::Left,
                     )
                 },
             );

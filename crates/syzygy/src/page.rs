@@ -34,7 +34,7 @@ use syzygy_catalog::{Album, Artist, Kind, Mix, Read, Shelf, Track, TrackSort};
 use crate::icons::{Icon, filled, icon};
 use crate::images::{self, Images};
 use crate::library::{Favorite, Library};
-use crate::playback::{Continuation, PlayRequest, Source, SourceRef, Start};
+use crate::playback::{Continuation, PlayRequest, Playback, Source, SourceRef, Start};
 use crate::settings::{Settings, Sort};
 use crate::style;
 
@@ -356,9 +356,29 @@ pub enum Link {
     },
     /// A heart, or a menu's like: like (`true`) or unlike.
     Favorite(Box<Favorite>, bool),
+    /// Open one of the Library's dialogs.
+    Ask(Box<crate::library::Ask>),
+    /// "Add to playlist", from the menu item or button on screen at the
+    /// rectangle.
+    AddToPlaylist(Box<crate::library::Tracks>, iced::Rectangle),
+    /// "Remove from playlist", from an Own playlist's track row.
+    RemoveTrack(Box<crate::library::Removal>),
+    /// "Move to folder", from the menu item on screen at the rectangle.
+    MoveToFolder(Box<crate::library::Placed>, iced::Rectangle),
 }
 
 impl Link {
+    /// "Add to playlist" for `tracks`, from where its item or button is.
+    pub fn add_to_playlist(tracks: crate::library::Tracks) -> impl Fn(iced::Rectangle) -> Link {
+        move |at| Link::AddToPlaylist(Box::new(tracks.clone()), at)
+    }
+
+    /// "Move to folder" for a playlist where it's listed, from where its
+    /// item is.
+    pub fn move_to_folder(placed: crate::library::Placed) -> impl Fn(iced::Rectangle) -> Link {
+        move |at| Link::MoveToFolder(Box::new(placed.clone()), at)
+    }
+
     pub fn follow(self) -> Action {
         match self {
             Link::CoverWanted(url) => Action::FetchImages(vec![url]),
@@ -371,6 +391,20 @@ impl Link {
             Link::QueueCard { card, next } => Action::QueueCard { card, next },
             Link::Favorite(favorite, on) => {
                 Action::Library(crate::library::Message::Favorite(*favorite, on))
+            }
+            Link::Ask(ask) => Action::Library(crate::library::Message::Ask(*ask)),
+            Link::AddToPlaylist(tracks, at) => Action::Library(crate::library::Message::Pick {
+                tracks: *tracks,
+                at,
+            }),
+            Link::RemoveTrack(removal) => {
+                Action::Library(crate::library::Message::RemoveTrack(*removal))
+            }
+            Link::MoveToFolder(placed, at) => {
+                Action::Library(crate::library::Message::PickFolder {
+                    playlist: *placed,
+                    at,
+                })
             }
         }
     }
@@ -460,7 +494,7 @@ impl Page {
             (Page::ArtistTracks(state), Message::ArtistTracks(message)) => state.update(message),
             (Page::ArtistViewAll(state), Message::ArtistViewAll(message)) => state.update(message),
             (Page::Mix(state), Message::Mix(message)) => state.update(message),
-            (Page::Playlist(state), Message::Playlist(message)) => state.update(message),
+            (Page::Playlist(state), Message::Playlist(message)) => state.update(message, library),
             (Page::Favorites(state), Message::Favorites(message)) => state.update(message, library),
             (Page::Library(state), Message::Library(message)) => state.update(message),
             (Page::Search(state), Message::Search(message)) => state.update(message),
@@ -477,8 +511,26 @@ impl Page {
 
     /// The Library's pending edits changed.
     pub fn library_changed(&mut self, library: &Library) {
-        if let Page::Favorites(state) = self {
-            state.library_changed(library);
+        match self {
+            Page::Favorites(state) => state.library_changed(library),
+            Page::Playlist(state) => state.library_changed(library),
+            _ => {}
+        }
+    }
+
+    /// TIDAL took the track at `index` of the playlist's own order out: a
+    /// Page showing the playlist drops its row.
+    pub fn removed(&mut self, uuid: &str, track: &Track, index: usize, library: &Library) {
+        if let Page::Playlist(state) = self {
+            state.removed(uuid, track, index, library);
+        }
+    }
+
+    /// A track recommended for the playlist didn't go in: a Page showing
+    /// the playlist recommends it again.
+    pub fn not_added(&mut self, uuid: &str, track: Track) {
+        if let Page::Playlist(state) = self {
+            state.not_added(uuid, track);
         }
     }
 
@@ -488,6 +540,7 @@ impl Page {
         match self {
             Page::Library(state) => state.refresh(tags),
             Page::Favorites(state) => state.refresh(tags),
+            Page::Playlist(state) => state.refresh(tags),
             _ => Action::None,
         }
     }
@@ -505,7 +558,11 @@ impl Page {
     pub fn shows_track(&self, track_id: u64) -> bool {
         match self {
             Page::Album(state) => state.shows_track(track_id),
+            Page::Artist(state) => state.shows_track(track_id),
+            Page::ArtistTracks(state) => state.shows_track(track_id),
+            Page::Mix(state) => state.shows_track(track_id),
             Page::Playlist(state) => state.shows_track(track_id),
+            Page::Favorites(state) => state.shows_track(track_id),
             _ => false,
         }
     }
@@ -917,8 +974,11 @@ pub fn with_rest(mut request: PlayRequest, more: bool) -> PlayRequest {
 }
 
 /// Where "Playing from" leads: the source's Page, or for a track played on
-/// its own, its album's.
-pub fn source_route(source: &Source, track: &Track) -> Option<Route> {
+/// its own, its album's. Nowhere once the user has deleted the source.
+pub fn source_route(playback: &Playback, source: &Source, track: &Track) -> Option<Route> {
+    if playback.is_deleted(&source.kind) {
+        return None;
+    }
     let preview = || {
         Some(Preview {
             title: source.name.clone(),

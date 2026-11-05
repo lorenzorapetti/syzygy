@@ -1,21 +1,23 @@
 //! The menus tracks and cards open on right-click, and a Page header's
 //! "…" button that opens its item's card menu on a left click. A menu is
-//! built from sections of items, so later Library items (adding to a
-//! playlist, moving to a Folder) slot in as sections of their own.
+//! built from sections of items. "Add to playlist" and "Move to folder"
+//! open the Shell's popovers beside the item, so it knows where on screen
+//! it is.
 
 use iced::advanced::widget::{Operation, Tree};
 use iced::advanced::{Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer};
-use iced::widget::{Column, button, container, row, rule, text};
+use iced::widget::{Column, button, container, mouse_area, row, rule, space, text};
 use iced::{
     Alignment, Border, Color, Element, Event, Length, Rectangle, Shadow, Size, Theme, Vector,
 };
 use iced_aw::ContextMenu;
-use syzygy_catalog::Track;
 use syzygy_catalog::home_feed::{Card, Target};
+use syzygy_catalog::library::Folder;
+use syzygy_catalog::{Playlist, Track};
 
 use super::{Link, Preview, Route, cards};
 use crate::icons::{Icon, filled, icon};
-use crate::library::Favorite;
+use crate::library::{Ask, Favorite, Placed, Removal, Tracks};
 use crate::style;
 
 const WIDTH: f32 = 240.0;
@@ -30,6 +32,11 @@ pub struct Item {
     link: Option<Link>,
     /// Drawn filled in the accent, as a Favorite's heart.
     lit: bool,
+    /// Under the label: why it's disabled.
+    hint: Option<&'static str>,
+    /// Its link is made from where the item is on screen, and it opens
+    /// what comes next beside it.
+    anchored: Option<Box<dyn Fn(Rectangle) -> Link>>,
 }
 
 impl Item {
@@ -39,7 +46,25 @@ impl Item {
             label,
             link,
             lit: false,
+            hint: None,
+            anchored: None,
         }
+    }
+}
+
+/// "Add to playlist ▸": the picker of an Own playlist for `tracks`.
+fn add_to_playlist(tracks: Tracks) -> Item {
+    Item {
+        anchored: Some(Box::new(Link::add_to_playlist(tracks))),
+        ..Item::new(Icon::ListMusic, "Add to playlist", None)
+    }
+}
+
+/// "Move to folder ▸": the Folders an Own playlist can go to.
+fn move_to_folder(placed: Placed) -> Item {
+    Item {
+        anchored: Some(Box::new(Link::move_to_folder(placed))),
+        ..Item::new(Icon::FolderInput, "Move to folder", None)
     }
 }
 
@@ -65,6 +90,17 @@ pub fn more<'a>(sections: impl Fn() -> Vec<Vec<Item>> + 'a) -> Element<'a, Link>
         });
     Element::new(LeftClick {
         content: with_menu(dots.into(), sections),
+    })
+}
+
+/// `trigger`, opening the menu `panel` builds on a left click, as a
+/// dropdown.
+pub fn dropdown<'a, Message: Clone + 'a>(
+    trigger: impl Into<Element<'a, Message>>,
+    panel: impl Fn() -> Element<'a, Message> + 'a,
+) -> Element<'a, Message> {
+    Element::new(LeftClick {
+        content: ContextMenu::new(trigger, panel).style(backdrop).into(),
     })
 }
 
@@ -117,7 +153,10 @@ pub fn track(track: &Track, liked: Option<bool>) -> Vec<Vec<Item>> {
                 Some(Link::AddToQueue(track.clone())),
             ),
         ],
-        vec![favorite(Favorite::track(track), liked)],
+        vec![
+            favorite(Favorite::track(track), liked),
+            add_to_playlist(Tracks::These(vec![track.clone()])),
+        ],
         vec![
             Item::new(
                 Icon::Radio,
@@ -130,17 +169,100 @@ pub fn track(track: &Track, liked: Option<bool>) -> Vec<Vec<Item>> {
     ]
 }
 
+/// A track's menu in an Own playlist: [`track`]'s, and taking it out.
+pub fn own_track(track: &Track, liked: Option<bool>, removal: &Removal) -> Vec<Vec<Item>> {
+    let mut sections = self::track(track, liked);
+    sections.push(vec![Item::new(
+        Icon::Trash2,
+        "Remove from playlist",
+        Some(Link::RemoveTrack(Box::new(removal.clone()))),
+    )]);
+    sections
+}
+
 /// A card's menu: playing what it leads to, and liking or following it.
 /// Empty for a card with nothing to play, such as a video's.
 pub fn card(card: &Card, liked: Option<bool>) -> Vec<Vec<Item>> {
     if !cards::plays(card) {
         return vec![];
     }
-    let like = Favorite::card(card).map(|favorite| vec![self::favorite(favorite, liked)]);
+    let like = Favorite::card(card).map(|favorite| self::favorite(favorite, liked));
     // A track's card plays on its own: the Loved tracks are liked from
     // its rows.
     let like = like.filter(|_| !matches!(card.target, Target::Track(_)));
-    std::iter::once(playing(card)).chain(like).collect()
+    // An artist's tracks don't go into a playlist all at once.
+    let add = (!matches!(card.target, Target::Artist(_)))
+        .then(|| add_to_playlist(Tracks::Card(card.clone())));
+    let library: Vec<Item> = like.into_iter().chain(add).collect();
+    std::iter::once(playing(card))
+        .chain((!library.is_empty()).then_some(library))
+        .collect()
+}
+
+/// An Own playlist's menu: playing it, adding its tracks to another,
+/// editing it, moving it to a Folder when it's listed in one (or at the
+/// top level: `listed_in`), and deleting it. It isn't a Favorite, so it
+/// has no like.
+pub fn own_playlist(
+    card: &Card,
+    playlist: &Playlist,
+    listed_in: Option<Option<String>>,
+) -> Vec<Vec<Item>> {
+    let ask = |ask| Some(Link::Ask(Box::new(ask)));
+    let edit = Item::new(
+        Icon::Pencil,
+        "Edit playlist",
+        ask(Ask::EditPlaylist(playlist.clone())),
+    );
+    let moving = listed_in.map(|folder| {
+        move_to_folder(Placed {
+            playlist: playlist.clone(),
+            folder,
+        })
+    });
+    let delete = Item::new(
+        Icon::Trash2,
+        "Delete playlist",
+        ask(Ask::DeletePlaylist(playlist.clone())),
+    );
+    vec![
+        playing(card),
+        vec![add_to_playlist(Tracks::Card(card.clone()))],
+        std::iter::once(edit)
+            .chain(moving)
+            .chain([delete])
+            .collect(),
+    ]
+}
+
+/// A Folder's menu: a new playlist in it, renaming it, and deleting it,
+/// which only an empty Folder offers (as TIDAL's own app does).
+pub fn folder(folder: &Folder, deletable: bool) -> Vec<Vec<Item>> {
+    let ask = |ask| Some(Link::Ask(Box::new(ask)));
+    let delete = Item::new(
+        Icon::Trash2,
+        "Delete folder",
+        deletable.then(|| Link::Ask(Box::new(Ask::DeleteFolder(folder.clone())))),
+    );
+    let delete = Item {
+        hint: (!deletable).then_some("Move or delete its playlists first"),
+        ..delete
+    };
+    vec![
+        vec![
+            Item::new(
+                Icon::Plus,
+                "New playlist in folder",
+                ask(Ask::NewPlaylistIn(folder.clone())),
+            ),
+            Item::new(
+                Icon::Pencil,
+                "Rename folder",
+                ask(Ask::RenameFolder(folder.clone())),
+            ),
+        ],
+        vec![delete],
+    ]
 }
 
 /// Play now, Play next and Add to queue, for all of what a card leads to.
@@ -172,10 +294,12 @@ fn favorite(favorite: Favorite, liked: Option<bool>) -> Item {
         (false, false, false) => (Icon::Heart, "Add to my library"),
     };
     Item {
-        icon,
-        label,
-        link: liked.map(|liked| Link::Favorite(Box::new(favorite), !liked)),
         lit: on,
+        ..Item::new(
+            icon,
+            label,
+            liked.map(|liked| Link::Favorite(Box::new(favorite), !liked)),
+        )
     }
 }
 
@@ -198,14 +322,32 @@ fn menu<'a>(sections: Vec<Vec<Item>>) -> Element<'a, Link> {
         }
         items = items.extend(section.into_iter().map(item));
     }
-    container(items)
-        .padding([4, 0])
-        .width(WIDTH)
-        .style(panel)
+    let panel = container(items).padding([4, 0]).width(WIDTH).style(panel);
+    // The whole panel is the menu's, dividers and padding too: where the
+    // menu has no interaction of its own, the Page under it would take the
+    // cursor and light up a row.
+    mouse_area(panel)
+        .interaction(mouse::Interaction::Idle)
         .into()
 }
 
 fn item<'a>(item: Item) -> Element<'a, Link> {
+    if let Some(anchored) = item.anchored {
+        let line = row![
+            icon(item.icon, ICON_SIZE, style::TEXT_MUTED),
+            text(item.label).size(14).color(style::TEXT_SECONDARY),
+            space::horizontal(),
+            icon(Icon::ChevronRight, 14.0, style::TEXT_MUTED),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center);
+        let button = button(line)
+            .padding([10, 16])
+            .width(Length::Fill)
+            .style(item_style)
+            .on_press(());
+        return anchor(button, anchored);
+    }
     let enabled = item.link.is_some();
     let glyph = match (enabled, item.lit) {
         (true, true) => filled(item.icon, ICON_SIZE, style::ACCENT),
@@ -217,9 +359,14 @@ fn item<'a>(item: Item) -> Element<'a, Link> {
     } else {
         style::TEXT_DISABLED
     };
-    let line = row![glyph, text(item.label).size(14).color(label)]
-        .spacing(12)
-        .align_y(Alignment::Center);
+    let words = Column::new()
+        .push(text(item.label).size(14).color(label))
+        .push(
+            item.hint
+                .map(|hint| text(hint).size(12).color(style::TEXT_MUTED)),
+        )
+        .spacing(2);
+    let line = row![glyph, words].spacing(12).align_y(Alignment::Center);
     button(line)
         .padding([10, 16])
         .width(Length::Fill)
@@ -228,7 +375,7 @@ fn item<'a>(item: Item) -> Element<'a, Link> {
         .into()
 }
 
-fn item_style(_theme: &Theme, status: button::Status) -> button::Style {
+pub fn item_style(_theme: &Theme, status: button::Status) -> button::Style {
     let background = match status {
         button::Status::Hovered | button::Status::Pressed => Some(style::HL_FAINT.into()),
         _ => None,
@@ -249,7 +396,7 @@ fn divider(_theme: &Theme) -> rule::Style {
     }
 }
 
-fn panel(_theme: &Theme) -> container::Style {
+pub fn panel(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(style::BG_SURFACE.into()),
         border: Border {
@@ -267,12 +414,12 @@ fn panel(_theme: &Theme) -> container::Style {
 }
 
 /// Its content, with a left click on it taken as a right click: a context
-/// menu that opens like a button.
-struct LeftClick<'a> {
-    content: Element<'a, Link>,
+/// menu that opens like a button, when the click is released.
+struct LeftClick<'a, Message> {
+    content: Element<'a, Message>,
 }
 
-impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
+impl<Message> Widget<Message, Theme, iced::Renderer> for LeftClick<'_, Message> {
     fn size(&self) -> Size<Length> {
         self.content.as_widget().size()
     }
@@ -337,14 +484,18 @@ impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
         cursor: mouse::Cursor,
         renderer: &iced::Renderer,
         clipboard: &mut dyn Clipboard,
-        shell: &mut Shell<'_, Link>,
+        shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let left = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
-        let event = if *event == left && cursor.is_over(layout.bounds()) {
-            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
-        } else {
-            event
+        // The menu opens as the click ends, not as it starts: an open menu
+        // closes on a left button's release, which would be this click's.
+        let over = cursor.is_over(layout.bounds());
+        let event = match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if over => return,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) if over => {
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+            }
+            _ => event,
         };
         self.content.as_widget_mut().update(
             &mut tree.children[0],
@@ -380,13 +531,132 @@ impl Widget<Link, Theme, iced::Renderer> for LeftClick<'_> {
         renderer: &iced::Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Link, Theme, iced::Renderer>> {
+    ) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
             renderer,
             viewport,
             translation,
+        )
+    }
+}
+
+/// `content`, whose press publishes the message `to` makes from where it
+/// is on screen: a popover opened by it goes beside it.
+pub fn anchor<'a, Message: 'a>(
+    content: impl Into<Element<'a, ()>>,
+    to: impl Fn(Rectangle) -> Message + 'a,
+) -> Element<'a, Message> {
+    Element::new(Anchor {
+        content: content.into(),
+        to: Box::new(to),
+    })
+}
+
+struct Anchor<'a, Message> {
+    content: Element<'a, ()>,
+    to: Box<dyn Fn(Rectangle) -> Message + 'a>,
+}
+
+impl<Message> Widget<Message, Theme, iced::Renderer> for Anchor<'_, Message> {
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        let mut pressed = Vec::new();
+        let mut inner = Shell::new(&mut pressed);
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            &mut inner,
+            viewport,
+        );
+        let at = layout.bounds();
+        shell.merge(inner, |()| (self.to)(at));
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
         )
     }
 }

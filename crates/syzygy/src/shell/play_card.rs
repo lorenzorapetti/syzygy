@@ -1,11 +1,12 @@
 //! A card's play button: read the tracks of what the card leads to, then
-//! play all of them, as Shuffle says.
+//! play all of them, as Shuffle says. "Add to playlist" reads them all
+//! too, to the end of a long list.
 
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use std::sync::Arc;
 use syzygy_catalog::home_feed::{Card, Target};
-use syzygy_catalog::{Catalog, Error, Paged, Read, TrackSort};
+use syzygy_catalog::{Catalog, Error, Paged, Read, Track, TrackSort};
 
 use crate::page::{self, Context};
 use crate::playback::{PlayRequest, SourceRef, Start};
@@ -62,6 +63,55 @@ pub fn read(
             Target::Video(_) | Target::None => None,
         })
     }
+}
+
+/// Every track of what a card leads to, in its own order: an album's, a
+/// playlist's, a mix's, the Loved tracks or the card's track. None for an
+/// artist's card, whose tracks aren't one list, or a video's.
+pub fn tracks(
+    card: Card,
+    catalog: &Catalog,
+    user_id: Option<u64>,
+) -> impl Future<Output = Result<Vec<Track>, Arc<Error>>> + Send + 'static {
+    let catalog = catalog.clone();
+    async move {
+        Ok(match card.target {
+            Target::Album(id) => page::album_tracks(id, &first(catalog.album(id)).await?),
+            Target::Playlist(uuid) => {
+                let first_page = first(catalog.playlist_tracks(&uuid, None)).await?;
+                all(first_page, |offset| {
+                    catalog.more_playlist_tracks(&uuid, None, offset)
+                })
+                .await?
+            }
+            Target::Mix(id) => first(catalog.mix(&id)).await?.tracks,
+            Target::Favorites => {
+                let user_id = user_id.ok_or_else(|| Arc::new(Error::UnknownUser))?;
+                let first_page = first(catalog.loved_tracks(user_id, None)).await?;
+                all(first_page, |offset| {
+                    catalog.more_loved_tracks(user_id, None, offset)
+                })
+                .await?
+            }
+            Target::Track(id) => vec![catalog.track(id).await?],
+            Target::Artist(_) | Target::Video(_) | Target::None => vec![],
+        })
+    }
+}
+
+/// A paged list from its first page to its end.
+async fn all<F>(first: Paged<Track>, more: impl Fn(usize) -> F) -> Result<Vec<Track>, Arc<Error>>
+where
+    F: Future<Output = Result<Paged<Track>, Arc<Error>>>,
+{
+    let mut tracks = first.items;
+    let mut has_more = first.has_more;
+    while has_more {
+        let page = more(tracks.len()).await?;
+        has_more = page.has_more && !page.items.is_empty();
+        tracks.extend(page.items);
+    }
+    Ok(tracks)
 }
 
 /// The first value a Catalog read gives: the cached copy if there is one,

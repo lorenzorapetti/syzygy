@@ -2,7 +2,7 @@
 //! spacers standing in for the rest, so a list of thousands scrolls as
 //! smoothly as a short one. Covers are asked for only by rows that are built.
 
-use iced::widget::{Row, button, column, container, row, space, text};
+use iced::widget::{Row, button, column, container, mouse_area, row, space, text};
 use iced::{Alignment, Element, Length, Theme};
 use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,6 +11,7 @@ use syzygy_catalog::{Direction, Track, TrackOrder, TrackSort};
 use super::{Link, NowPlaying, Preview, Route, Viewport, artists, cover, duration, link, menu};
 use crate::icons::{Icon, filled, icon};
 use crate::images::Images;
+use crate::library::Removal;
 use crate::style;
 
 /// Every row is this tall, so where a row sits is a multiplication.
@@ -25,6 +26,9 @@ const DATE_WIDTH: f32 = 110.0;
 const TIME_WIDTH: f32 = 56.0;
 /// The heart before the time.
 const HEART_WIDTH: f32 = 32.0;
+/// The button after the time that adds a recommended track to the
+/// playlist on screen.
+const ADD_WIDTH: f32 = 32.0;
 
 /// What a list shows besides each track's title and artists.
 #[derive(Debug, Clone, Copy)]
@@ -166,17 +170,43 @@ pub enum Mark {
 }
 
 impl Mark {
-    /// The mark for `track`'s row, given what plays and whether the pointer
-    /// is over the row.
+    /// `track`'s mark: whether it's the current track, playing or not, and
+    /// whether the pointer is over its row.
     pub fn of(track: &Track, now_playing: Option<NowPlaying>, hovered: bool) -> Self {
         match now_playing.filter(|now| now.track_id == track.id) {
             Some(NowPlaying {
                 playing: Some(at), ..
-            }) => Self::Playing(at),
-            Some(_) => Self::Current { hovered },
-            None if hovered => Self::Hovered,
-            None => Self::None,
+            }) => Mark::Playing(at),
+            Some(_) => Mark::Current { hovered },
+            None if hovered => Mark::Hovered,
+            None => Mark::None,
         }
+    }
+
+    pub fn is_current(self) -> bool {
+        matches!(self, Mark::Current { .. } | Mark::Playing(_))
+    }
+}
+
+/// The row the pointer is over, by a key its Page picks, for the rows'
+/// marks.
+#[derive(Debug, Default)]
+pub struct Hover(Option<usize>);
+
+impl Hover {
+    pub fn entered(&mut self, key: usize) {
+        self.0 = Some(key);
+    }
+
+    /// Only the row it left: the next row's arrival may come first.
+    pub fn left(&mut self, key: usize) {
+        if self.0 == Some(key) {
+            self.0 = None;
+        }
+    }
+
+    pub fn over(&self, key: usize) -> bool {
+        self.0 == Some(key)
     }
 }
 
@@ -204,6 +234,46 @@ pub fn track<'a>(
     )
 }
 
+/// [`marked`] in one of the user's Own playlists, whose menu can take it
+/// out.
+#[allow(clippy::too_many_arguments)]
+pub fn own<'a>(
+    images: &'a Images,
+    number: usize,
+    track: &'a Track,
+    columns: Columns,
+    allow_explicit: bool,
+    mark: Mark,
+    liked: Option<bool>,
+    removal: Removal,
+) -> Element<'a, Link> {
+    let row = line(images, number, track, columns, allow_explicit, mark, liked);
+    menu::with_menu(row, move || menu::own_track(track, liked, &removal))
+}
+
+/// A recommended track's `row`, ended by a button that sends `add`, which
+/// adds the track to the playlist on screen. Its header is
+/// [`header_with_add`].
+pub fn with_add<'a, Message: Clone + 'a>(
+    row: Element<'a, Message>,
+    add: Message,
+) -> Element<'a, Message> {
+    let add = button(container(icon(Icon::ListPlus, 18.0, style::TEXT_MUTED)).center(ADD_WIDTH))
+        .padding(0)
+        .style(style::icon_button)
+        .on_press(add);
+    row![container(row).width(Length::Fill), add]
+        .align_y(Alignment::Center)
+        .into()
+}
+
+/// The column titles over rows [`with_add`] ends.
+pub fn header_with_add<'a, Message: Clone + 'a>(columns: Columns) -> Element<'a, Message> {
+    row![container(header(columns)).width(Length::Fill)]
+        .push(space().width(ADD_WIDTH))
+        .into()
+}
+
 /// [`track`], with its number marked.
 pub fn marked<'a>(
     images: &'a Images,
@@ -214,7 +284,21 @@ pub fn marked<'a>(
     mark: Mark,
     liked: Option<bool>,
 ) -> Element<'a, Link> {
-    let current = matches!(mark, Mark::Current { .. } | Mark::Playing(_));
+    let row = line(images, number, track, columns, allow_explicit, mark, liked);
+    menu::with_menu(row, move || menu::track(track, liked))
+}
+
+/// A track's row, without its menu.
+fn line<'a>(
+    images: &'a Images,
+    number: usize,
+    track: &'a Track,
+    columns: Columns,
+    allow_explicit: bool,
+    mark: Mark,
+    liked: Option<bool>,
+) -> Element<'a, Link> {
+    let current = mark.is_current();
     let dimmed = !track.available || (track.explicit && !allow_explicit);
     let date_added = columns.date_added.then(|| {
         let date = track
@@ -306,8 +390,7 @@ pub fn marked<'a>(
         )
         .spacing(16)
         .align_y(Alignment::Center);
-    let row = container(line).padding([0, 16]).center_y(ROW_HEIGHT);
-    menu::with_menu(row.into(), move || menu::track(track, liked))
+    container(line).padding([0, 16]).center_y(ROW_HEIGHT).into()
 }
 
 /// A row's heart: filled in the accent for a Loved track.
@@ -375,15 +458,21 @@ pub fn playable<'a, Message: Clone + 'a>(
         .into()
 }
 
-/// [`playable`] for `track`'s row, lit while it's the current track.
+/// [`playable`] for a track's row, marked `mark` and lit while it's the
+/// current track. It sends `entered` and `left` with `key` as the pointer
+/// comes over it and leaves, for its Page's [`Hover`].
 pub fn playable_track<'a, Message: Clone + 'a>(
     row: Element<'a, Message>,
-    track: &Track,
-    now_playing: Option<NowPlaying>,
+    mark: Mark,
     on_play: Message,
+    key: usize,
+    entered: fn(usize) -> Message,
+    left: fn(usize) -> Message,
 ) -> Element<'a, Message> {
-    let current = now_playing.is_some_and(|now| now.track_id == track.id);
-    playable(row, on_play, current)
+    mouse_area(playable(row, on_play, mark.is_current()))
+        .on_enter(entered(key))
+        .on_exit(left(key))
+        .into()
 }
 
 /// A heading that takes a row's place, as "Volume 2".
