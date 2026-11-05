@@ -35,3 +35,6 @@ jobs:
 
       - name: Build package
         run: nix build -L .#packages.${{ matrix.system }}.syzygy
+
+      - name: Build dev shell
+        run: nix run --inputs-from . nixpkgs#devenv -- build shell
