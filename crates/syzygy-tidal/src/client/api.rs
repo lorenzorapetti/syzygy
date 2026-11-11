@@ -364,6 +364,54 @@ impl TidalClient {
         Ok(())
     }
 
+    /// Take the item at `from` in the playlist's own order so it lands
+    /// before the item now at `to_index`: indices count the item still in
+    /// its old place, and the item count puts it last. As tidalapi's
+    /// `move_by_indices` sends it.
+    pub async fn reorder_playlist_item(
+        &self,
+        playlist_id: &str,
+        from: u32,
+        to_index: u32,
+    ) -> Result<(), Error> {
+        // First, get the playlist ETag which is required for modifications
+        let client = self.http();
+        let req = client
+            .get(format!("{}/playlists/{}", TIDAL_API_URL, playlist_id))
+            .query(&[("countryCode", self.country_code().as_str())]);
+        let head_response = self.send_authed(req).await?;
+
+        let etag = head_response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("*")
+            .to_string();
+
+        let client = self.http();
+        let req = client
+            .post(format!(
+                "{}/playlists/{}/items/{}",
+                TIDAL_API_URL, playlist_id, from
+            ))
+            .header("If-None-Match", &etag)
+            .query(&[("countryCode", self.country_code().as_str())])
+            .form(&[("toIndex", to_index.to_string())]);
+        let response = self.send_authed(req).await?;
+
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        Ok(())
+    }
+
     pub async fn delete_playlist(&self, playlist_id: &str) -> Result<(), Error> {
         // First, get the playlist ETag which is required for modifications
         let client = self.http();

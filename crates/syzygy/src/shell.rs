@@ -119,8 +119,13 @@ pub enum Message {
     Scrolled(PageId, Viewport),
     DismissToast(ToastId),
     /// Escape: it closes the modal, or else the maximized player, the
-    /// drawer or the search dropdown.
+    /// drawer, a drag or "Edit order" on the Page, or the search dropdown.
     Escape,
+    /// The left mouse button was let go, wherever it was: a dragged Queue
+    /// row or playlist row drops.
+    Released,
+    /// A drag near an edge of the Page scrolls it, a tick at a time.
+    Autoscroll,
     /// The explicit-consent modal was answered.
     Consent(consent::Answer),
     /// The header's settings button.
@@ -273,6 +278,11 @@ impl Shell {
         self.run_action(action, services, context)
     }
 
+    /// Whether a drag near an edge of the Page scrolls it.
+    pub fn autoscrolls(&self) -> bool {
+        self.current.page.autoscrolls()
+    }
+
     /// The window came back into focus.
     pub fn focused(&mut self, services: &Services, context: &Context) -> Task<app::Message> {
         let action = self.current.page.focused();
@@ -290,6 +300,7 @@ impl Shell {
                 self.viewport_height = viewport.height;
                 if id == self.current.id {
                     self.current.offset = viewport.offset;
+                    self.current.page.scrolled(viewport);
                 }
             }
             Message::DismissToast(id) => self.toasts.dismiss(id),
@@ -300,7 +311,8 @@ impl Shell {
                     || self.picker.take().is_some()
                     || self.mover.take().is_some()
                     || std::mem::take(&mut self.maximized)
-                    || self.drawer.close();
+                    || self.drawer.close()
+                    || self.current.page.escape();
                 if !closed {
                     let effect = self.search.update(search::Message::Escape);
                     return self.run_search(effect, services, context);
@@ -415,6 +427,21 @@ impl Shell {
                         self.run_action(link.follow(), services, context)
                     }
                 };
+            }
+            Message::Released => {
+                let drawer =
+                    self.update(Message::Drawer(drawer::Message::Dropped), services, context);
+                let action = self.current.page.released(&self.library);
+                let page = self.run_action(action, services, context);
+                return Task::batch([drawer, page]);
+            }
+            Message::Autoscroll => {
+                if let Some(by) = self.current.page.autoscroll() {
+                    return operation::scroll_by(
+                        PAGE_SCROLL,
+                        scrollable::AbsoluteOffset { x: 0.0, y: by },
+                    );
+                }
             }
             Message::Drawer(message) => {
                 let top = match message {
@@ -801,6 +828,15 @@ impl Shell {
                             services.catalog.remove_track(user_id, &uuid, index),
                             done,
                         ),
+                        library::Mutation::ReorderTrack {
+                            user_id,
+                            uuid,
+                            from,
+                            to,
+                        } => Task::perform(
+                            services.catalog.reorder_track(user_id, &uuid, from, to),
+                            done,
+                        ),
                         library::Mutation::CreateFolder {
                             user_id,
                             name,
@@ -871,6 +907,17 @@ impl Shell {
                     self.current
                         .page
                         .removed(&uuid, &track, index, &self.library);
+                    Task::none()
+                }
+                library::Effect::Reordered {
+                    uuid,
+                    track,
+                    from,
+                    to,
+                } => {
+                    self.current
+                        .page
+                        .reordered(&uuid, &track, (from, to), &self.library);
                     Task::none()
                 }
                 library::Effect::NotAdded { uuid, track } => {

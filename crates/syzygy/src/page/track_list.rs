@@ -247,7 +247,15 @@ pub fn own<'a>(
     liked: Option<bool>,
     removal: Removal,
 ) -> Element<'a, Link> {
-    let row = line(images, number, track, columns, allow_explicit, mark, liked);
+    let row = line(
+        images,
+        number,
+        track,
+        columns,
+        allow_explicit,
+        mark,
+        Some(liked),
+    );
     menu::with_menu(row, move || menu::own_track(track, liked, &removal))
 }
 
@@ -284,11 +292,34 @@ pub fn marked<'a>(
     mark: Mark,
     liked: Option<bool>,
 ) -> Element<'a, Link> {
-    let row = line(images, number, track, columns, allow_explicit, mark, liked);
+    let row = line(
+        images,
+        number,
+        track,
+        columns,
+        allow_explicit,
+        mark,
+        Some(liked),
+    );
     menu::with_menu(row, move || menu::track(track, liked))
 }
 
-/// A track's row, without its menu.
+/// A track's row while its list is being reordered: no heart, no menu and
+/// no links, as the row is only for dragging.
+pub fn still<'a, Message: 'a>(
+    images: &'a Images,
+    number: usize,
+    track: &'a Track,
+    columns: Columns,
+    allow_explicit: bool,
+    mark: Mark,
+) -> Element<'a, Message> {
+    line(images, number, track, columns, allow_explicit, mark, None)
+        .map(|_| unreachable!("a still row has no links"))
+}
+
+/// A track's row, without its menu. `liked` is `None` for a [`still`]
+/// row, which has no heart and no links.
 fn line<'a>(
     images: &'a Images,
     number: usize,
@@ -296,7 +327,7 @@ fn line<'a>(
     columns: Columns,
     allow_explicit: bool,
     mark: Mark,
-    liked: Option<bool>,
+    liked: Option<Option<bool>>,
 ) -> Element<'a, Link> {
     let current = mark.is_current();
     let dimmed = !track.available || (track.explicit && !allow_explicit);
@@ -344,6 +375,10 @@ fn line<'a>(
         .width(Length::FillPortion(4));
     let album = columns.album.then(|| {
         let album: Element<'a, Link> = match &track.album {
+            Some(album) if liked.is_none() => text(&album.title)
+                .size(13)
+                .wrapping(text::Wrapping::None)
+                .into(),
             Some(album) => link(
                 text(&album.title).size(13).wrapping(text::Wrapping::None),
                 Link::Open(Route::Album {
@@ -380,7 +415,10 @@ fn line<'a>(
     let line = row![container(lead).width(NUMBER_WIDTH), title]
         .push(album)
         .push(date_added)
-        .push(heart(track, liked))
+        .push(match liked {
+            Some(liked) => heart(track, liked),
+            None => space().width(HEART_WIDTH).into(),
+        })
         .push(
             text(duration(track.duration))
                 .size(14)

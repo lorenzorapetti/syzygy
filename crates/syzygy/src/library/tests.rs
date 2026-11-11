@@ -1435,6 +1435,168 @@ fn a_refused_sorted_removal_drops_the_removals_waiting_behind_it() {
     assert_eq!(shown_ids(&library, "p-1", &rows(), true), vec![1, 2, 3, 4]);
 }
 
+// Track reorders.
+
+/// Take `track`, at `from` in the rows shown, to the slot before the row
+/// now at `to`.
+fn reorder(playlist: &Playlist, track: Track, from: usize, to: usize) -> Message {
+    Message::ReorderTrack(Reorder {
+        playlist: playlist.clone(),
+        track,
+        from,
+        to,
+    })
+}
+
+#[test]
+fn a_track_reorder_shows_in_its_new_place_at_once_and_goes_out() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+
+    // The first track, dropped between the third and the fourth.
+    let effects = library.update(reorder(&playlist, entry(1, "2024-01-01"), 0, 3));
+
+    let (_, mutation) = mutation(&effects);
+    assert_eq!(
+        mutation,
+        Mutation::ReorderTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            from: 0,
+            to: 3,
+        }
+    );
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![2, 3, 1, 4]);
+    // The count doesn't change.
+    assert_eq!(
+        offered(&library, &playlists(&[playlist])),
+        vec![("Mix".to_string(), 4)]
+    );
+}
+
+#[test]
+fn a_track_reorder_upwards_lands_before_the_row_it_was_dropped_on() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+
+    library.update(reorder(&playlist, entry(4, "2024-01-04"), 3, 1));
+
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 4, 2, 3]);
+}
+
+#[test]
+fn a_track_dropped_where_it_was_is_no_reorder() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+
+    assert!(
+        library
+            .update(reorder(&playlist, entry(2, "2024-01-02"), 1, 1))
+            .is_empty()
+    );
+    assert!(
+        library
+            .update(reorder(&playlist, entry(2, "2024-01-02"), 1, 2))
+            .is_empty()
+    );
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn a_refused_track_reorder_puts_the_row_back_with_a_toast() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (id, _) = mutation(&library.update(reorder(&playlist, entry(1, "2024-01-01"), 0, 3)));
+
+    let effects = library.update(Message::Done(id, Err(failure())));
+
+    assert_eq!(
+        toasts(&effects),
+        vec!["Couldn't reorder \u{201c}Track 1\u{201d} in \u{201c}Mix\u{201d}"]
+    );
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![1, 2, 3, 4]);
+}
+
+#[test]
+fn a_track_reorder_waits_behind_a_removal_and_its_indices_still_name_the_right_tracks() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (removal, _) =
+        mutation(&library.update(remove(&playlist, entry(2, "2024-01-02"), At::Index(1))));
+
+    // Rows show 1, 3, 4: track 4 is third, dropped first.
+    let effects = library.update(reorder(&playlist, entry(4, "2024-01-04"), 2, 0));
+    assert_eq!(mutations(&effects), 0);
+    assert_eq!(shown_ids(&library, "p-1", &rows(), false), vec![4, 1, 3]);
+
+    let effects = library.update(Message::Done(removal, Ok(())));
+    let (_, next) = mutation(&effects);
+    assert_eq!(
+        next,
+        Mutation::ReorderTrack {
+            user_id: USER,
+            uuid: "p-1".to_string(),
+            from: 2,
+            to: 0,
+        }
+    );
+    // The Page drops the removed row; the reorder still shows over it.
+    let dropped: Vec<Track> = rows().into_iter().filter(|track| track.id != 2).collect();
+    assert_eq!(shown_ids(&library, "p-1", &dropped, false), vec![4, 1, 3]);
+}
+
+#[test]
+fn a_landed_track_reorder_leaves_the_rows_to_the_page_and_reads_the_playlist_again() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    let (id, _) = mutation(&library.update(reorder(&playlist, entry(1, "2024-01-01"), 0, 3)));
+
+    let effects = library.update(Message::Done(id, Ok(())));
+
+    assert!(effects.contains(&Effect::Reordered {
+        uuid: "p-1".to_string(),
+        track: entry(1, "2024-01-01"),
+        from: 0,
+        to: 3,
+    }));
+    assert!(effects.contains(&Effect::Refresh(vec![
+        "folders".to_string(),
+        "playlist:p-1".to_string(),
+    ])));
+    // The Page has reordered what it loaded, so it's shown as it is.
+    let reordered = vec![
+        entry(2, "2024-01-02"),
+        entry(3, "2024-01-03"),
+        entry(1, "2024-01-01"),
+        entry(4, "2024-01-04"),
+    ];
+    assert_eq!(
+        shown_ids(&library, "p-1", &reordered, false),
+        vec![2, 3, 1, 4]
+    );
+}
+
+#[test]
+fn tracks_are_reordered_only_in_own_playlists_that_tidal_has_made() {
+    let mut library = library(&[], &[]);
+    let theirs = PlaylistFields::new().playlist("p-1".to_string(), USER + 1);
+
+    assert!(
+        library
+            .update(reorder(&theirs, entry(1, "2024-01-01"), 0, 3))
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_sorted_list_shows_no_pending_track_reorder() {
+    let mut library = library(&[], &[]);
+    let playlist = own_with("p-1", "Mix", 4);
+    library.update(reorder(&playlist, entry(1, "2024-01-01"), 0, 3));
+
+    assert_eq!(shown_ids(&library, "p-1", &rows(), true), vec![1, 2, 3, 4]);
+}
+
 // Folders.
 
 fn folder(id: &str, name: &str, playlists: u32) -> Folder {

@@ -13,7 +13,7 @@ use syzygy_catalog::home_feed::Cover;
 /// The hero is always this tall, so what's under it sits at a known place.
 pub const HEIGHT: f32 = 232.0;
 /// How round a square cover's corners are, bigger than a card's.
-const RADIUS: f32 = 8.0;
+pub const RADIUS: f32 = 8.0;
 
 /// `lines` go under the title. A round cover is an artist's.
 pub fn view<'a>(
@@ -34,12 +34,12 @@ pub fn view<'a>(
 }
 
 /// The hero with `art` in the cover's place.
-pub fn with_art<'a>(
-    art: Element<'a, Link>,
+pub fn with_art<'a, Message: 'a>(
+    art: Element<'a, Message>,
     kind: &'a str,
     title: &'a str,
-    lines: Vec<Element<'a, Link>>,
-) -> Element<'a, Link> {
+    lines: Vec<Element<'a, Message>>,
+) -> Element<'a, Message> {
     let details = column![
         text(kind)
             .size(12)

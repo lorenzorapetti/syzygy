@@ -1,8 +1,15 @@
 //! The Playlist Page: a playlist's tracks a page at a time, sorted by TIDAL
 //! and filtered here, then the tracks TIDAL recommends for it.
+//!
+//! On an Own playlist, "Edit order" lets the user drag a track to another
+//! place in the Own order, one Track reorder per drag. It shows the rows in
+//! the Own order unfiltered, so a row's place is its index in the
+//! playlist, and a drop goes between two loaded rows.
 
-use iced::widget::{Column, button, column, container, row, space, text, text_input};
-use iced::{Alignment, Element, Length};
+use iced::widget::{
+    Column, button, column, container, mouse_area, row, space, stack, text, text_input,
+};
+use iced::{Alignment, Element, Length, Point, mouse};
 use std::sync::Arc;
 use syzygy_catalog::home_feed::{Card, Target};
 use syzygy_catalog::{Paged, Playlist, Read, Track, TrackOrder, TrackSort};
@@ -15,7 +22,7 @@ use super::{
 };
 use crate::icons::{Icon, icon};
 use crate::images::Images;
-use crate::library::{At, Favorite, Library, Removal};
+use crate::library::{At, Favorite, Library, Removal, Reorder};
 use crate::playback::{Continuation, SourceRef, Start};
 use crate::settings::Sort;
 use crate::style;
@@ -25,6 +32,12 @@ const FILTER_HEIGHT: f32 = 40.0;
 const FILTER_WIDTH: f32 = 360.0;
 /// Where the track list starts.
 const LIST_TOP: f32 = PADDING + hero::HEIGHT + SPACING + FILTER_HEIGHT + SPACING;
+/// How far the pointer moves with the button down before a row is dragged.
+const DRAG_THRESHOLD: f32 = 4.0;
+/// How near the top or bottom of the viewport a drag scrolls the Page.
+const EDGE: f32 = 64.0;
+/// How far a drag at the very edge scrolls the Page each tick.
+const EDGE_SPEED: f32 = 16.0;
 /// How many recommendations show at a time, and how many are read at once.
 const RECOMMENDATIONS_SHOWN: usize = 10;
 const RECOMMENDATIONS_READ: usize = syzygy_catalog::PAGE_SIZE as usize;
@@ -49,6 +62,60 @@ pub struct State {
     /// The recommendation the pointer is over, by its place among those
     /// showing.
     recommendation_hover: Hover,
+    /// "Edit order" is on. It's off whenever the Page opens.
+    ordering: Option<Ordering>,
+}
+
+/// "Edit order" while it's on: where the pointer is and the row it holds.
+#[derive(Debug, Default)]
+struct Ordering {
+    /// The pointer's height down the Page, as last seen over it.
+    pointer: Option<f32>,
+    /// The part of the Page in view, as of the pointer's last move or the
+    /// last scroll.
+    viewport: Viewport,
+    grab: Option<Grab>,
+}
+
+/// A row the button went down on: dragged once the pointer has moved past
+/// [`DRAG_THRESHOLD`].
+#[derive(Debug, Clone, Copy)]
+struct Grab {
+    /// Its place in the rows.
+    from: usize,
+    /// The pointer's height down the Page as the button went down.
+    start: f32,
+    dragging: bool,
+}
+
+impl Ordering {
+    /// The row being dragged, by its place.
+    fn dragging(&self) -> Option<usize> {
+        self.grab.filter(|grab| grab.dragging).map(|grab| grab.from)
+    }
+
+    /// The slot a drag would drop in among `rows` loaded rows: before the
+    /// row at it, or after the last. Only loaded rows are dropped between.
+    fn slot(&self, rows: usize) -> Option<usize> {
+        self.dragging()?;
+        let y = self.pointer? - LIST_TOP - track_list::HEADER_HEIGHT;
+        Some(((y / track_list::ROW_HEIGHT).round().max(0.0) as usize).min(rows))
+    }
+
+    /// How far a drag near an edge of the viewport scrolls the Page now:
+    /// faster the nearer it is.
+    fn scroll(&self) -> Option<f32> {
+        self.dragging()?;
+        let pointer = self.pointer? - self.viewport.offset;
+        let height = self.viewport.height;
+        if pointer < EDGE {
+            Some(-EDGE_SPEED * (1.0 - pointer.max(0.0) / EDGE))
+        } else if height > 0.0 && pointer > height - EDGE {
+            Some(EDGE_SPEED * (1.0 - (height - pointer).max(0.0) / EDGE))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +162,16 @@ pub enum Message {
     /// The pointer left the row with this key.
     Left(usize),
     Retry,
+    /// Turn "Edit order" on or off.
+    EditOrder,
+    /// The pointer moved over the Page, while "Edit order" is on: where it
+    /// is, and the part of the Page in view.
+    Pointer(Point, Viewport),
+    /// The button went down on the row at this place, while "Edit order"
+    /// is on.
+    Grab(usize),
+    /// The mouse button was let go, wherever it was.
+    Released,
 }
 
 impl State {
@@ -118,6 +195,7 @@ impl State {
             recommendations: Recommendations::default(),
             hover: Hover::default(),
             recommendation_hover: Hover::default(),
+            ordering: None,
         };
         (state, action)
     }
@@ -228,6 +306,33 @@ impl State {
                 self.hover.left(key);
                 Action::None
             }
+            Message::EditOrder => self.edit_order(library),
+            Message::Pointer(point, viewport) => {
+                if let Some(ordering) = &mut self.ordering {
+                    ordering.pointer = Some(point.y);
+                    ordering.viewport = viewport;
+                    if let Some(grab) = &mut ordering.grab
+                        && (point.y - grab.start).abs() > DRAG_THRESHOLD
+                    {
+                        grab.dragging = true;
+                    }
+                }
+                Action::None
+            }
+            Message::Grab(from) => {
+                if let Some(ordering) = &mut self.ordering
+                    && let Some(start) = ordering.pointer
+                    && from < self.rows.len()
+                {
+                    ordering.grab = Some(Grab {
+                        from,
+                        start,
+                        dragging: false,
+                    });
+                }
+                Action::None
+            }
+            Message::Released => self.drop_row(),
             Message::Retry => {
                 self.reset_tracks();
                 let tracks = Action::Load(tracks(&self.uuid, self.sort));
@@ -241,6 +346,93 @@ impl State {
                 ])
             }
         }
+    }
+
+    /// Turn "Edit order" on or off. On, the rows show in the Own order,
+    /// which is saved as the playlist's sort so the old one doesn't come
+    /// back, unfiltered, and the recommendations hide.
+    fn edit_order(&mut self, library: &Library) -> Action {
+        if self.ordering.take().is_some() {
+            return Action::None;
+        }
+        if !self.is_own() {
+            return Action::None;
+        }
+        self.ordering = Some(Ordering::default());
+        self.filter.clear();
+        self.hover = Hover::default();
+        if self.sort.take().is_none() {
+            self.refilter(library);
+            return Action::None;
+        }
+        self.reset_tracks();
+        Action::Batch(vec![
+            Action::Load(tracks(&self.uuid, None)),
+            Action::SaveSort(Sort::Playlist(self.uuid.clone(), None)),
+        ])
+    }
+
+    /// The button was let go: a dragged row goes to the slot it's over.
+    fn drop_row(&mut self) -> Action {
+        let Some(ordering) = &mut self.ordering else {
+            return Action::None;
+        };
+        let slot = ordering.slot(self.rows.len());
+        let Some(grab) = ordering.grab.take() else {
+            return Action::None;
+        };
+        let (Some(to), Some(playlist)) = (slot, self.playlist.loaded()) else {
+            return Action::None;
+        };
+        let Some(&position) = self.rows.get(grab.from) else {
+            return Action::None;
+        };
+        Action::Library(crate::library::Message::ReorderTrack(Reorder {
+            playlist: playlist.clone(),
+            track: self.tracks.items()[position].clone(),
+            from: grab.from,
+            to,
+        }))
+    }
+
+    /// Escape: it cancels a drag, or else turns "Edit order" off. Whether
+    /// it did either.
+    pub fn escape(&mut self) -> bool {
+        match &mut self.ordering {
+            Some(ordering) if ordering.dragging().is_some() => {
+                ordering.grab = None;
+                true
+            }
+            Some(_) => {
+                self.ordering = None;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The Page scrolled: a pointer that stayed where it was on screen is
+    /// over another part of the Page now.
+    pub fn scrolled(&mut self, viewport: Viewport) {
+        if let Some(ordering) = &mut self.ordering {
+            if let Some(pointer) = &mut ordering.pointer {
+                *pointer += viewport.offset - ordering.viewport.offset;
+            }
+            ordering.viewport = viewport;
+        }
+    }
+
+    /// Whether a drag is near an edge of the viewport, so the Page
+    /// scrolls.
+    pub fn autoscrolls(&self) -> bool {
+        self.ordering
+            .as_ref()
+            .is_some_and(|ordering| ordering.scroll().is_some())
+    }
+
+    /// How far to scroll the Page now, for a drag near an edge.
+    pub fn autoscroll(&self) -> Option<f32> {
+        self.ordering.as_ref()?.scroll()
     }
 
     /// The playlist's title, as far as it's known.
@@ -301,6 +493,28 @@ impl State {
             if let Some(at) = crate::library::locate(&rows, track, index) {
                 page.items.remove(at);
                 page.total = page.total.map(|total| total.saturating_sub(1));
+            }
+        }
+        self.refilter(library);
+    }
+
+    /// TIDAL took `track` from `from` to the slot `to` of this playlist's
+    /// own order: what's loaded is reordered, so it stays a prefix of
+    /// TIDAL's. A sorted list is read in TIDAL's sort and stays.
+    pub fn reordered(
+        &mut self,
+        uuid: &str,
+        track: &Track,
+        (from, to): (usize, usize),
+        library: &Library,
+    ) {
+        if uuid != self.uuid || self.sort.is_some() {
+            return;
+        }
+        if let Remote::Loaded(page) = &mut self.tracks.list {
+            let rows: Vec<&Track> = page.items.iter().collect();
+            if let Some(at) = crate::library::locate(&rows, track, Some(from)) {
+                crate::library::reordered(&mut page.items, at, to);
             }
         }
         self.refilter(library);
@@ -374,13 +588,14 @@ impl State {
         let hero = match (&self.playlist, &self.preview) {
             (Remote::Loaded(playlist), _) => Some(self.hero(library.playlist(playlist), images)),
             (Remote::Loading, Some(preview)) => {
-                Some(hero::preview(images, "PLAYLIST", preview, false))
+                Some(hero::preview(images, "PLAYLIST", preview, false).map(Message::Link))
             }
             _ => None,
         };
+        let ordering = self.ordering.as_ref();
         let filter = container(
             text_input("Filter playlist on title, artist or album", &self.filter)
-                .on_input(Message::Filter)
+                .on_input_maybe(ordering.is_none().then_some(Message::Filter))
                 .padding([8, 14])
                 .size(14)
                 .width(FILTER_WIDTH)
@@ -430,11 +645,20 @@ impl State {
                     "Add tracks in TIDAL to see them here.",
                 );
             }
-            let header = track_list::sortable_header(columns, self.sort, Message::Sort);
+            let header = match ordering {
+                Some(_) => track_list::header(columns),
+                None => track_list::sortable_header(columns, self.sort, Message::Sort),
+            };
             let own = self.playlist.loaded().filter(|_| self.is_own());
             let list = track_list::view(self.shown.len(), LIST_TOP, viewport, header, |i| {
                 let place = self.shown[i];
                 let track = &tracks[self.rows[place]];
+                if let Some(ordering) = ordering {
+                    let mark = Mark::of(track, now_playing, false);
+                    let line =
+                        track_list::still(images, place + 1, track, columns, allow_explicit, mark);
+                    return self.draggable(ordering, line, place);
+                }
                 let liked = library.liked(track);
                 let number = place + 1;
                 let mark = Mark::of(track, now_playing, self.hover.over(place));
@@ -480,7 +704,8 @@ impl State {
             });
             let nothing_matches = (self.shown.is_empty() && !self.filter.trim().is_empty())
                 .then(|| empty("Nothing matches", "Try another title, artist or album."));
-            let all_loaded = self.tracks.list.loaded().is_some_and(|page| !page.has_more);
+            let all_loaded =
+                self.tracks.list.loaded().is_some_and(|page| !page.has_more) && ordering.is_none();
             Column::new()
                 .push(list)
                 .push(nothing_matches)
@@ -501,16 +726,99 @@ impl State {
             }
             _ => body,
         };
-        Column::new()
-            .push(hero.map(|hero| hero.map(Message::Link)))
+        let page = Column::new()
+            .push(hero)
             .push(filter)
             .push(body)
             .spacing(SPACING)
-            .padding(PADDING)
+            .padding(PADDING);
+        if ordering.is_none() {
+            return page.into();
+        }
+        // Where the pointer is, for the drag.
+        mouse_area(page)
+            .on_move(move |point| Message::Pointer(point, viewport))
             .into()
     }
 
-    fn hero<'a>(&'a self, playlist: &'a Playlist, images: &'a Images) -> Element<'a, Link> {
+    /// A row while "Edit order" is on: the button going down on it grabs
+    /// it. Dragged, it fades where it is, and a line marks the slot it
+    /// would drop in.
+    fn draggable<'a>(
+        &self,
+        ordering: &Ordering,
+        line: Element<'a, Message>,
+        place: usize,
+    ) -> Element<'a, Message> {
+        let dragged = ordering.dragging();
+        let slot = ordering
+            .slot(self.rows.len())
+            .filter(|&slot| dragged.is_some_and(|from| slot != from && slot != from + 1));
+        let edge = match slot {
+            Some(slot) if slot == place => Some(Alignment::Start),
+            Some(slot) if slot == place + 1 && slot == self.rows.len() => Some(Alignment::End),
+            _ => None,
+        };
+        let marker = edge.map(|edge| {
+            container(container(space()).width(Length::Fill).height(2).style(|_| {
+                container::Style {
+                    background: Some(style::ACCENT.into()),
+                    border: style::rounded(1.0),
+                    ..container::Style::default()
+                }
+            }))
+            .height(track_list::ROW_HEIGHT)
+            .align_y(edge)
+        });
+        let faded = (dragged == Some(place)).then(|| {
+            container(space())
+                .width(Length::Fill)
+                .height(track_list::ROW_HEIGHT)
+                .style(|_| container::Style {
+                    background: Some(
+                        iced::Color {
+                            a: 0.6,
+                            ..style::BG_BASE
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                })
+        });
+        let interaction = if dragged.is_some() {
+            mouse::Interaction::Grabbing
+        } else {
+            mouse::Interaction::Grab
+        };
+        mouse_area(stack![line].push(faded).push(marker))
+            .on_press(Message::Grab(place))
+            .interaction(interaction)
+            .into()
+    }
+
+    /// "Edit order", pressed while it's on, when it reads "Done".
+    fn edit_order_button<'a>(&self) -> Element<'a, Message> {
+        let on = self.ordering.is_some();
+        let label = if on { "Done" } else { "Edit order" };
+        button(
+            row![
+                icon(Icon::ArrowUpDown, 14.0, style::TEXT_PRIMARY),
+                text(label).size(13)
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 14])
+        .style(if on {
+            style::selected_tab
+        } else {
+            style::pill_button
+        })
+        .on_press(Message::EditOrder)
+        .into()
+    }
+
+    fn hero<'a>(&'a self, playlist: &'a Playlist, images: &'a Images) -> Element<'a, Message> {
         // sone names the user on their Own playlists; syzygy doesn't know
         // their name yet.
         let creator = if self.is_own() {
@@ -542,13 +850,17 @@ impl State {
             }),
             Some(text(facts).size(12).color(style::TEXT_MUTED).into()),
         ];
-        let lines = lines.into_iter().flatten().collect();
-        hero::view(
-            images,
+        let lines = lines
+            .into_iter()
+            .flatten()
+            .map(|line: Element<'a, Link>| line.map(Message::Link))
+            .chain(self.is_own().then(|| self.edit_order_button()))
+            .collect();
+        hero::with_art(
+            super::rounded_cover(images, playlist.cover.as_ref(), hero::HEIGHT, hero::RADIUS)
+                .map(Message::Link),
             "PLAYLIST",
             &playlist.title,
-            playlist.cover.as_ref(),
-            false,
             lines,
         )
     }
@@ -809,6 +1121,187 @@ mod tests {
         assert_eq!(ids, (10..20).collect::<Vec<u64>>());
         assert!(matches!(request.start, Start::Track(3)));
         assert!(request.continuation.is_none());
+    }
+
+    const USER: u64 = 7;
+
+    fn by_title() -> TrackSort {
+        TrackSort {
+            order: TrackOrder::Title,
+            direction: syzygy_catalog::Direction::Ascending,
+        }
+    }
+
+    /// The Page of an Own playlist with four tracks loaded, in `sort`'s
+    /// order, and the Library it shows.
+    fn own_page(sort: Option<TrackSort>) -> (State, Library) {
+        let mut settings = crate::settings::Settings::default();
+        if let Some(sort) = sort {
+            settings.save_sort(Sort::Playlist("p-1".to_string(), Some(sort)));
+        }
+        let context = Context {
+            user_id: Some(USER),
+            settings: &settings,
+        };
+        let (mut state, _) = State::new("p-1".to_string(), None, &context);
+        let (library, _) = Library::new(Some(USER), &settings);
+        let playlist = syzygy_catalog::PlaylistFields::new().playlist("p-1".to_string(), USER);
+        state.update(Message::Playlist(Read::Fresh(Ok(playlist))), &library);
+        let page = Paged {
+            items: batch(4),
+            has_more: false,
+            cursor: None,
+            total: Some(4),
+        };
+        state.update(
+            Message::Tracks {
+                sort,
+                read: Read::Fresh(Ok(page)),
+            },
+            &library,
+        );
+        (state, library)
+    }
+
+    /// Where the row at `place` sits down the Page, halfway down it.
+    fn row_y(place: f32) -> f32 {
+        LIST_TOP + track_list::HEADER_HEIGHT + (place + 0.5) * track_list::ROW_HEIGHT
+    }
+
+    fn pointer(y: f32) -> Message {
+        Message::Pointer(
+            Point::new(100.0, y),
+            Viewport {
+                offset: 0.0,
+                height: 10_000.0,
+            },
+        )
+    }
+
+    #[test]
+    fn edit_order_clears_the_sort_and_saves_the_own_order_and_the_filter() {
+        let (mut state, library) = own_page(Some(by_title()));
+        state.update(Message::Filter("T".to_string()), &library);
+
+        let Action::Batch(actions) = state.update(Message::EditOrder, &library) else {
+            panic!("the own order is read and saved");
+        };
+
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::Load(Load::PlaylistTracks { sort: None, .. })
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            Action::SaveSort(Sort::Playlist(uuid, None)) if uuid == "p-1"
+        )));
+        assert_eq!(state.sort, None);
+        assert_eq!(state.filter, "");
+    }
+
+    #[test]
+    fn edit_order_is_only_for_own_playlists() {
+        let settings = crate::settings::Settings::default();
+        let context = Context {
+            user_id: Some(USER),
+            settings: &settings,
+        };
+        let (mut state, _) = State::new("p-1".to_string(), None, &context);
+        let (library, _) = Library::new(Some(USER), &settings);
+        let theirs = syzygy_catalog::PlaylistFields::new().playlist("p-1".to_string(), USER + 1);
+        state.update(Message::Playlist(Read::Fresh(Ok(theirs))), &library);
+
+        state.update(Message::EditOrder, &library);
+
+        assert!(state.ordering.is_none());
+    }
+
+    #[test]
+    fn a_dragged_row_is_reordered_to_the_slot_it_is_let_go_over() {
+        let (mut state, library) = own_page(None);
+        state.update(Message::EditOrder, &library);
+
+        state.update(pointer(row_y(0.0)), &library);
+        state.update(Message::Grab(0), &library);
+        // Between the third row and the fourth.
+        state.update(pointer(row_y(2.6)), &library);
+        let action = state.update(Message::Released, &library);
+
+        let Action::Library(crate::library::Message::ReorderTrack(reorder)) = action else {
+            panic!("the drop reorders the track");
+        };
+        assert_eq!(reorder.track.id, 0);
+        assert_eq!((reorder.from, reorder.to), (0, 3));
+    }
+
+    #[test]
+    fn a_press_that_hardly_moves_drags_nothing() {
+        let (mut state, library) = own_page(None);
+        state.update(Message::EditOrder, &library);
+
+        state.update(pointer(row_y(1.0)), &library);
+        state.update(Message::Grab(1), &library);
+        state.update(pointer(row_y(1.0) + 2.0), &library);
+
+        assert!(matches!(
+            state.update(Message::Released, &library),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn escape_cancels_a_drag_then_turns_edit_order_off() {
+        let (mut state, library) = own_page(None);
+        state.update(Message::EditOrder, &library);
+        state.update(pointer(row_y(0.0)), &library);
+        state.update(Message::Grab(0), &library);
+        state.update(pointer(row_y(3.0)), &library);
+
+        assert!(state.escape());
+        assert!(state.ordering.is_some());
+        assert!(matches!(
+            state.update(Message::Released, &library),
+            Action::None
+        ));
+
+        assert!(state.escape());
+        assert!(state.ordering.is_none());
+        assert!(!state.escape());
+    }
+
+    #[test]
+    fn a_drag_near_the_bottom_of_the_viewport_scrolls_down() {
+        let (mut state, library) = own_page(None);
+        state.update(Message::EditOrder, &library);
+        let viewport = Viewport {
+            offset: 0.0,
+            height: 800.0,
+        };
+        state.update(Message::Pointer(Point::new(0.0, 500.0), viewport), &library);
+        state.update(Message::Grab(0), &library);
+        state.update(Message::Pointer(Point::new(0.0, 790.0), viewport), &library);
+
+        assert!(state.autoscroll().is_some_and(|by| by > 0.0));
+        state.update(Message::Pointer(Point::new(0.0, 400.0), viewport), &library);
+        assert_eq!(state.autoscroll(), None);
+    }
+
+    #[test]
+    fn a_still_pointer_keeps_scrolling_and_drops_where_it_is_after_the_scroll() {
+        let (mut state, library) = own_page(None);
+        state.update(Message::EditOrder, &library);
+        let at = |offset| Viewport {
+            offset,
+            height: 800.0,
+        };
+        state.update(Message::Pointer(Point::new(0.0, 500.0), at(0.0)), &library);
+        state.update(Message::Grab(0), &library);
+        // Near the bottom edge, then the Page scrolls under the pointer.
+        state.update(Message::Pointer(Point::new(0.0, 790.0), at(0.0)), &library);
+        state.scrolled(at(200.0));
+
+        assert!(state.autoscroll().is_some_and(|by| by > 0.0));
+        assert_eq!(state.ordering.as_ref().unwrap().pointer, Some(990.0));
     }
 
     #[test]

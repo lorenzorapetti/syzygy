@@ -137,7 +137,7 @@ pub struct PageId(pub u64);
 
 /// The part of the Page in view: how far down it's scrolled and how tall
 /// the window shows it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Viewport {
     pub offset: f32,
     pub height: f32,
@@ -518,11 +518,66 @@ impl Page {
         }
     }
 
+    /// Escape, with no overlay to close: whether the Page took it, to
+    /// cancel a drag or turn "Edit order" off.
+    pub fn escape(&mut self) -> bool {
+        match self {
+            Page::Playlist(state) => state.escape(),
+            _ => false,
+        }
+    }
+
+    /// The Page scrolled.
+    pub fn scrolled(&mut self, viewport: Viewport) {
+        if let Page::Playlist(state) = self {
+            state.scrolled(viewport);
+        }
+    }
+
+    /// The mouse button was let go, wherever it was.
+    pub fn released(&mut self, library: &Library) -> Action {
+        match self {
+            Page::Playlist(state) => state.update(playlist::Message::Released, library),
+            _ => Action::None,
+        }
+    }
+
+    /// Whether a drag is near an edge of the viewport, so the Page
+    /// scrolls on its own.
+    pub fn autoscrolls(&self) -> bool {
+        match self {
+            Page::Playlist(state) => state.autoscrolls(),
+            _ => false,
+        }
+    }
+
+    /// How far to scroll the Page now, for a drag near an edge.
+    pub fn autoscroll(&self) -> Option<f32> {
+        match self {
+            Page::Playlist(state) => state.autoscroll(),
+            _ => None,
+        }
+    }
+
     /// TIDAL took the track at `index` of the playlist's own order out: a
     /// Page showing the playlist drops its row.
     pub fn removed(&mut self, uuid: &str, track: &Track, index: usize, library: &Library) {
         if let Page::Playlist(state) = self {
             state.removed(uuid, track, index, library);
+        }
+    }
+
+    /// TIDAL took `track` from `from` to the slot `to` of the playlist's
+    /// own order: a Page showing the playlist reorders what it loaded.
+    pub fn reordered(
+        &mut self,
+        uuid: &str,
+        track: &Track,
+        (from, to): (usize, usize),
+        library: &Library,
+    ) {
+        if let Page::Playlist(state) = self {
+            state.reordered(uuid, track, (from, to), library);
         }
     }
 

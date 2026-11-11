@@ -329,8 +329,15 @@ pub fn subscription(state: &State) -> Subscription<Message> {
             } else {
                 Subscription::none()
             };
+            // A drag near an edge of the Page scrolls it.
+            let autoscroll = match &app.phase {
+                Phase::Shell(shell) if shell.autoscrolls() => iced::time::every(AUTOSCROLL)
+                    .map(|_| Message::Shell(shell::Message::Autoscroll)),
+                _ => Subscription::none(),
+            };
             match app.phase {
                 Phase::Shell(_) => Subscription::batch([
+                    autoscroll,
                     close,
                     tidal,
                     audio,
@@ -1180,6 +1187,8 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_DELAY: Duration = Duration::from_secs(2);
 /// How often the position is read while playing.
 const TICK: Duration = Duration::from_millis(250);
+/// How often a drag near an edge of the Page scrolls it.
+const AUTOSCROLL: Duration = Duration::from_millis(16);
 /// How many more times a play tries a busy audio device, and how long it
 /// waits before each: 5 s in all, as sone.
 const DEVICE_TRIES: u32 = 10;
@@ -1269,10 +1278,10 @@ fn shell_events(event: Event, status: event::Status, _window: window::Id) -> Opt
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
             search(shell::search::Message::Pressed)
         }
-        // Wherever it's let go, a dragged Queue row drops.
-        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::Shell(
-            shell::Message::Drawer(shell::drawer::Message::Dropped),
-        )),
+        // Wherever it's let go, a dragged Queue row or playlist row drops.
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            Some(Message::Shell(shell::Message::Released))
+        }
         Event::Keyboard(keyboard::Event::KeyPressed {
             key: keyboard::Key::Named(key::Named::Escape),
             ..

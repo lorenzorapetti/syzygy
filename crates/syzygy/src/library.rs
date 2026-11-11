@@ -33,6 +33,14 @@
 //! hidden and the rows after it move up; once it has, the Page drops it
 //! from what it loaded.
 //!
+//! A Track reorder takes one track to another slot in an Own playlist's
+//! own order, by the indices the rows show it at, as TIDAL takes them:
+//! `from` is where it is, and `to` the slot it's dropped in, before the
+//! row at `to` with the track still at `from`. It shows in its new place
+//! at once, and waits behind the playlist's other edits so its indices
+//! still name the same rows. Once TIDAL has taken it, the Page reorders
+//! what it loaded.
+//!
 //! Folders are created, renamed and deleted the same way, and Own
 //! playlists are moved between them. A new Folder shows at once as a
 //! placeholder that can't be opened, with the playlist it was made for
@@ -158,6 +166,8 @@ pub enum Edit {
     Add(Adding),
     /// A track taken out of an Own playlist.
     Remove(Removing),
+    /// A track taken to another place in an Own playlist's own order.
+    Reorder(Reordering),
     /// A new Folder, as an [`Item::Folder`] with a placeholder id, and the
     /// playlist moved into it as it's made. It shows until a read of the
     /// top level lists the Folder TIDAL made: its id isn't guessed.
@@ -250,6 +260,57 @@ impl Removing {
             Item::Folder(_) | Item::Card(_) => unreachable!("tracks come out of a playlist"),
         }
     }
+}
+
+/// A track to take to another place in an Own playlist's own order, as
+/// a drop on its Page asks. Indices are in the rows as shown, with the
+/// pending edits laid over them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reorder {
+    pub playlist: Playlist,
+    pub track: Track,
+    /// Where the track is.
+    pub from: usize,
+    /// The slot it's dropped in: before the row at `to`, counted with the
+    /// track still at `from`. The row count is the end.
+    pub to: usize,
+}
+
+impl Reorder {
+    /// Whether it leaves the track where it is.
+    fn stays(&self) -> bool {
+        self.to == self.from || self.to == self.from + 1
+    }
+}
+
+/// A track on its way to another place in an Own playlist.
+#[derive(Debug, Clone)]
+pub struct Reordering {
+    /// The playlist as an [`Item::Playlist`], as last edited.
+    item: Item,
+    track: Track,
+    from: usize,
+    to: usize,
+}
+
+impl Reordering {
+    fn playlist(&self) -> &Playlist {
+        match &self.item {
+            Item::Playlist(playlist) => playlist,
+            Item::Folder(_) | Item::Card(_) => unreachable!("tracks are reordered in a playlist"),
+        }
+    }
+}
+
+/// Take the item at `from` to the slot before the one at `to`, counted
+/// with it still at `from`. A slot past the end puts it last.
+pub fn reordered<T>(items: &mut Vec<T>, from: usize, to: usize) {
+    if from >= items.len() {
+        return;
+    }
+    let item = items.remove(from);
+    let to = if to > from { to - 1 } else { to };
+    items.insert(to.min(items.len()), item);
 }
 
 /// Whether two rows are the same entry of a playlist: the same track,
@@ -358,6 +419,7 @@ impl Edit {
             Edit::Delete(playlist) => Target::playlist(&playlist.uuid),
             Edit::Add(adding) => Target::playlist(&adding.playlist().uuid),
             Edit::Remove(removing) => Target::playlist(&removing.playlist().uuid),
+            Edit::Reorder(reordering) => Target::playlist(&reordering.playlist().uuid),
             Edit::CreateFolder {
                 moving: Some(moving),
                 ..
@@ -395,6 +457,7 @@ impl Edit {
             Edit::Delete(playlist) => playlist_tags(&playlist.uuid),
             Edit::Add(adding) => playlist_tags(&adding.playlist().uuid),
             Edit::Remove(removing) => playlist_tags(&removing.playlist().uuid),
+            Edit::Reorder(reordering) => playlist_tags(&reordering.playlist().uuid),
             Edit::CreateFolder { .. }
             | Edit::RenameFolder { .. }
             | Edit::DeleteFolder(_)
@@ -408,6 +471,7 @@ impl Edit {
             Edit::Create(item, _) | Edit::Change(item) => Some(item),
             Edit::Add(adding) => Some(&adding.item),
             Edit::Remove(removing) => Some(&removing.item),
+            Edit::Reorder(reordering) => Some(&reordering.item),
             Edit::Move(moving) => Some(&moving.item),
             Edit::Favorite(..)
             | Edit::Delete(_)
@@ -464,6 +528,11 @@ impl Edit {
                 "Couldn't remove \u{201c}{}\u{201d} from \u{201c}{}\u{201d}",
                 short(&removing.track.title),
                 short(&removing.playlist().title)
+            ),
+            Edit::Reorder(reordering) => format!(
+                "Couldn't reorder \u{201c}{}\u{201d} in \u{201c}{}\u{201d}",
+                short(&reordering.track.title),
+                short(&reordering.playlist().title)
             ),
             Edit::CreateFolder { folder, .. } => {
                 format!("Couldn't create \u{201c}{}\u{201d}", title(folder))
@@ -613,6 +682,14 @@ pub enum Mutation {
         uuid: String,
         index: usize,
     },
+    /// Take the track at `from` in an Own playlist's own order to the
+    /// slot before the one at `to`, counted with it still at `from`.
+    ReorderTrack {
+        user_id: u64,
+        uuid: String,
+        from: usize,
+        to: usize,
+    },
     /// Make a Folder at the top level, with this playlist in it.
     CreateFolder {
         user_id: u64,
@@ -675,6 +752,8 @@ pub enum Message {
     AddRecommendation(Playlist, Track),
     /// Take a track out of an Own playlist.
     RemoveTrack(Removal),
+    /// Take a track to another place in an Own playlist's own order.
+    ReorderTrack(Reorder),
     /// An edit's mutation came back.
     Done(EditId, Result<(), Arc<syzygy_catalog::Error>>),
     /// A new playlist's mutation came back with the playlist TIDAL made.
@@ -734,6 +813,14 @@ pub enum Effect {
         uuid: String,
         track: Track,
         index: usize,
+    },
+    /// TIDAL took `track` from `from` to the slot `to` of the playlist's
+    /// own order: a Page showing it reorders what it loaded.
+    Reordered {
+        uuid: String,
+        track: Track,
+        from: usize,
+        to: usize,
     },
     /// A recommended track didn't go into the playlist with this uuid: its
     /// Page recommends it again.
@@ -962,6 +1049,18 @@ impl Library {
                     at,
                 }))
             }
+            Message::ReorderTrack(reorder) => {
+                if !self.editable(&reorder.playlist) || reorder.stays() {
+                    return vec![];
+                }
+                let shown = self.playlist(&reorder.playlist).clone();
+                self.push(Edit::Reorder(Reordering {
+                    item: Item::Playlist(shown),
+                    track: reorder.track,
+                    from: reorder.from,
+                    to: reorder.to,
+                }))
+            }
             Message::Done(id, Ok(())) => self.landed(id, None),
             Message::Done(id, Err(e))
             | Message::Created(id, Err(e))
@@ -1165,6 +1264,12 @@ impl Library {
                     return vec![Effect::ReadOrder(id, removing.playlist().uuid.clone())];
                 }
             },
+            Edit::Reorder(reordering) => Mutation::ReorderTrack {
+                user_id,
+                uuid: reordering.playlist().uuid.clone(),
+                from: reordering.from,
+                to: reordering.to,
+            },
             Edit::CreateFolder {
                 folder: Item::Folder(folder),
                 moving,
@@ -1236,6 +1341,12 @@ impl Library {
                 // A removal runs once its index is known.
                 At::Sorted => None,
             },
+            Edit::Reorder(reordering) => Some(Effect::Reordered {
+                uuid: reordering.playlist().uuid.clone(),
+                track: reordering.track.clone(),
+                from: reordering.from,
+                to: reordering.to,
+            }),
             _ => None,
         };
         let mut effects = self.next(&target);
@@ -1417,32 +1528,46 @@ impl Library {
     }
 
     /// The rows of a playlist's loaded `tracks` that aren't on their way
-    /// out, by their place in `tracks`. In the playlist's own order (not
-    /// `sorted`), a row's place among them is its index in the playlist.
+    /// out, by their place in `tracks`, in the order the pending Track
+    /// reorders put them. In the playlist's own order (not `sorted`), a
+    /// row's place among them is its index in the playlist. A sorted list
+    /// isn't reordered.
     pub fn rows(&self, uuid: &str, tracks: &[Track], sorted: bool) -> Vec<usize> {
         let mut rows: Vec<usize> = (0..tracks.len()).collect();
-        let removing = self
-            .pending
-            .iter()
-            .filter_map(|pending| match &pending.edit {
-                Edit::Remove(removing)
-                    if removing.playlist().uuid == uuid
-                        && !matches!(pending.state, Progress::Landed(_)) =>
+        let edits = self.pending.iter().filter_map(|pending| {
+            let landed = matches!(pending.state, Progress::Landed(_));
+            match &pending.edit {
+                Edit::Remove(removing) if removing.playlist().uuid == uuid && !landed => {
+                    Some(&pending.edit)
+                }
+                Edit::Reorder(reordering)
+                    if reordering.playlist().uuid == uuid && !landed && !sorted =>
                 {
-                    Some(removing)
+                    Some(&pending.edit)
                 }
                 _ => None,
-            });
-        // In the order they were asked for, as each index counts the
-        // removals before it.
-        for removing in removing {
-            let index = match removing.at {
-                At::Index(index) if !sorted => Some(index),
-                At::Index(_) | At::Sorted => None,
-            };
+            }
+        });
+        // In the order they were asked for, as each index counts the edits
+        // before it.
+        for edit in edits {
             let shown: Vec<&Track> = rows.iter().map(|&position| &tracks[position]).collect();
-            if let Some(at) = locate(&shown, &removing.track, index) {
-                rows.remove(at);
+            match edit {
+                Edit::Remove(removing) => {
+                    let index = match removing.at {
+                        At::Index(index) if !sorted => Some(index),
+                        At::Index(_) | At::Sorted => None,
+                    };
+                    if let Some(at) = locate(&shown, &removing.track, index) {
+                        rows.remove(at);
+                    }
+                }
+                Edit::Reorder(reordering) => {
+                    if let Some(at) = locate(&shown, &reordering.track, Some(reordering.from)) {
+                        reordered(&mut rows, at, reordering.to);
+                    }
+                }
+                _ => {}
             }
         }
         rows

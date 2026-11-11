@@ -738,6 +738,30 @@ impl Catalog {
         }
     }
 
+    /// Take the track at `from` in an Own playlist's own order to the slot
+    /// before the track at `to` (counted with it still at `from`; the
+    /// track count is the end). The playlist's reads and the user's lists
+    /// are stale after.
+    pub fn reorder_track(
+        &self,
+        user_id: u64,
+        uuid: &str,
+        from: usize,
+        to: usize,
+    ) -> impl Future<Output = Result<(), Arc<Error>>> + Send + 'static {
+        let tidal = self.tidal.clone();
+        let cache = self.cache.clone();
+        let uuid = uuid.to_string();
+        async move {
+            tidal
+                .reorder_playlist_item(&uuid, from as u32, to as u32)
+                .await
+                .map_err(|e| Arc::new(Error::from(e)))?;
+            invalidate_playlist(&cache, user_id, &uuid).await;
+            Ok(())
+        }
+    }
+
     /// Every track of a playlist in its own order, read from TIDAL now:
     /// where a removal finds its row's index. Not cached, as an index from
     /// an older read could take out the wrong track.
