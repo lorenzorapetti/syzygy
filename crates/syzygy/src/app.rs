@@ -19,12 +19,12 @@ use crate::events::EventSource;
 use crate::fill;
 use crate::identity::{DESKTOP_ENTRY, DISPLAY_NAME, MPRIS_BUS_NAME, Paths};
 use crate::images::{self, Images};
-use crate::inertia;
 use crate::login;
 use crate::page::{self, Context, PageId};
 use crate::persist;
 use crate::playback::{self, PlayError, Playback, Status};
 use crate::radio;
+use crate::scroll;
 use crate::session::{self, Session};
 use crate::settings::{self, Settings};
 use crate::shell::{self, Shell};
@@ -307,7 +307,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
             ),
         },
     };
-    inertia::inertial(view)
+    scroll::scrolling(view)
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {

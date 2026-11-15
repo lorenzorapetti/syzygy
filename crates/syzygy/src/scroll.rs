@@ -1,7 +1,8 @@
-//! Inertia for touchpad scrolling: a flick keeps scrolling after the
-//! fingers lift, slowing to a stop.
+//! How the window's scrollables scroll: further per mouse wheel notch
+//! than iced's default, and with inertia after a touchpad flick, which
+//! keeps scrolling after the fingers lift, slowing to a stop.
 //!
-//! iced's scrollables stop dead when the fingers do. [`inertial`] wraps
+//! iced's scrollables stop dead when the fingers do. [`scrolling`] wraps
 //! the whole window and, after a flick, keeps sending the scrollable under
 //! it more touchpad scrolling, a frame at a time. A mouse wheel's notches
 //! never glide.
@@ -14,14 +15,21 @@ use iced::{
     Element, Event, Length, Point, Rectangle, Size, Theme, Vector, keyboard, touch, window,
 };
 
-/// `content`, whose scrollables glide on after a touchpad flick.
-pub fn inertial<'a, Message: 'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    Element::new(Inertial {
+/// How many of iced's lines a mouse wheel notch scrolls. iced scrolls a
+/// line 60 px, which takes too many notches to get anywhere.
+const LINES_PER_NOTCH: f32 = 2.0;
+
+/// `content`, whose scrollables scroll further per wheel notch and glide
+/// on after a touchpad flick.
+pub fn scrolling<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Scrolling {
         content: content.into(),
     })
 }
 
-struct Inertial<'a, Message> {
+struct Scrolling<'a, Message> {
     content: Element<'a, Message>,
 }
 
@@ -33,7 +41,7 @@ struct State {
     at: Option<Point>,
 }
 
-impl<Message> Widget<Message, Theme, iced::Renderer> for Inertial<'_, Message> {
+impl<Message> Widget<Message, Theme, iced::Renderer> for Scrolling<'_, Message> {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -134,6 +142,22 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Inertial<'_, Message> {
             | Event::Keyboard(keyboard::Event::KeyPressed { .. }) => state.glide.stop(),
             _ => {}
         }
+
+        let notches;
+        let event = match event {
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x, y },
+            }) => {
+                notches = Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Lines {
+                        x: x * LINES_PER_NOTCH,
+                        y: y * LINES_PER_NOTCH,
+                    },
+                });
+                &notches
+            }
+            _ => event,
+        };
 
         self.content.as_widget_mut().update(
             &mut tree.children[0],
