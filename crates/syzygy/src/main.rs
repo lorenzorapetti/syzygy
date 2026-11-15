@@ -5,6 +5,7 @@ mod fonts;
 mod icons;
 mod identity;
 mod images;
+mod inertia;
 mod library;
 mod logging;
 mod login;

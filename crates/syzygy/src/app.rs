@@ -19,6 +19,7 @@ use crate::events::EventSource;
 use crate::fill;
 use crate::identity::{DESKTOP_ENTRY, DISPLAY_NAME, MPRIS_BUS_NAME, Paths};
 use crate::images::{self, Images};
+use crate::inertia;
 use crate::login;
 use crate::page::{self, Context, PageId};
 use crate::persist;
@@ -293,7 +294,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 }
 
 pub fn view(state: &State) -> Element<'_, Message> {
-    match state {
+    let view = match state {
         State::Fatal(error) => fatal(error),
         State::Running(app) => match &app.phase {
             Phase::Login(login) => login.view().map(Message::Login),
@@ -305,7 +306,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 app.frame,
             ),
         },
-    }
+    };
+    inertia::inertial(view)
 }
 
 pub fn subscription(state: &State) -> Subscription<Message> {
