@@ -4,6 +4,7 @@
   pkg-config,
   wrapGAppsNoGuiHook,
   alsa-lib,
+  aws-lc,
   glib-networking,
   gst_all_1,
   wayland,
@@ -59,6 +60,9 @@ in
       [
         # Bit-perfect ALSA output (alsa crate, as in sone/src-tauri)
         alsa-lib
+        # rustls's crypto provider (reqwest's default TLS) links it, so
+        # installing syzygy doesn't need it added from outside.
+        aws-lc
         glib-networking
       ]
       ++ gstPlugins;
